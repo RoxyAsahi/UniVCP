@@ -8,7 +8,7 @@ plugins {
 
 android {
     namespace = "me.rerere.ai"
-    compileSdk = 35
+    compileSdk = 37
 
     defaultConfig {
         minSdk = 26
@@ -48,14 +48,6 @@ android {
     tasks.withType<KotlinCompile>().configureEach {
         compilerOptions.optIn.add("kotlin.uuid.ExperimentalUuidApi")
         compilerOptions.optIn.add("kotlin.time.ExperimentalTime")
-    }
-    testOptions {
-        unitTests.all {
-            it.exclude(
-                "**/ClaudeProviderMessageTest.class",
-                "**/ChatCompletionsAPIMessageTest.class"
-            )
-        }
     }
 }
 

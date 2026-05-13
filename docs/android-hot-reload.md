@@ -34,6 +34,12 @@ C:\VCP\Eric\UniVCP\bubble-renderer\src\main\assets\renderer
 
 The renderer shell polls `__version.txt`; when the script sees a file change, the Android WebView reloads and re-renders the current bubble.
 
+On the rikkaHub baseline branch, debug builds install as:
+
+```text
+com.univcp.android.debug
+```
+
 Stop the background renderer server with:
 
 ```powershell

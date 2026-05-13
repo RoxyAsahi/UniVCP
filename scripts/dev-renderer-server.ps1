@@ -13,7 +13,7 @@ $RendererDir = Join-Path $RepoRoot "bubble-renderer\src\main\assets\renderer"
 $VersionFile = Join-Path $RendererDir "__version.txt"
 $RuntimeDir = Join-Path $RepoRoot ".gradle"
 $RuntimeFile = Join-Path $RuntimeDir "univcp-renderer-dev.json"
-$PackageName = "com.univcp.android"
+$PackageName = "com.univcp.android.debug"
 
 if ($Stop) {
     if (-not (Test-Path -LiteralPath $RuntimeFile)) {
