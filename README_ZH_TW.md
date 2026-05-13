@@ -1,10 +1,10 @@
 <div align="center">
   <img src="docs/icon.png" alt="App 圖標" width="100" />
-  <h1>RikkaHub</h1>
+  <h1>UniVCP</h1>
 
 一個原生Android LLM 聊天客戶端，支持切換不同的供應商進行聊天 🤖💬
 
-點擊加入我們的Discord伺服器 👉 [【RikkaHub】](https://discord.gg/9weBqxe5c4)
+點擊加入我們的Discord伺服器 👉 [【UniVCP】](https://discord.gg/9weBqxe5c4)
 
 [English](README.md) | 繁體中文 | [简体中文](README_ZH_CN.md)
 
@@ -17,8 +17,8 @@
 
 ## 🚀 下載
 
-🔗 [前往官網下載](https://rikka-ai.com/download)
-🔗 [前往 Google Play 下載](https://play.google.com/store/apps/details?id=me.rerere.rikkahub)
+🔗 [前往官網下載](https://github.com/RoxyAsahi/UniVCP)
+🔗 [前往 Google Play 下載](https://github.com/RoxyAsahi/UniVCP)
 
 ## 💖 贊助商
 
@@ -75,14 +75,14 @@
 
 ## 💰 捐贈
 
-* [Patreon](https://patreon.com/rikkahub)
+* [Patreon](https://github.com/RoxyAsahi/UniVCP)
 * [愛發電](https://afdian.com/a/reovo)
 
 ## ⭐ Star History
 
 如果喜歡這個項目，請給個Star ⭐
 
-[![Star History Chart](https://api.star-history.com/svg?repos=re-ovo/rikkahub&type=Date)](https://star-history.com/#re-ovo/rikkahub&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=RoxyAsahi/UniVCP&type=Date)](https://star-history.com/#RoxyAsahi/UniVCP&Date)
 
 ## 📄 許可證
 

@@ -20,7 +20,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 private const val TAG = "RikkaHubSearchService"
 
 object RikkaHubSearchService : SearchService<SearchServiceOptions.RikkaHubOptions> {
-    override val name: String = "RikkaHub"
+    override val name: String = "UniVCP"
 
     @Composable
     override fun Description() {
@@ -92,7 +92,7 @@ object RikkaHubSearchService : SearchService<SearchServiceOptions.RikkaHubOption
         commonOptions: SearchCommonOptions,
         serviceOptions: SearchServiceOptions.RikkaHubOptions
     ): Result<ScrapedResult> {
-        error("RikkaHub does not support scraping")
+        error("UniVCP does not support scraping")
     }
 
     @Serializable

@@ -334,7 +334,7 @@ fun SettingPage(vm: SettingVM = koinViewModel()) {
                         headlineContent = { Text(stringResource(R.string.setting_page_about)) },
                     )
                     item(
-                        onClick = { context.openUrl("https://docs.rikka-ai.com/docs/basic/get-started") },
+                        onClick = { context.openUrl("https://github.com/RoxyAsahi/UniVCP") },
                         leadingContent = { Icon(HugeIcons.Book01, null) },
                         supportingContent = { Text(stringResource(R.string.setting_page_documentation_desc)) },
                         headlineContent = { Text(stringResource(R.string.setting_page_documentation)) },

@@ -27,7 +27,7 @@ fun UniVcpLearningBubble(
     val dark = isSystemInDarkTheme()
     val renderMode = remember(content) { detectRenderMode(content) }
     val payloadId = remember {
-        "rikkahub-${System.nanoTime().toString(16)}"
+        "univcp-${System.nanoTime().toString(16)}"
     }
 
     BubbleWebView(

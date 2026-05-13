@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import me.rerere.common.http.await
@@ -17,7 +18,7 @@ import me.rerere.rikkahub.BuildConfig
 import okhttp3.OkHttpClient
 import okhttp3.Request
 
-private const val API_URL = "https://updates.rikka-ai.com/"
+private const val RELEASES_API_URL = "https://api.github.com/repos/RoxyAsahi/UniVCP/releases/latest"
 
 class UpdateChecker(private val client: OkHttpClient) {
     private val json = Json { ignoreUnknownKeys = true }
@@ -26,30 +27,37 @@ class UpdateChecker(private val client: OkHttpClient) {
         emit(UiState.Loading)
         emit(
             UiState.Success(
-                data = try {
-                    val response = client.newCall(
-                        Request.Builder()
-                            .url(API_URL)
-                            .get()
-                            .addHeader(
-                                "User-Agent",
-                                "RikkaHub ${BuildConfig.VERSION_NAME} #${BuildConfig.VERSION_CODE}"
-                            )
-                            .build()
-                    ).await()
-                    if (response.isSuccessful) {
-                        json.decodeFromString<UpdateInfo>(response.body.string())
-                    } else {
-                        throw Exception("Failed to fetch update info")
-                    }
-                } catch (e: Exception) {
-                    throw Exception("Failed to fetch update info", e)
-                }
+                data = runCatching { fetchLatestReleaseInfo() }
+                    .getOrElse { currentVersionInfo() }
             )
         )
     }.catch {
         emit(UiState.Error(it))
     }.flowOn(Dispatchers.IO)
+
+    private suspend fun fetchLatestReleaseInfo(): UpdateInfo {
+        val response = client.newCall(
+            Request.Builder()
+                .url(RELEASES_API_URL)
+                .get()
+                .addHeader(
+                    "User-Agent",
+                    "UniVCP ${BuildConfig.VERSION_NAME} #${BuildConfig.VERSION_CODE}"
+                )
+                .build()
+        ).await()
+        if (!response.isSuccessful) {
+            throw Exception("Failed to fetch update info: ${response.code}")
+        }
+        return json.decodeFromString<GitHubRelease>(response.body.string()).toUpdateInfo()
+    }
+
+    private fun currentVersionInfo() = UpdateInfo(
+        version = BuildConfig.VERSION_NAME,
+        publishedAt = "1970-01-01T00:00:00Z",
+        changelog = "",
+        downloads = emptyList()
+    )
 
     fun downloadUpdate(context: Context, download: UpdateDownload) {
         runCatching {
@@ -90,6 +98,67 @@ data class UpdateInfo(
     val publishedAt: String,
     val changelog: String,
     val downloads: List<UpdateDownload>
+)
+
+@Serializable
+private data class GitHubRelease(
+    @SerialName("tag_name")
+    val tagName: String,
+    val name: String? = null,
+    val body: String? = null,
+    @SerialName("published_at")
+    val publishedAt: String? = null,
+    @SerialName("html_url")
+    val htmlUrl: String,
+    val assets: List<GitHubReleaseAsset> = emptyList()
+) {
+    fun toUpdateInfo(): UpdateInfo {
+        val downloads = assets
+            .filter { it.browserDownloadUrl.isNotBlank() }
+            .map {
+                UpdateDownload(
+                    name = it.name,
+                    url = it.browserDownloadUrl,
+                    size = formatBytes(it.size)
+                )
+            }
+            .ifEmpty {
+                listOf(
+                    UpdateDownload(
+                        name = name ?: tagName,
+                        url = htmlUrl,
+                        size = ""
+                    )
+                )
+            }
+
+        return UpdateInfo(
+            version = tagName.trim().removePrefix("v").removePrefix("V"),
+            publishedAt = publishedAt ?: "1970-01-01T00:00:00Z",
+            changelog = body.orEmpty(),
+            downloads = downloads
+        )
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        if (bytes <= 0) return ""
+        val units = listOf("B", "KB", "MB", "GB")
+        var value = bytes.toDouble()
+        var unitIndex = 0
+        while (value >= 1024 && unitIndex < units.lastIndex) {
+            value /= 1024
+            unitIndex++
+        }
+        return "%.1f %s".format(value, units[unitIndex])
+    }
+}
+
+@Serializable
+private data class GitHubReleaseAsset(
+    val name: String,
+    val size: Long = 0,
+    @SerialName("browser_download_url")
+    val browserDownloadUrl: String = ""
 )
 
 /**
