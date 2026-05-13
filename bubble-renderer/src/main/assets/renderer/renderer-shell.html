@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <link rel="stylesheet" href="vendor/katex.min.css">
+  <link rel="stylesheet" href="vendor/atom-one-light.min.css" media="(prefers-color-scheme: light)">
+  <link rel="stylesheet" href="vendor/atom-one-dark.min.css" media="(prefers-color-scheme: dark)">
+  <style>
+    :root {
+      color-scheme: light dark;
+      --uvcp-bg: #ffffff;
+      --uvcp-fg: #1f2328;
+      --uvcp-surface: #f6f8fa;
+      --uvcp-on-surface: #1f2328;
+      --uvcp-primary: #2563eb;
+      --uvcp-outline: #d0d7de;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      min-height: 100%;
+      overflow: hidden;
+      background: transparent;
+      color: var(--uvcp-fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans SC", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    #bubble-root {
+      width: 100%;
+      padding: 12px 14px;
+      overflow-wrap: anywhere;
+    }
+    .uvcp-bubble {
+      color: var(--uvcp-fg);
+      line-height: 1.62;
+      font-size: 15px;
+    }
+    .uvcp-bubble > :first-child { margin-top: 0; }
+    .uvcp-bubble > :last-child { margin-bottom: 0; }
+    a { color: var(--uvcp-primary); }
+    img, svg, canvas, video { max-width: 100%; height: auto; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 12px 0;
+      font-size: 14px;
+    }
+    th, td {
+      border: 1px solid var(--uvcp-outline);
+      padding: 7px 9px;
+      vertical-align: top;
+    }
+    th { background: var(--uvcp-surface); }
+    code {
+      background: var(--uvcp-surface);
+      border-radius: 4px;
+      padding: 0.12em 0.32em;
+      font-family: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+      font-size: 0.9em;
+    }
+    pre {
+      background: var(--uvcp-surface);
+      color: var(--uvcp-on-surface);
+      border: 1px solid var(--uvcp-outline);
+      border-radius: 8px;
+      overflow: auto;
+      padding: 12px;
+      margin: 12px 0;
+    }
+    pre code {
+      display: block;
+      background: transparent;
+      padding: 0;
+      white-space: pre;
+    }
+    blockquote {
+      margin: 12px 0;
+      padding: 2px 0 2px 12px;
+      border-left: 4px solid var(--uvcp-outline);
+      color: color-mix(in srgb, var(--uvcp-fg) 72%, transparent);
+    }
+    .uvcp-status,
+    .uvcp-error {
+      border: 1px solid var(--uvcp-outline);
+      border-radius: 8px;
+      padding: 12px;
+      background: var(--uvcp-surface);
+      white-space: pre-wrap;
+      font-family: "JetBrains Mono", Consolas, monospace;
+      font-size: 13px;
+    }
+    .uvcp-error {
+      color: #b91c1c;
+      border-color: #fecaca;
+      background: #fef2f2;
+    }
+    .uvcp-preview-frame {
+      width: 100%;
+      min-height: 220px;
+      border: 1px solid var(--uvcp-outline);
+      border-radius: 8px;
+      background: white;
+    }
+    .katex-display { overflow-x: auto; overflow-y: hidden; }
+  </style>
+</head>
+<body>
+  <div id="bubble-root" class="uvcp-bubble" aria-live="polite"></div>
+  <script src="vendor/purify.min.js"></script>
+  <script src="vendor/marked.min.js"></script>
+  <script src="vendor/highlight.min.js"></script>
+  <script src="vendor/katex.min.js"></script>
+  <script src="vendor/auto-render.min.js"></script>
+  <script src="vendor/mermaid.min.js"></script>
+  <script src="vendor/morphdom.min.js"></script>
+  <script src="bubble-runtime.js"></script>
+</body>
+</html>
