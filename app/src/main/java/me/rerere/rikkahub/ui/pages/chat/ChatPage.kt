@@ -426,6 +426,10 @@ private fun ChatPageContent(
                 onToggleFavorite = { node ->
                     vm.toggleMessageFavorite(node)
                 },
+                onBubbleInput = { text ->
+                    inputState.editingMessage = null
+                    inputState.setMessageText(text)
+                },
             )
         }
     }

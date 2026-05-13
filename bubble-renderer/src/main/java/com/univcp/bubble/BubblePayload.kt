@@ -27,9 +27,11 @@ data class BubblePayload(
     val rawContent: String,
     val renderMode: BubbleRenderMode = BubbleRenderMode.MARKDOWN,
     val language: String = "",
+    val sourceLanguage: String = "",
     val theme: BubbleTheme,
     val isStreaming: Boolean = false,
-    val allowScript: Boolean = false
+    val allowScript: Boolean = false,
+    val scriptPermissionReason: String = ""
 )
 
 data class BubbleRenderState(

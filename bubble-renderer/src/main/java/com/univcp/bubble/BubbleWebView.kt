@@ -26,10 +26,11 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -45,7 +46,8 @@ private val payloadJson = Json {
 class BubbleBridge(
     private val onHeight: (String, Int) -> Unit,
     private val onStatus: (String, String) -> Unit,
-    private val onError: (String, String) -> Unit
+    private val onError: (String, String) -> Unit,
+    private val onSendInput: (String, String) -> Unit
 ) {
     private val main = Handler(Looper.getMainLooper())
 
@@ -63,6 +65,11 @@ class BubbleBridge(
     fun reportError(id: String, message: String) {
         main.post { onError(id, message) }
     }
+
+    @JavascriptInterface
+    fun sendInput(id: String, text: String) {
+        main.post { onSendInput(id, text) }
+    }
 }
 
 @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
@@ -71,15 +78,16 @@ fun BubbleWebView(
     payload: BubblePayload,
     modifier: Modifier = Modifier,
     rendererShellUrl: String? = null,
-    onStateChanged: (BubbleRenderState) -> Unit = {}
+    onStateChanged: (BubbleRenderState) -> Unit = {},
+    onSendInput: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
-    val density = LocalDensity.current
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var loaded by remember { mutableStateOf(false) }
     var progress by remember { mutableFloatStateOf(0f) }
     var renderState by remember(payload.id) { mutableStateOf(BubbleRenderState()) }
     var heightPx by remember(payload.id) { mutableIntStateOf(renderState.heightPx) }
+    val currentOnSendInput = rememberUpdatedState(onSendInput)
 
     fun updateState(next: BubbleRenderState) {
         renderState = next
@@ -102,6 +110,12 @@ fun BubbleWebView(
             onError = { id, message ->
                 if (id == payload.id) {
                     updateState(renderState.copy(status = "error", error = message))
+                }
+            },
+            onSendInput = { id, text ->
+                if (id == payload.id) {
+                    currentOnSendInput.value(text)
+                    updateState(renderState.copy(status = "input"))
                 }
             }
         )
@@ -216,7 +230,7 @@ fun BubbleWebView(
             modifier = Modifier
                 .fillMaxWidth()
                 .animateContentSize()
-                .height(with(density) { heightPx.toDp() }),
+                .height(heightPx.dp),
             update = { webView ->
                 webViewRef = webView
                 render(webView)

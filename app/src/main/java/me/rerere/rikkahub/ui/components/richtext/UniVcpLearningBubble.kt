@@ -21,12 +21,13 @@ fun UniVcpLearningBubble(
     content: String,
     modifier: Modifier = Modifier,
     isStreaming: Boolean = false,
+    onSendInput: (String) -> Unit = {},
 ) {
     val colorScheme = MaterialTheme.colorScheme
     val dark = isSystemInDarkTheme()
     val renderMode = remember(content) { detectRenderMode(content) }
-    val payloadId = remember(content) {
-        "rikkahub-${content.length}-${content.hashCode().toUInt().toString(16)}"
+    val payloadId = remember {
+        "rikkahub-${System.nanoTime().toString(16)}"
     }
 
     BubbleWebView(
@@ -48,18 +49,20 @@ fun UniVcpLearningBubble(
         ),
         rendererShellUrl = if (BuildConfig.DEBUG) DEBUG_RENDERER_SHELL_URL else null,
         modifier = modifier.fillMaxWidth(),
+        onSendInput = onSendInput,
     )
 }
 
 private fun detectRenderMode(content: String): BubbleRenderMode {
     val trimmed = content.trim()
-    return if (trimmed.startsWith("<") && htmlTagRegex.containsMatchIn(trimmed)) {
+    return if (responseRootRegex.containsMatchIn(trimmed) || (trimmed.startsWith("<") && htmlTagRegex.containsMatchIn(trimmed))) {
         BubbleRenderMode.RICH_HTML
     } else {
         BubbleRenderMode.MARKDOWN
     }
 }
 
+private val responseRootRegex = Regex("""<div\b[^>]*\bid\s*=\s*["']response-root["']""", RegexOption.IGNORE_CASE)
 private val htmlTagRegex = Regex("<[A-Za-z][\\s\\S]*>")
 
 private fun Color.toCssHex(): String {

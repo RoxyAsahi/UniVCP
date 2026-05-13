@@ -4,6 +4,28 @@ import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 import java.io.FileInputStream
 import java.util.Properties
 
+val rootLocalProperties = Properties()
+val rootLocalPropertiesFile = rootProject.file("local.properties")
+if (rootLocalPropertiesFile.exists()) {
+    FileInputStream(rootLocalPropertiesFile).use(rootLocalProperties::load)
+}
+
+fun localProperty(name: String, default: String = ""): String =
+    rootLocalProperties.getProperty(name)?.trim()?.takeIf { it.isNotEmpty() } ?: default
+
+fun String.asBuildConfigString(): String =
+    "\"" + replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+val devProviderApiKey = localProperty("univcp.dev.apiKey")
+val devProviderEnabled = localProperty(
+    name = "univcp.dev.provider.enabled",
+    default = if (devProviderApiKey.isNotBlank()) "true" else "false"
+).toBooleanStrictOrNull() ?: false
+val devProviderName = localProperty("univcp.dev.providerName", "UniVCP Dev Relay")
+val devProviderBaseUrl = localProperty("univcp.dev.baseUrl", "http://154.36.184.44:3000")
+val devProviderChatPath = localProperty("univcp.dev.chatCompletionsPath", "/v1/chat/completions")
+val devProviderModel = localProperty("univcp.dev.model", "gemini-3-flash-preview")
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -25,6 +47,13 @@ android {
         versionName = "2.2.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        buildConfigField("boolean", "UNIVCP_DEV_PROVIDER_ENABLED", "false")
+        buildConfigField("String", "UNIVCP_DEV_PROVIDER_NAME", "\"\"")
+        buildConfigField("String", "UNIVCP_DEV_PROVIDER_BASE_URL", "\"\"")
+        buildConfigField("String", "UNIVCP_DEV_PROVIDER_CHAT_PATH", "\"\"")
+        buildConfigField("String", "UNIVCP_DEV_PROVIDER_MODEL", "\"\"")
+        buildConfigField("String", "UNIVCP_DEV_PROVIDER_API_KEY", "\"\"")
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
@@ -84,6 +113,12 @@ android {
             applicationIdSuffix = ".debug"
             buildConfigField("String", "VERSION_NAME", "\"${android.defaultConfig.versionName}\"")
             buildConfigField("String", "VERSION_CODE", "\"${android.defaultConfig.versionCode}\"")
+            buildConfigField("boolean", "UNIVCP_DEV_PROVIDER_ENABLED", devProviderEnabled.toString())
+            buildConfigField("String", "UNIVCP_DEV_PROVIDER_NAME", devProviderName.asBuildConfigString())
+            buildConfigField("String", "UNIVCP_DEV_PROVIDER_BASE_URL", devProviderBaseUrl.asBuildConfigString())
+            buildConfigField("String", "UNIVCP_DEV_PROVIDER_CHAT_PATH", devProviderChatPath.asBuildConfigString())
+            buildConfigField("String", "UNIVCP_DEV_PROVIDER_MODEL", devProviderModel.asBuildConfigString())
+            buildConfigField("String", "UNIVCP_DEV_PROVIDER_API_KEY", devProviderApiKey.asBuildConfigString())
         }
         create("baseline") {
             initWith(getByName("release"))

@@ -29,6 +29,7 @@ import me.rerere.rikkahub.data.ai.prompts.DEFAULT_SUGGESTION_PROMPT
 import me.rerere.rikkahub.data.ai.prompts.DEFAULT_TITLE_PROMPT
 import me.rerere.rikkahub.data.ai.prompts.DEFAULT_TRANSLATION_PROMPT
 import me.rerere.rikkahub.data.ai.prompts.LEARNING_MODE_PROMPT
+import me.rerere.rikkahub.data.ai.prompts.UNIVCP_RENDERING_PROMPT
 import me.rerere.asr.ASRProviderSetting
 import me.rerere.rikkahub.data.datastore.migration.PreferenceStoreV1Migration
 import me.rerere.rikkahub.data.datastore.migration.PreferenceStoreV2Migration
@@ -259,6 +260,12 @@ class SettingsStore(
                     assistants.add(defaultAssistant.copy())
                 }
             }
+            val modeInjections = it.modeInjections.ifEmpty { DEFAULT_MODE_INJECTIONS }.toMutableList()
+            DEFAULT_MODE_INJECTIONS.forEach { defaultInjection ->
+                if (modeInjections.none { it.id == defaultInjection.id }) {
+                    modeInjections.add(defaultInjection.copy())
+                }
+            }
             val ttsProviders = it.ttsProviders.ifEmpty { DEFAULT_TTS_PROVIDERS }.toMutableList()
             DEFAULT_TTS_PROVIDERS.forEach { defaultTTSProvider ->
                 if (ttsProviders.none { provider -> provider.id == defaultTTSProvider.id }) {
@@ -268,6 +275,7 @@ class SettingsStore(
             it.copy(
                 providers = providers,
                 assistants = assistants,
+                modeInjections = modeInjections,
                 ttsProviders = ttsProviders,
             )
         }
@@ -666,11 +674,13 @@ private fun Model.findModelProviderFromList(providers: List<ProviderSetting>): P
 }
 
 internal val DEFAULT_ASSISTANT_ID = Uuid.parse("0950e2dc-9bd5-4801-afa3-aa887aa36b4e")
+internal val UNIVCP_RENDERING_MODE_INJECTION_ID = Uuid.parse("6d5c36c0-6b8d-40f5-b5b0-4df4e3c69ee7")
 internal val DEFAULT_ASSISTANTS = listOf(
     Assistant(
         id = DEFAULT_ASSISTANT_ID,
         name = "",
-        systemPrompt = ""
+        systemPrompt = "",
+        modeInjectionIds = setOf(UNIVCP_RENDERING_MODE_INJECTION_ID),
     ),
     Assistant(
         id = Uuid.parse("3d47790c-c415-4b90-9388-751128adb0a0"),
@@ -711,6 +721,13 @@ private val DEFAULT_TTS_PROVIDERS = listOf(
 internal val DEFAULT_ASSISTANTS_IDS = DEFAULT_ASSISTANTS.map { it.id }
 
 val DEFAULT_MODE_INJECTIONS = listOf(
+    PromptInjection.ModeInjection(
+        id = UNIVCP_RENDERING_MODE_INJECTION_ID,
+        content = UNIVCP_RENDERING_PROMPT,
+        position = InjectionPosition.AFTER_SYSTEM_PROMPT,
+        priority = 100,
+        name = "UniVCP Visual Bubble"
+    ),
     PromptInjection.ModeInjection(
         id = Uuid.parse("b87eaf16-f5cd-4ac1-9e4f-b11ae3a61d74"),
         content = LEARNING_MODE_PROMPT,

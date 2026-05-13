@@ -1,7 +1,16 @@
 (function () {
   const root = document.getElementById('bubble-root');
+  const pipeline = window.UniVCPContentPipeline
+    ? window.UniVCPContentPipeline.createContentPipeline()
+    : null;
+  const PIPELINE_MODES = window.UniVCPContentPipeline
+    ? window.UniVCPContentPipeline.PIPELINE_MODES
+    : { FULL_RENDER: 'full-render', STREAM_FAST: 'stream-fast' };
+
   let currentPayload = null;
   let resizeObserver = null;
+  let renderSeq = 0;
+  const previewCleanups = new Map();
 
   function report(type, payload) {
     try {
@@ -12,6 +21,8 @@
         window.UniVCPAndroid.reportStatus(currentPayload.id, String(payload || ''));
       } else if (type === 'error') {
         window.UniVCPAndroid.reportError(currentPayload.id, String(payload || 'Unknown render error'));
+      } else if (type === 'input') {
+        window.UniVCPAndroid.sendInput(currentPayload.id, String(payload || ''));
       }
     } catch (_error) {
       // The Android bridge may disappear during WebView release.
@@ -19,13 +30,37 @@
   }
 
   function updateHeight() {
+    const rootRect = root.getBoundingClientRect ? root.getBoundingClientRect() : null;
+    const bodyRect = document.body && document.body.getBoundingClientRect
+      ? document.body.getBoundingClientRect()
+      : null;
     const height = Math.ceil(Math.max(
       document.documentElement.scrollHeight,
       document.body.scrollHeight,
       root.scrollHeight,
+      root.offsetHeight || 0,
+      rootRect ? rootRect.height : 0,
+      bodyRect ? bodyRect.height : 0,
       80
-    ));
+    )) + 2;
     report('height', height);
+  }
+
+  function scheduleHeightReports() {
+    updateHeight();
+    requestAnimationFrame(updateHeight);
+    requestAnimationFrame(() => requestAnimationFrame(updateHeight));
+    setTimeout(updateHeight, 80);
+    setTimeout(updateHeight, 250);
+    setTimeout(updateHeight, 700);
+    setTimeout(updateHeight, 1400);
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(updateHeight).catch(() => {});
+    }
+    root.querySelectorAll('img, video, canvas, svg').forEach((node) => {
+      node.addEventListener('load', updateHeight, { once: true });
+      node.addEventListener('error', updateHeight, { once: true });
+    });
   }
 
   function applyTheme(theme) {
@@ -49,44 +84,57 @@
       .replace(/'/g, '&#039;');
   }
 
-  function splitTopLevelSelectors(selectorText) {
-    const result = [];
-    let current = '';
-    let depth = 0;
-    let quote = null;
-    for (let i = 0; i < selectorText.length; i += 1) {
-      const ch = selectorText[i];
-      if (quote) {
-        current += ch;
-        if (ch === '\\') {
-          current += selectorText[++i] || '';
-        } else if (ch === quote) {
-          quote = null;
-        }
-        continue;
-      }
-      if (ch === '"' || ch === "'") {
-        quote = ch;
-        current += ch;
-        continue;
-      }
-      if (ch === '(' || ch === '[') depth += 1;
-      if (ch === ')' || ch === ']') depth = Math.max(0, depth - 1);
-      if (ch === ',' && depth === 0) {
-        result.push(current.trim());
-        current = '';
-      } else {
-        current += ch;
-      }
+  function cssEscape(value) {
+    if (window.CSS && typeof window.CSS.escape === 'function') {
+      return window.CSS.escape(String(value || ''));
     }
-    if (current.trim()) result.push(current.trim());
-    return result;
+    return String(value || '').replace(/["\\]/g, '\\$&');
+  }
+
+  function decodeHtmlEntities(text) {
+    const textarea = document.createElement('textarea');
+    textarea.innerHTML = String(text || '');
+    return textarea.value;
+  }
+
+  function sanitize(html) {
+    if (!window.DOMPurify) return html;
+    const cleaned = DOMPurify.sanitize(html, {
+      USE_PROFILES: { html: true, svg: true, svgFilters: true, mathMl: true },
+      ADD_TAGS: [
+        'math', 'mi', 'mn', 'mo', 'msup', 'msub', 'mfrac', 'annotation',
+        'semantics', 'mrow', 'msqrt'
+      ],
+      ADD_ATTR: [
+        'target', 'style', 'class', 'id', 'role', 'aria-label', 'aria-hidden',
+        'data-send', 'data-action', 'data-label', 'viewBox', 'xmlns',
+        'fill', 'stroke', 'stroke-width', 'd', 'cx', 'cy', 'r', 'x', 'y',
+        'x1', 'x2', 'y1', 'y2', 'points', 'preserveAspectRatio',
+        'transform', 'width', 'height'
+      ],
+      FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'link', 'meta', 'base'],
+      FORBID_ATTR: ['srcdoc', 'formaction'],
+      ALLOW_DATA_ATTR: true
+    });
+
+    const template = document.createElement('template');
+    template.innerHTML = cleaned;
+    template.content.querySelectorAll('*').forEach((node) => {
+      Array.from(node.attributes).forEach((attr) => {
+        if (/^on/i.test(attr.name)) {
+          node.removeAttribute(attr.name);
+        }
+      });
+    });
+    return template.innerHTML;
   }
 
   function scopeCss(cssText, scopeId) {
-    const css = String(cssText || '').replace(/\/\*[\s\S]*?\*\//g, '');
-    return css.replace(/([^{}@][^{}]*)\{([^{}]*)\}/g, function (_match, selector, body) {
-      const scoped = splitTopLevelSelectors(selector)
+    if (window.UniVCPScopedCss && typeof window.UniVCPScopedCss.scopeCss === 'function') {
+      return window.UniVCPScopedCss.scopeCss(cssText, scopeId);
+    }
+    return String(cssText || '').replace(/([^{}@][^{}]*)\{([^{}]*)\}/g, (_match, selector, body) => {
+      const scoped = selector.split(',')
         .map((item) => {
           const trimmed = item.replace(/^(html|body|:root)\b/i, '').trim();
           if (!trimmed || trimmed === '*') return `#${scopeId} *`;
@@ -100,7 +148,7 @@
 
   function extractAndScopeStyles(html, scopeId) {
     const styles = [];
-    const content = String(html || '').replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gi, function (_match, css) {
+    const content = String(html || '').replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gi, (_match, css) => {
       styles.push(css);
       return '';
     });
@@ -110,18 +158,23 @@
     };
   }
 
-  function sanitize(html) {
-    if (!window.DOMPurify) return html;
-    return DOMPurify.sanitize(html, {
-      ADD_TAGS: ['math', 'mi', 'mn', 'mo', 'msup', 'msub', 'mfrac', 'annotation'],
-      ADD_ATTR: ['target', 'style', 'class', 'id', 'data-*', 'viewBox', 'xmlns'],
-      FORBID_TAGS: ['script', 'iframe', 'object', 'embed'],
-      ALLOW_DATA_ATTR: true
-    });
+  function isFullHtmlDocument(text) {
+    const trimmed = String(text || '').trim();
+    return /^<!doctype\s+html\b/i.test(trimmed) || /^<html\b/i.test(trimmed) || /<\/html>\s*$/i.test(trimmed);
   }
 
   function maybeLooksLikeHtml(text) {
-    return /<\/?[a-z][\s\S]*>/i.test(String(text || '').trim());
+    const trimmed = String(text || '').trim();
+    if (!trimmed.startsWith('<')) return false;
+    return /<\/?[a-z][\s\S]*>/i.test(trimmed);
+  }
+
+  function normalizeLanguage(language) {
+    return String(language || '').trim().toLowerCase();
+  }
+
+  function sourceLanguage(payload) {
+    return normalizeLanguage(payload.sourceLanguage || payload.language || '');
   }
 
   function renderMarkdown(text) {
@@ -134,8 +187,9 @@
       mangle: false,
       headerIds: false,
       highlight: function (code, lang) {
-        if (window.hljs && lang && hljs.getLanguage(lang)) {
-          return hljs.highlight(code, { language: lang, ignoreIllegals: true }).value;
+        const language = normalizeLanguage(lang);
+        if (window.hljs && language && hljs.getLanguage(language)) {
+          return hljs.highlight(code, { language, ignoreIllegals: true }).value;
         }
         return escapeHtml(code);
       }
@@ -143,73 +197,360 @@
     return marked.parse(String(text || ''));
   }
 
-  function buildHtmlPreview(payload) {
-    const source = payload.rawContent || '';
-    if (!payload.allowScript) {
-      return sanitize(source);
-    }
-    const html = payload.language === 'svg'
-      ? `<!doctype html><html><body style="margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;">${source}</body></html>`
-      : source;
-    return `<iframe class="uvcp-preview-frame" sandbox="allow-scripts" srcdoc="${escapeHtml(html)}"></iframe>`;
+  function buildCodeBlock(source, language) {
+    const lang = normalizeLanguage(language) || 'html';
+    return `<pre><code class="language-${escapeHtml(lang)}">${escapeHtml(source)}</code></pre>`;
   }
 
-  function buildThreePreview(payload) {
-    if (!payload.allowScript) {
-      return '<div class="uvcp-status">Three.js preview is script-gated. Enable interactive preview to run this bubble.</div>';
+  function restoreProtocolBlocks(html, state) {
+    if (window.UniVCPContentPipeline && typeof window.UniVCPContentPipeline.restoreProtocolBlocks === 'function') {
+      return window.UniVCPContentPipeline.restoreProtocolBlocks(html, state && state.protocolPlaceholders);
     }
-    const code = payload.rawContent || '';
-    const html = `<!doctype html>
+    return html;
+  }
+
+  function processContent(rawContent, isStreaming) {
+    if (!pipeline) {
+      return {
+        text: String(rawContent || ''),
+        state: { protocolPlaceholders: new Map() },
+        meta: { stepsApplied: [] }
+      };
+    }
+    return pipeline.process(String(rawContent || ''), {
+      mode: isStreaming ? PIPELINE_MODES.STREAM_FAST : PIPELINE_MODES.FULL_RENDER
+    });
+  }
+
+  function renderToHtml(payload) {
+    const processed = processContent(payload.rawContent || '', payload.isStreaming);
+    const text = processed.text;
+    const language = sourceLanguage(payload);
+    let html;
+
+    if (payload.renderMode === 'CODE_PREVIEW') {
+      html = buildCodeBlock(text, language || 'html');
+    } else if (payload.renderMode === 'THREE') {
+      html = buildCodeBlock(text, 'threejs');
+    } else if (!payload.isStreaming && isFullHtmlDocument(text)) {
+      html = buildCodeBlock(text, language || 'html');
+    } else if (payload.renderMode === 'RICH_HTML' || maybeLooksLikeHtml(text)) {
+      html = text;
+    } else {
+      html = renderMarkdown(text);
+    }
+
+    return restoreProtocolBlocks(html, processed.state);
+  }
+
+  function cleanupPreviews() {
+    previewCleanups.forEach((cleanup) => {
+      try { cleanup(); } catch (_error) {}
+    });
+    previewCleanups.clear();
+  }
+
+  function getCodeLanguage(codeNode) {
+    const className = codeNode.className || '';
+    const match = className.match(/\blanguage-([\w-]+)/i);
+    return normalizeLanguage(match ? match[1] : '');
+  }
+
+  function bridgeScript(frameId) {
+    return `
+<script>
+(function(){
+  var frameId = ${JSON.stringify(frameId)};
+  var lastHeight = 0;
+  function postStatus(status, message) {
+    try { parent.postMessage({ type: 'univcp-preview-status', frameId: frameId, status: status, message: message || '' }, '*'); } catch (e) {}
+  }
+  function measure() {
+    var body = document.body || document.documentElement;
+    return Math.ceil(Math.max(
+      document.documentElement ? document.documentElement.scrollHeight : 0,
+      body ? body.scrollHeight : 0,
+      body ? body.offsetHeight : 0,
+      160
+    ));
+  }
+  function postResize() {
+    var height = measure();
+    if (Math.abs(height - lastHeight) < 2) return;
+    lastHeight = height;
+    try { parent.postMessage({ type: 'univcp-preview-resize', frameId: frameId, height: height }, '*'); } catch (e) {}
+  }
+  window.addEventListener('error', function(event) {
+    postStatus('error', event.message || 'Preview error');
+    setTimeout(postResize, 0);
+  });
+  window.addEventListener('unhandledrejection', function(event) {
+    var reason = event.reason && (event.reason.stack || event.reason.message) || event.reason;
+    postStatus('error', String(reason || 'Preview promise rejection'));
+    setTimeout(postResize, 0);
+  });
+  if (window.ResizeObserver && document.body) {
+    new ResizeObserver(postResize).observe(document.body);
+  }
+  requestAnimationFrame(function(){ postResize(); postStatus('ready', 'ready'); });
+  setTimeout(postResize, 250);
+  setTimeout(postResize, 1000);
+})();
+<\/script>`;
+  }
+
+  function injectBridgeIntoHtmlDocument(source, frameId) {
+    const instrumentation = bridgeScript(frameId);
+    const doc = String(source || '');
+    if (/<\/body>/i.test(doc)) {
+      return doc.replace(/<\/body>/i, `${instrumentation}</body>`);
+    }
+    return `${doc}${instrumentation}`;
+  }
+
+  function buildHtmlPreviewDocument(source, language, frameId) {
+    const lang = normalizeLanguage(language);
+    if (lang === 'svg' || /^\s*<svg[\s>]/i.test(source)) {
+      return `<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
-<style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#0f172a;color:#e2e8f0}#mount{width:100%;height:100%;min-height:220px}.status{padding:14px;font:13px/1.5 monospace}</style>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>html,body{margin:0;min-height:100%;background:transparent}body{display:flex;align-items:center;justify-content:center;padding:12px;box-sizing:border-box}svg{max-width:100%;height:auto}</style>
+</head>
+<body>
+${source}
+${bridgeScript(frameId)}
+</body>
+</html>`;
+    }
+
+    if (isFullHtmlDocument(source)) {
+      return injectBridgeIntoHtmlDocument(source, frameId);
+    }
+
+    return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>html,body{margin:0;min-height:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans SC",sans-serif;background:transparent;color:#111827}body{padding:12px;box-sizing:border-box}img,svg,canvas,video{max-width:100%;height:auto}</style>
+</head>
+<body>
+${source}
+${bridgeScript(frameId)}
+</body>
+</html>`;
+  }
+
+  function buildThreePreviewDocument(source, frameId) {
+    const safeSource = String(source || '').replace(/<\/script/gi, '<\\/script');
+    return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+html,body{margin:0;width:100%;min-height:100%;overflow:hidden;background:#0f172a;color:#e2e8f0}
+#mount{width:100%;height:100%;min-height:320px}
+.status{padding:14px;font:13px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre-wrap}
+canvas{display:block;max-width:100%}
+</style>
 </head>
 <body>
 <div id="mount"><div class="status">Loading Three.js preview...</div></div>
 <script src="vendor/three.min.js"><\/script>
 <script>
-const mount=document.getElementById('mount');
-function clearStatus(){mount.querySelectorAll('.status').forEach(x=>x.remove())}
-const OriginalRenderer=THREE.WebGLRenderer;
-THREE.WebGLRenderer=function(...args){
-  const renderer=new OriginalRenderer(...args);
-  if(renderer.domElement && !renderer.domElement.isConnected){clearStatus();mount.appendChild(renderer.domElement);}
-  const originalSetSize=renderer.setSize.bind(renderer);
-  renderer.setSize=function(w,h,style){return originalSetSize(Math.min(w||mount.clientWidth||640,mount.clientWidth||640),Math.min(h||360,720),style)}
-  return renderer;
-};
-THREE.WebGLRenderer.prototype=OriginalRenderer.prototype;
-try { ${code} } catch (error) { mount.innerHTML='<pre class="status">'+String(error && (error.stack||error.message)||error).replace(/[&<>]/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]))+'</pre>'; }
+(function(){
+  var mount = document.getElementById('mount');
+  function escapeText(value){return String(value || '').replace(/[&<>]/g,function(ch){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[ch];});}
+  function clearStatus(){Array.prototype.slice.call(mount.querySelectorAll('.status')).forEach(function(node){node.remove();});}
+  if (!window.THREE) throw new Error('THREE failed to load.');
+  var OriginalRenderer = THREE.WebGLRenderer;
+  THREE.WebGLRenderer = function() {
+    var renderer = new (Function.prototype.bind.apply(OriginalRenderer, [null].concat(Array.prototype.slice.call(arguments))))();
+    if (renderer.domElement && !renderer.domElement.isConnected) {
+      clearStatus();
+      mount.appendChild(renderer.domElement);
+    }
+    var originalSetSize = renderer.setSize.bind(renderer);
+    renderer.setSize = function(width, height, updateStyle) {
+      var nextWidth = Math.min(width || mount.clientWidth || 640, mount.clientWidth || 640);
+      var nextHeight = Math.min(height || 360, 720);
+      return originalSetSize(nextWidth, nextHeight, updateStyle);
+    };
+    return renderer;
+  };
+  THREE.WebGLRenderer.prototype = OriginalRenderer.prototype;
+  try {
+${safeSource}
+    if (!mount.querySelector('canvas')) {
+      var canvas = document.querySelector('canvas');
+      if (canvas && !mount.contains(canvas)) {
+        clearStatus();
+        mount.appendChild(canvas);
+      }
+    }
+  } catch (error) {
+    mount.innerHTML = '<pre class="status">' + escapeText(error && (error.stack || error.message) || error) + '</pre>';
+    throw error;
+  }
+})();
 <\/script>
+${bridgeScript(frameId)}
 </body>
 </html>`;
-    return `<iframe class="uvcp-preview-frame" sandbox="allow-scripts" srcdoc="${escapeHtml(html)}"></iframe>`;
   }
 
-  async function enhanceContent() {
-    if (window.hljs) {
-      root.querySelectorAll('pre code').forEach((node) => {
-        try { hljs.highlightElement(node); } catch (_error) {}
-      });
+  function createPreviewContainer(preElement, options) {
+    if (!preElement || preElement.closest('.uvcp-preview-container')) return;
+
+    const codeNode = preElement.querySelector('code');
+    const source = codeNode ? codeNode.textContent || '' : preElement.textContent || '';
+    const frameId = `uvcp-preview-${Math.random().toString(36).slice(2)}`;
+    const container = document.createElement('div');
+    container.className = 'uvcp-preview-container';
+    container.dataset.frameId = frameId;
+
+    const toolbar = document.createElement('div');
+    toolbar.className = 'uvcp-preview-toolbar';
+
+    const status = document.createElement('div');
+    status.className = 'uvcp-preview-status';
+    status.hidden = true;
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'uvcp-preview-toggle';
+    toggle.textContent = options.openLabel || 'Run';
+
+    toolbar.appendChild(toggle);
+    preElement.parentNode.insertBefore(container, preElement);
+    container.appendChild(toolbar);
+    container.appendChild(preElement);
+    container.appendChild(status);
+
+    let frame = null;
+    let showingPreview = false;
+    let timeout = null;
+
+    function setStatus(nextStatus, message) {
+      container.dataset.previewStatus = nextStatus;
+      status.hidden = !message || nextStatus === 'ready';
+      status.textContent = message || '';
+      report('status', `preview:${nextStatus}`);
+      scheduleHeightReports();
     }
 
-    if (window.renderMathInElement) {
-      try {
-        renderMathInElement(root, {
-          delimiters: [
-            { left: '$$', right: '$$', display: true },
-            { left: '\\[', right: '\\]', display: true },
-            { left: '\\(', right: '\\)', display: false },
-            { left: '$', right: '$', display: false }
-          ],
-          throwOnError: false
-        });
-      } catch (error) {
-        console.warn('KaTeX render failed', error);
+    function destroyFrame() {
+      if (timeout) {
+        clearTimeout(timeout);
+        timeout = null;
+      }
+      if (frame) {
+        try {
+          frame.srcdoc = '';
+          frame.src = 'about:blank';
+          frame.contentWindow && frame.contentWindow.stop && frame.contentWindow.stop();
+        } catch (_error) {}
+        frame.remove();
+        frame = null;
       }
     }
 
+    function showSource() {
+      showingPreview = false;
+      toggle.textContent = options.openLabel || 'Run';
+      preElement.hidden = false;
+      destroyFrame();
+      setStatus('source', '');
+    }
+
+    function showPreview() {
+      showingPreview = true;
+      toggle.textContent = options.closeLabel || 'Source';
+      preElement.hidden = true;
+      setStatus('loading', options.loadingLabel || 'Loading preview...');
+
+      frame = document.createElement('iframe');
+      frame.className = 'uvcp-preview-frame';
+      frame.dataset.frameId = frameId;
+      frame.sandbox = options.sandbox || 'allow-scripts allow-modals';
+      frame.style.height = `${options.fallbackHeight || 220}px`;
+      frame.srcdoc = options.buildSrcdoc(source, frameId);
+      container.appendChild(frame);
+
+      timeout = setTimeout(() => {
+        if (showingPreview) {
+          setStatus('error', 'Preview did not report ready state.');
+        }
+      }, 4000);
+      updateHeight();
+    }
+
+    toggle.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (showingPreview) {
+        showSource();
+      } else {
+        showPreview();
+      }
+    });
+
+    previewCleanups.set(frameId, destroyFrame);
+  }
+
+  function setupCodePreviews() {
+    root.querySelectorAll('pre code').forEach((codeNode) => {
+      const pre = codeNode.closest('pre');
+      if (!pre || pre.dataset.uvcpPreviewReady === 'true') return;
+
+      const language = getCodeLanguage(codeNode);
+      const source = codeNode.textContent || '';
+      if (['html', 'svg'].includes(language) || (language === '' && isFullHtmlDocument(source))) {
+        pre.dataset.uvcpPreviewReady = 'true';
+        createPreviewContainer(pre, {
+          openLabel: 'Run',
+          closeLabel: 'Source',
+          fallbackHeight: language === 'svg' ? 260 : 220,
+          buildSrcdoc: (content, frameId) => buildHtmlPreviewDocument(content, language || 'html', frameId)
+        });
+      } else if (['js', 'javascript', 'threejs'].includes(language) && /\bTHREE\./.test(source)) {
+        pre.dataset.uvcpPreviewReady = 'true';
+        createPreviewContainer(pre, {
+          openLabel: 'Preview',
+          closeLabel: 'Source',
+          fallbackHeight: 360,
+          buildSrcdoc: (content, frameId) => buildThreePreviewDocument(content, frameId)
+        });
+      }
+    });
+  }
+
+  function bindInteractiveButtons() {
+    root.querySelectorAll('button').forEach((button) => {
+      if (button.dataset.uvcpBridgeBound === 'true') return;
+      if (button.closest('.uvcp-preview-container')) return;
+      button.dataset.uvcpBridgeBound = 'true';
+      if (!button.className) button.classList.add('uvcp-ai-button');
+      button.type = 'button';
+
+      button.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const text = (button.dataset.send || button.dataset.input || button.value || button.textContent || '').trim();
+        if (!text) {
+          report('error', 'Button has no input text.');
+          return;
+        }
+        report('input', text.slice(0, 1000));
+        button.dataset.sent = 'true';
+      });
+    });
+  }
+
+  async function renderMermaidBlocks() {
     const mermaidBlocks = Array.from(root.querySelectorAll('code.language-mermaid, code.language-flowchart, code.language-graph'));
     mermaidBlocks.forEach((codeNode, index) => {
       const pre = codeNode.closest('pre');
@@ -219,6 +560,7 @@ try { ${code} } catch (error) { mount.innerHTML='<pre class="status">'+String(er
       div.id = `mermaid-${Date.now()}-${index}`;
       if (pre) pre.replaceWith(div);
     });
+
     if (window.mermaid && root.querySelector('.mermaid')) {
       try {
         mermaid.initialize({
@@ -236,33 +578,57 @@ try { ${code} } catch (error) { mount.innerHTML='<pre class="status">'+String(er
     }
   }
 
+  async function enhanceContent() {
+    if (window.renderMathInElement) {
+      try {
+        renderMathInElement(root, {
+          delimiters: [
+            { left: '$$', right: '$$', display: true },
+            { left: '\\[', right: '\\]', display: true },
+            { left: '\\(', right: '\\)', display: false },
+            { left: '$', right: '$', display: false }
+          ],
+          throwOnError: false
+        });
+      } catch (error) {
+        console.warn('KaTeX render failed', error);
+      }
+    }
+
+    await renderMermaidBlocks();
+
+    if (window.hljs) {
+      root.querySelectorAll('pre code').forEach((node) => {
+        if (node.closest('.uvcp-protocol-block')) return;
+        try { hljs.highlightElement(node); } catch (_error) {}
+      });
+    }
+
+    setupCodePreviews();
+    bindInteractiveButtons();
+  }
+
   async function renderPayload(payload) {
+    const seq = ++renderSeq;
     currentPayload = payload;
     try {
       report('status', payload.isStreaming ? 'streaming' : 'rendering');
       applyTheme(payload.theme);
+      cleanupPreviews();
+
       const scopeId = `bubble-${String(payload.id || 'current').replace(/[^A-Za-z0-9_-]/g, '-')}`;
       root.id = scopeId;
       root.className = 'uvcp-bubble';
+      root.setAttribute('aria-live', 'polite');
 
-      let html;
-      if (payload.renderMode === 'CODE_PREVIEW') {
-        html = buildHtmlPreview(payload);
-      } else if (payload.renderMode === 'THREE') {
-        html = buildThreePreview(payload);
-      } else if (payload.renderMode === 'RICH_HTML' || maybeLooksLikeHtml(payload.rawContent)) {
-        html = payload.rawContent || '';
-      } else {
-        html = renderMarkdown(payload.rawContent || '');
-      }
-
+      const html = renderToHtml(payload);
       const extracted = extractAndScopeStyles(html, scopeId);
       const safeContent = sanitize(extracted.content);
       const nextHtml = `${extracted.styleText ? `<style>${extracted.styleText}</style>` : ''}${safeContent}`;
 
       if (window.morphdom && root.dataset.rendered === 'true' && payload.isStreaming) {
-        morphdom(root, `<div id="${scopeId}" class="uvcp-bubble">${nextHtml}</div>`, {
-          onBeforeElUpdated: function (fromEl, toEl) {
+        morphdom(root, `<div id="${scopeId}" class="uvcp-bubble" aria-live="polite">${nextHtml}</div>`, {
+          onBeforeElUpdated: function (fromEl) {
             if (fromEl.tagName === 'IFRAME') return false;
             if (fromEl === document.activeElement) return false;
             return true;
@@ -273,10 +639,12 @@ try { ${code} } catch (error) { mount.innerHTML='<pre class="status">'+String(er
         root.dataset.rendered = 'true';
       }
 
-      await enhanceContent();
-      updateHeight();
-      setTimeout(updateHeight, 80);
-      setTimeout(updateHeight, 450);
+      if (seq !== renderSeq) return;
+      if (!payload.isStreaming) {
+        await enhanceContent();
+      }
+
+      scheduleHeightReports();
       report('status', payload.isStreaming ? 'streaming' : 'ready');
     } catch (error) {
       root.innerHTML = `<div class="uvcp-error">Render failed:\n\n${escapeHtml(error && (error.stack || error.message) || error)}</div>`;
@@ -286,12 +654,37 @@ try { ${code} } catch (error) { mount.innerHTML='<pre class="status">'+String(er
   }
 
   function dispose() {
+    cleanupPreviews();
     if (resizeObserver) {
       resizeObserver.disconnect();
       resizeObserver = null;
     }
     root.innerHTML = '';
   }
+
+  window.addEventListener('message', (event) => {
+    const data = event.data || {};
+    if (!data || typeof data !== 'object') return;
+    if (data.type === 'univcp-preview-resize') {
+      const frame = root.querySelector(`iframe[data-frame-id="${cssEscape(data.frameId)}"]`);
+      if (frame) {
+        frame.style.height = `${Math.max(160, Number(data.height) || 220)}px`;
+        updateHeight();
+      }
+    } else if (data.type === 'univcp-preview-status') {
+      const container = root.querySelector(`.uvcp-preview-container[data-frame-id="${cssEscape(data.frameId)}"]`);
+      if (container) {
+        const status = container.querySelector('.uvcp-preview-status');
+        if (status) {
+          status.hidden = !data.message || data.status === 'ready';
+          status.textContent = data.message || '';
+        }
+        container.dataset.previewStatus = data.status || 'ready';
+        report('status', `preview:${data.status || 'ready'}`);
+        updateHeight();
+      }
+    }
+  });
 
   window.addEventListener('error', (event) => {
     report('error', event.error && (event.error.stack || event.error.message) || event.message);
@@ -312,6 +705,5 @@ try { ${code} } catch (error) { mount.innerHTML='<pre class="status">'+String(er
     dispose
   };
 
-  report('status', 'ready');
   updateHeight();
 })();
