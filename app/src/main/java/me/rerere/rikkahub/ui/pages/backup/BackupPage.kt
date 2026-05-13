@@ -27,6 +27,7 @@ import kotlinx.coroutines.launch
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.ui.components.nav.BackButton
 import me.rerere.rikkahub.ui.pages.backup.components.BackupDialog
+import me.rerere.rikkahub.ui.pages.backup.tabs.ChatSyncTab
 import me.rerere.rikkahub.ui.pages.backup.tabs.ImportExportTab
 import me.rerere.rikkahub.ui.pages.backup.tabs.ReminderTab
 import me.rerere.rikkahub.ui.pages.backup.tabs.S3Tab
@@ -36,7 +37,7 @@ import org.koin.androidx.compose.koinViewModel
 
 @Composable
 fun BackupPage(vm: BackupVM = koinViewModel()) {
-    val pagerState = rememberPagerState { 4 }
+    val pagerState = rememberPagerState { 5 }
     val scope = rememberCoroutineScope()
     var showRestartDialog by remember { mutableStateOf(false) }
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
@@ -85,6 +86,11 @@ fun BackupPage(vm: BackupVM = koinViewModel()) {
                 Tab(
                     selected = pagerState.currentPage == 3,
                     onClick = { scope.launch { pagerState.animateScrollToPage(3) } },
+                    text = { Text("聊天同步") }
+                )
+                Tab(
+                    selected = pagerState.currentPage == 4,
+                    onClick = { scope.launch { pagerState.animateScrollToPage(4) } },
                     text = { Text(stringResource(R.string.backup_page_reminder)) }
                 )
             }
@@ -118,6 +124,10 @@ fun BackupPage(vm: BackupVM = koinViewModel()) {
                     }
 
                     3 -> {
+                        ChatSyncTab(vm = vm)
+                    }
+
+                    4 -> {
                         ReminderTab(vm = vm)
                     }
                 }

@@ -42,6 +42,7 @@ import me.rerere.rikkahub.data.model.PromptInjection
 import me.rerere.rikkahub.data.model.QuickMessage
 import me.rerere.rikkahub.data.model.Tag
 import me.rerere.rikkahub.data.sync.s3.S3Config
+import me.rerere.rikkahub.data.sync.chat.ChatSyncConfig
 import me.rerere.rikkahub.ui.theme.PresetThemes
 import me.rerere.rikkahub.utils.JsonInstant
 import me.rerere.rikkahub.utils.toMutableStateFlow
@@ -117,6 +118,9 @@ class SettingsStore(
 
         // S3
         val S3_CONFIG = stringPreferencesKey("s3_config")
+
+        // Chat Sync
+        val CHAT_SYNC_CONFIG = stringPreferencesKey("chat_sync_config")
 
         // TTS
         val TTS_PROVIDERS = stringPreferencesKey("tts_providers")
@@ -207,6 +211,9 @@ class SettingsStore(
                 s3Config = preferences[S3_CONFIG]?.let {
                     JsonInstant.decodeFromString(it)
                 } ?: S3Config(),
+                chatSyncConfig = preferences[CHAT_SYNC_CONFIG]?.let {
+                    JsonInstant.decodeFromString(it)
+                } ?: ChatSyncConfig(),
                 ttsProviders = preferences[TTS_PROVIDERS]?.let {
                     JsonInstant.decodeFromString(it)
                 } ?: emptyList(),
@@ -384,6 +391,7 @@ class SettingsStore(
             preferences[MCP_SERVERS] = JsonInstant.encodeToString(settings.mcpServers)
             preferences[WEBDAV_CONFIG] = JsonInstant.encodeToString(settings.webDavConfig)
             preferences[S3_CONFIG] = JsonInstant.encodeToString(settings.s3Config)
+            preferences[CHAT_SYNC_CONFIG] = JsonInstant.encodeToString(settings.chatSyncConfig)
             preferences[TTS_PROVIDERS] = JsonInstant.encodeToString(settings.ttsProviders)
             settings.selectedTTSProviderId?.let {
                 preferences[SELECTED_TTS_PROVIDER] = it.toString()
@@ -515,6 +523,7 @@ data class Settings(
     val mcpServers: List<McpServerConfig> = emptyList(),
     val webDavConfig: WebDavConfig = WebDavConfig(),
     val s3Config: S3Config = S3Config(),
+    val chatSyncConfig: ChatSyncConfig = ChatSyncConfig(),
     val ttsProviders: List<TTSProviderSetting> = DEFAULT_TTS_PROVIDERS,
     val selectedTTSProviderId: Uuid = DEFAULT_SYSTEM_TTS_ID,
     val asrProviders: List<ASRProviderSetting> = emptyList(),

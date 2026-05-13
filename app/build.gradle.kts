@@ -25,6 +25,11 @@ val devProviderName = localProperty("univcp.dev.providerName", "UniVCP Dev Relay
 val devProviderBaseUrl = localProperty("univcp.dev.baseUrl", "http://154.36.184.44:3000")
 val devProviderChatPath = localProperty("univcp.dev.chatCompletionsPath", "/v1/chat/completions")
 val devProviderModel = localProperty("univcp.dev.model", "gemini-3-flash-preview")
+val chatSyncEnabled = localProperty("univcp.chatSync.enabled", "false").toBooleanStrictOrNull() ?: false
+val chatSyncFirebaseDatabaseUrl = localProperty("univcp.chatSync.firebaseDatabaseUrl")
+val chatSyncFirebaseAuthToken = localProperty("univcp.chatSync.firebaseAuthToken")
+val chatSyncRoomId = localProperty("univcp.chatSync.roomId", "default")
+val chatSyncDeviceId = localProperty("univcp.chatSync.deviceId")
 
 plugins {
     alias(libs.plugins.android.application)
@@ -54,6 +59,11 @@ android {
         buildConfigField("String", "UNIVCP_DEV_PROVIDER_CHAT_PATH", "\"\"")
         buildConfigField("String", "UNIVCP_DEV_PROVIDER_MODEL", "\"\"")
         buildConfigField("String", "UNIVCP_DEV_PROVIDER_API_KEY", "\"\"")
+        buildConfigField("boolean", "UNIVCP_CHAT_SYNC_ENABLED", "false")
+        buildConfigField("String", "UNIVCP_CHAT_SYNC_FIREBASE_DATABASE_URL", "\"\"")
+        buildConfigField("String", "UNIVCP_CHAT_SYNC_FIREBASE_AUTH_TOKEN", "\"\"")
+        buildConfigField("String", "UNIVCP_CHAT_SYNC_ROOM_ID", "\"\"")
+        buildConfigField("String", "UNIVCP_CHAT_SYNC_DEVICE_ID", "\"\"")
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
@@ -119,6 +129,11 @@ android {
             buildConfigField("String", "UNIVCP_DEV_PROVIDER_CHAT_PATH", devProviderChatPath.asBuildConfigString())
             buildConfigField("String", "UNIVCP_DEV_PROVIDER_MODEL", devProviderModel.asBuildConfigString())
             buildConfigField("String", "UNIVCP_DEV_PROVIDER_API_KEY", devProviderApiKey.asBuildConfigString())
+            buildConfigField("boolean", "UNIVCP_CHAT_SYNC_ENABLED", chatSyncEnabled.toString())
+            buildConfigField("String", "UNIVCP_CHAT_SYNC_FIREBASE_DATABASE_URL", chatSyncFirebaseDatabaseUrl.asBuildConfigString())
+            buildConfigField("String", "UNIVCP_CHAT_SYNC_FIREBASE_AUTH_TOKEN", chatSyncFirebaseAuthToken.asBuildConfigString())
+            buildConfigField("String", "UNIVCP_CHAT_SYNC_ROOM_ID", chatSyncRoomId.asBuildConfigString())
+            buildConfigField("String", "UNIVCP_CHAT_SYNC_DEVICE_ID", chatSyncDeviceId.asBuildConfigString())
         }
         create("baseline") {
             initWith(getByName("release"))

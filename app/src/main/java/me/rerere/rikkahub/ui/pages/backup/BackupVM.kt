@@ -22,6 +22,9 @@ import me.rerere.rikkahub.data.sync.webdav.WebDavBackupItem
 import me.rerere.rikkahub.data.sync.webdav.WebDavSync
 import me.rerere.rikkahub.data.sync.S3BackupItem
 import me.rerere.rikkahub.data.sync.S3Sync
+import me.rerere.rikkahub.data.sync.chat.ChatSyncDirection
+import me.rerere.rikkahub.data.sync.chat.ChatSyncManager
+import me.rerere.rikkahub.data.sync.chat.ChatSyncRunResult
 import me.rerere.rikkahub.utils.JsonInstant
 import me.rerere.rikkahub.utils.UiState
 import java.io.File
@@ -32,6 +35,7 @@ class BackupVM(
     private val settingsStore: SettingsStore,
     private val webDavSync: WebDavSync,
     private val s3Sync: S3Sync,
+    private val chatSyncManager: ChatSyncManager,
 ) : ViewModel() {
     val settings = settingsStore.settingsFlow.stateIn(
         scope = viewModelScope,
@@ -41,6 +45,7 @@ class BackupVM(
 
     val webDavBackupItems = MutableStateFlow<UiState<List<WebDavBackupItem>>>(UiState.Idle)
     val s3BackupItems = MutableStateFlow<UiState<List<S3BackupItem>>>(UiState.Idle)
+    val chatSyncState = chatSyncManager.state
 
     init {
         loadBackupFileItems()
@@ -216,6 +221,14 @@ class BackupVM(
     suspend fun backupToS3() {
         s3Sync.backupToS3(settings.value.s3Config)
         recordBackupTime()
+    }
+
+    suspend fun testChatSync() {
+        chatSyncManager.testConnection()
+    }
+
+    suspend fun syncChatNow(direction: ChatSyncDirection): ChatSyncRunResult {
+        return chatSyncManager.syncNow(direction)
     }
 
     suspend fun restoreFromS3(item: S3BackupItem) {

@@ -30,6 +30,7 @@ import me.rerere.rikkahub.di.viewModelModule
 import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.seedUniVcpDevProviderIfNeeded
+import me.rerere.rikkahub.data.sync.chat.ChatSyncManager
 import me.rerere.rikkahub.service.WebServerService
 import me.rerere.rikkahub.utils.CrashHandler
 import me.rerere.rikkahub.utils.DatabaseUtil
@@ -81,13 +82,12 @@ class UniVCPApp : Application() {
         // Start WebServer if enabled in settings
         startWebServerIfEnabled()
 
-        // Increment launch count
-        incrementLaunchCount()
+        initializeSettingsAndChatSync()
 
         // Composer.setDiagnosticStackTraceMode(ComposeStackTraceMode.Auto)
     }
 
-    private fun incrementLaunchCount() {
+    private fun initializeSettingsAndChatSync() {
         get<AppScope>().launch {
             runCatching {
                 val store = get<SettingsStore>()
@@ -98,6 +98,8 @@ class UniVCPApp : Application() {
             }.onFailure {
                 Log.e(TAG, "incrementLaunchCount failed", it)
             }
+            // Start chat sync after one-time debug/provider seeding so those writes cannot race.
+            get<ChatSyncManager>().start()
         }
     }
 

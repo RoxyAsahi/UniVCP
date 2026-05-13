@@ -32,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.delay
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
@@ -87,6 +88,8 @@ fun BubbleWebView(
     var progress by remember { mutableFloatStateOf(0f) }
     var renderState by remember(payload.id) { mutableStateOf(BubbleRenderState()) }
     var heightPx by remember(payload.id) { mutableIntStateOf(renderState.heightPx) }
+    var lastRenderedPayloadJson by remember(payload.id) { mutableStateOf<String?>(null) }
+    val encodedPayload = remember(payload) { payloadJson.encodeToString(payload) }
     val currentOnSendInput = rememberUpdatedState(onSendInput)
 
     fun updateState(next: BubbleRenderState) {
@@ -121,10 +124,11 @@ fun BubbleWebView(
         )
     }
 
-    fun render(webView: WebView?) {
+    fun render(webView: WebView?, encoded: String = encodedPayload) {
         if (webView == null || !loaded) return
-        val encoded = payloadJson.encodeToString(payload)
+        if (lastRenderedPayloadJson == encoded) return
         val script = "window.UniVCPRenderer && window.UniVCPRenderer.renderPayload($encoded);"
+        lastRenderedPayloadJson = encoded
         webView.evaluateJavascript(script, null)
     }
 
@@ -137,6 +141,7 @@ fun BubbleWebView(
 
     fun loadBundledShell(webView: WebView) {
         loaded = false
+        lastRenderedPayloadJson = null
         webView.settings.blockNetworkLoads = true
         webView.loadDataWithBaseURL(
             RENDERER_BASE_URL,
@@ -194,7 +199,9 @@ fun BubbleWebView(
 
                         override fun onPageFinished(view: WebView?, url: String?) {
                             loaded = true
-                            render(view)
+                            if (!payload.isStreaming) {
+                                render(view)
+                            }
                         }
 
                         override fun onReceivedError(
@@ -233,7 +240,9 @@ fun BubbleWebView(
                 .height(heightPx.dp),
             update = { webView ->
                 webViewRef = webView
-                render(webView)
+                if (!payload.isStreaming) {
+                    render(webView)
+                }
             },
             onRelease = { webView ->
                 webView.removeJavascriptInterface("UniVCPAndroid")
@@ -254,8 +263,12 @@ fun BubbleWebView(
         }
     }
 
-    LaunchedEffect(payload, loaded) {
-        render(webViewRef)
+    LaunchedEffect(encodedPayload, loaded) {
+        if (!loaded) return@LaunchedEffect
+        if (payload.isStreaming) {
+            delay(80)
+        }
+        render(webViewRef, encodedPayload)
     }
 
     DisposableEffect(Unit) {

@@ -10,6 +10,7 @@ import me.rerere.rikkahub.AppScope
 import me.rerere.rikkahub.data.ai.AILoggingManager
 import me.rerere.rikkahub.data.ai.tools.LocalTools
 import me.rerere.rikkahub.data.event.AppEventBus
+import me.rerere.rikkahub.data.sync.chat.ChatSyncManager
 import me.rerere.rikkahub.service.ChatService
 import me.rerere.rikkahub.utils.EmojiData
 import me.rerere.rikkahub.utils.EmojiUtils
@@ -85,6 +86,18 @@ val appModule = module {
             mcpManager = get(),
             filesManager = get(),
             skillManager = get()
+        )
+    }
+
+    single {
+        ChatSyncManager(
+            appScope = get(),
+            settingsStore = get(),
+            conversationDAO = get(),
+            conversationRepository = get(),
+            chatService = get(),
+            httpClient = get(),
+            json = get(),
         )
     }
 

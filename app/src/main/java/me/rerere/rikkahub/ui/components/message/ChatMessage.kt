@@ -259,6 +259,113 @@ fun ChatMessage(
     }
 }
 
+@Composable
+private fun AssistantTextBlocks(
+    blocks: List<MessageTextBlock>,
+    loading: Boolean,
+    onClickCitation: (String) -> Unit,
+    onBubbleInput: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val navController = LocalNavController.current
+
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        blocks.fastForEachIndexed { index, block ->
+            key(index) {
+                when (block) {
+                    is MessageTextBlock.Markdown -> {
+                        MarkdownBlock(
+                            content = block.text,
+                            onClickCitation = onClickCitation,
+                        )
+                    }
+
+                    is MessageTextBlock.VcpHtml -> {
+                        Column(
+                            modifier = Modifier.animateContentSize(),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            UniVcpLearningBubble(
+                                content = block.html,
+                                isStreaming = loading && block.partial,
+                                onSendInput = onBubbleInput,
+                            )
+                            if (block.executable) {
+                                TextButton(
+                                    onClick = {
+                                        navController.navigate(Screen.WebView(content = block.html.base64Encode()))
+                                    }
+                                ) {
+                                    Text("打开动态预览")
+                                }
+                            }
+                        }
+                    }
+
+                    is MessageTextBlock.Protocol -> {
+                        ProtocolTextBlock(block = block)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ProtocolTextBlock(block: MessageTextBlock.Protocol) {
+    var expanded by remember(block.raw) { mutableStateOf(false) }
+    val title = when (block.kind) {
+        ProtocolKind.MetaThinking -> "VCP 元思考链"
+        ProtocolKind.ToolRequest -> "VCP 工具调用"
+        ProtocolKind.ToolResult -> "VCP 调用结果"
+    }
+    val accentColor = when (block.success) {
+        true -> MaterialTheme.colorScheme.primary
+        false -> MaterialTheme.colorScheme.error
+        null -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .animateContentSize(),
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    text = title,
+                    color = accentColor,
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = { expanded = !expanded }) {
+                    Text(if (expanded) "收起" else "展开")
+                }
+            }
+            if (expanded) {
+                Text(
+                    text = block.raw,
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
 @OptIn(FlowPreview::class)
 @Composable
 private fun MessagePartsBlock(
@@ -378,27 +485,30 @@ private fun MessagePartsBlock(
                                     scope = AssistantAffectScope.ASSISTANT,
                                     visual = true,
                                 )
+                                val textBlocks = remember(assistantContent, loading) {
+                                    parseMessageTextBlocks(assistantContent, streaming = loading)
+                                }
                                 if (settings.displaySetting.showAssistantBubble) {
                                     Surface(
                                         modifier = Modifier.animateContentSize(),
                                         shape = RoundedCornerShape(16.dp),
                                         color = MaterialTheme.colorScheme.surfaceContainerHigh,
                                     ) {
-                                        Column(modifier = Modifier.padding(8.dp)) {
-                                            UniVcpLearningBubble(
-                                                content = assistantContent,
-                                                isStreaming = loading,
-                                                onSendInput = onBubbleInput,
-                                            )
-                                        }
+                                        AssistantTextBlocks(
+                                            blocks = textBlocks,
+                                            loading = loading,
+                                            onClickCitation = handleClickCitation,
+                                            onBubbleInput = onBubbleInput,
+                                            modifier = Modifier.padding(8.dp),
+                                        )
                                     }
                                 } else {
-                                    UniVcpLearningBubble(
-                                        content = assistantContent,
-                                        isStreaming = loading,
-                                        onSendInput = onBubbleInput,
-                                        modifier = Modifier
-                                            .animateContentSize()
+                                    AssistantTextBlocks(
+                                        blocks = textBlocks,
+                                        loading = loading,
+                                        onClickCitation = handleClickCitation,
+                                        onBubbleInput = onBubbleInput,
+                                        modifier = Modifier.animateContentSize(),
                                     )
                                 }
                             }
