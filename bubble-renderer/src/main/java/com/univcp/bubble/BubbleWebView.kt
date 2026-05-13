@@ -8,7 +8,9 @@ import android.view.ViewGroup
 import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.animation.animateContentSize
@@ -68,6 +70,7 @@ class BubbleBridge(
 fun BubbleWebView(
     payload: BubblePayload,
     modifier: Modifier = Modifier,
+    rendererShellUrl: String? = null,
     onStateChanged: (BubbleRenderState) -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -114,11 +117,29 @@ fun BubbleWebView(
     val shellHtml = remember {
         context.assets.open("renderer/renderer-shell.html").bufferedReader().use { it.readText() }
     }
+    val remoteShellUrl = remember(rendererShellUrl) {
+        rendererShellUrl?.takeIf { it.isNotBlank() }
+    }
+
+    fun loadBundledShell(webView: WebView) {
+        loaded = false
+        webView.settings.blockNetworkLoads = true
+        webView.loadDataWithBaseURL(
+            RENDERER_BASE_URL,
+            shellHtml,
+            "text/html",
+            "UTF-8",
+            null
+        )
+    }
 
     Box(modifier = modifier.fillMaxWidth()) {
         AndroidView(
             factory = {
                 WebView(it).apply {
+                    if (remoteShellUrl != null) {
+                        WebView.setWebContentsDebuggingEnabled(true)
+                    }
                     layoutParams = ViewGroup.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT,
                         ViewGroup.LayoutParams.WRAP_CONTENT
@@ -132,7 +153,12 @@ fun BubbleWebView(
                     settings.allowFileAccess = true
                     settings.allowFileAccessFromFileURLs = false
                     settings.allowUniversalAccessFromFileURLs = false
-                    settings.blockNetworkLoads = true
+                    settings.blockNetworkLoads = remoteShellUrl == null
+                    settings.cacheMode = if (remoteShellUrl != null) {
+                        WebSettings.LOAD_NO_CACHE
+                    } else {
+                        WebSettings.LOAD_DEFAULT
+                    }
                     settings.mediaPlaybackRequiresUserGesture = true
                     webChromeClient = object : WebChromeClient() {
                         override fun onProgressChanged(view: WebView?, newProgress: Int) {
@@ -150,22 +176,41 @@ fun BubbleWebView(
                         }
                     }
                     webViewClient = object : WebViewClient() {
+                        private var fellBackToBundled = false
+
                         override fun onPageFinished(view: WebView?, url: String?) {
                             loaded = true
                             render(view)
+                        }
+
+                        override fun onReceivedError(
+                            view: WebView?,
+                            request: WebResourceRequest?,
+                            error: WebResourceError?
+                        ) {
+                            super.onReceivedError(view, request, error)
+                            if (
+                                remoteShellUrl != null &&
+                                request?.isForMainFrame == true &&
+                                view != null &&
+                                !fellBackToBundled
+                            ) {
+                                fellBackToBundled = true
+                                val message = error?.description?.toString() ?: "remote renderer unavailable"
+                                Log.w(TAG, "Remote renderer failed, falling back to bundled asset: $message")
+                                loadBundledShell(view)
+                            }
                         }
 
                         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                             return true
                         }
                     }
-                    loadDataWithBaseURL(
-                        RENDERER_BASE_URL,
-                        shellHtml,
-                        "text/html",
-                        "UTF-8",
-                        null
-                    )
+                    if (remoteShellUrl != null) {
+                        loadUrl(remoteShellUrl)
+                    } else {
+                        loadBundledShell(this)
+                    }
                 }
             },
             modifier = Modifier

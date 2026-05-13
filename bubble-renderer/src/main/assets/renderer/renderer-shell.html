@@ -116,5 +116,35 @@
   <script src="vendor/mermaid.min.js"></script>
   <script src="vendor/morphdom.min.js"></script>
   <script src="bubble-runtime.js"></script>
+  <script>
+    (function () {
+      var isDevRenderer = location.protocol.indexOf('http') === 0 &&
+        (location.hostname === '127.0.0.1' || location.hostname === 'localhost');
+      if (!isDevRenderer) return;
+
+      var currentVersion = null;
+      var pendingReload = false;
+      async function checkRendererVersion() {
+        if (pendingReload) return;
+        try {
+          var response = await fetch('__version.txt?t=' + Date.now(), { cache: 'no-store' });
+          if (!response.ok) return;
+          var nextVersion = (await response.text()).trim();
+          if (!nextVersion) return;
+          if (currentVersion === null) {
+            currentVersion = nextVersion;
+          } else if (currentVersion !== nextVersion) {
+            pendingReload = true;
+            location.reload();
+          }
+        } catch (_error) {
+          // The dev server may be starting or restarting.
+        }
+      }
+
+      setInterval(checkRendererVersion, 800);
+      checkRendererVersion();
+    })();
+  </script>
 </body>
 </html>

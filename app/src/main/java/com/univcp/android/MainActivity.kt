@@ -64,6 +64,8 @@ import com.univcp.bubble.BubbleWebView
 import kotlinx.coroutines.launch
 import org.koin.android.ext.android.inject
 
+private const val DEBUG_RENDERER_SHELL_URL = "http://127.0.0.1:5179/renderer-shell.html"
+
 class MainActivity : ComponentActivity() {
     private val chatRepository by inject<ChatRepository>()
     private val settingsStore by inject<SettingsStore>()
@@ -336,6 +338,7 @@ private fun AssistantRenderBubble(message: MessageEntity, shape: RoundedCornerSh
                         isStreaming = message.isStreaming,
                         allowScript = message.allowScript && (!requiresRun || hasRun)
                     ),
+                    rendererShellUrl = if (BuildConfig.DEBUG) DEBUG_RENDERER_SHELL_URL else null,
                     modifier = Modifier.fillMaxWidth()
                 )
             }

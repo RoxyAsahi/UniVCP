@@ -9,3 +9,4 @@ captures/
 *.jks
 app/release/
 **/build/
+bubble-renderer/src/main/assets/renderer/__version.txt
