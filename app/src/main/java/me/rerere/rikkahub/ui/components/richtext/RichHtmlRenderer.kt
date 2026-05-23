@@ -6,6 +6,8 @@ import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Shader
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -54,6 +56,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -646,6 +649,7 @@ private fun StyledContainer(
         .then(style.baseModifier(root))
     outer = outer.then(style.richShadowModifier(shape))
     outer = outer.then(style.cssColorFilterModifier())
+    outer = outer.then(style.nativeAnimationModifier())
     if (style.overflow == RichOverflow.Hidden) outer = outer.clip(shape)
     if (onClick != null) outer = outer.clickable(onClick = onClick)
     if (style.overflow == RichOverflow.Scroll || style.overflow == RichOverflow.Auto) {
@@ -719,6 +723,55 @@ private fun ComputedStyle.cssColorFilterModifier(): Modifier {
         drawContent()
         drawContext.canvas.nativeCanvas.restoreToCount(checkpoint)
     }
+}
+
+@Composable
+private fun ComputedStyle.nativeAnimationModifier(): Modifier {
+    val native = animation.nativeAnimation ?: return Modifier
+    var started by remember(native) { mutableStateOf(false) }
+    LaunchedEffect(native) {
+        started = true
+    }
+    val progress by animateFloatAsState(
+        targetValue = if (started) 1f else 0f,
+        animationSpec = tween(durationMillis = native.durationMs, delayMillis = native.delayMs),
+        label = "rich-html-native-css-animation",
+    )
+    val animatedOpacity = lerpCss(
+        native.fromOpacity ?: 1f,
+        native.toOpacity ?: 1f,
+        progress,
+    ).coerceIn(0f, 1f)
+    val transform = native.transformAt(progress)
+    val density = LocalDensity.current
+    return Modifier.graphicsLayer {
+        alpha = animatedOpacity
+        translationX = with(density) { transform.translateX.toPx() }
+        translationY = with(density) { transform.translateY.toPx() }
+        scaleX = transform.scaleX
+        scaleY = transform.scaleY
+        rotationZ = transform.rotateZ
+    }
+}
+
+private fun RichNativeAnimation.transformAt(progress: Float): RichTransform {
+    return RichTransform(
+        translateX = lerpDp(fromTransform.translateX, toTransform.translateX, progress),
+        translateY = lerpDp(fromTransform.translateY, toTransform.translateY, progress),
+        scaleX = lerpCss(fromTransform.scaleX, toTransform.scaleX, progress),
+        scaleY = lerpCss(fromTransform.scaleY, toTransform.scaleY, progress),
+        rotateZ = lerpCss(fromTransform.rotateZ, toTransform.rotateZ, progress),
+        skewX = lerpCss(fromTransform.skewX, toTransform.skewX, progress),
+        skewY = lerpCss(fromTransform.skewY, toTransform.skewY, progress),
+    )
+}
+
+private fun lerpDp(start: Dp, stop: Dp, fraction: Float): Dp {
+    return (start.value + (stop.value - start.value) * fraction.coerceIn(0f, 1f)).dp
+}
+
+private fun lerpCss(start: Float, stop: Float, fraction: Float): Float {
+    return start + (stop - start) * fraction.coerceIn(0f, 1f)
 }
 
 private fun RichCssFilter.toAndroidColorMatrix(): ColorMatrix? {

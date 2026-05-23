@@ -51,6 +51,7 @@ import me.rerere.rikkahub.ui.components.richtext.RichSvgTextAnchor
 import me.rerere.rikkahub.ui.components.richtext.RichTableBlock
 import me.rerere.rikkahub.ui.components.richtext.RichTableSectionType
 import me.rerere.rikkahub.ui.components.richtext.RichTextBlock
+import me.rerere.rikkahub.ui.components.richtext.RichTransform
 import me.rerere.rikkahub.ui.components.richtext.RichVisualHint
 import me.rerere.rikkahub.ui.components.richtext.RichWhiteSpace
 import me.rerere.rikkahub.ui.components.richtext.RichWordBreak
@@ -672,6 +673,10 @@ class MessageTextBlocksTest {
         assertTrue(card.style.animation.isDeclared)
         assertEquals(600, card.style.animation.durationMs)
         assertTrue(card.style.animation.fillModeForwards)
+        assertEquals(0f, card.style.animation.nativeAnimation?.fromOpacity ?: -1f, 0.001f)
+        assertEquals(1f, card.style.animation.nativeAnimation?.toOpacity ?: -1f, 0.001f)
+        assertEquals(12.dp, card.style.animation.nativeAnimation?.fromTransform?.translateY)
+        assertEquals(RichTransform.None, card.style.animation.nativeAnimation?.toTransform)
         assertTrue(card.style.transition.isDeclared)
         assertTrue(model.visualHints.contains(RichVisualHint.CssAnimation))
         assertTrue(model.visualHints.contains(RichVisualHint.CssTransition))
@@ -697,10 +702,35 @@ class MessageTextBlocksTest {
 
         assertTrue(block.style.animation.isInfinite)
         assertTrue(block.style.animation.hasLayoutProperty)
+        assertEquals(null, block.style.animation.nativeAnimation)
         assertTrue(model.visualHints.contains(RichVisualHint.CssAnimation))
         assertTrue(model.visualHints.contains(RichVisualHint.CssInfiniteAnimation))
         assertTrue(model.visualHints.contains(RichVisualHint.CssLayoutAnimation))
         assertTrue(model.visualHints.contains(RichVisualHint.CssTransition))
+    }
+
+    @Test
+    fun `finite transform keyframes become native animation while complex keyframes stay static`() {
+        val html = """
+            <div id="vcp-root">
+              <style>
+                @keyframes pop { from { transform:scale(.96) rotate(-2deg); opacity:.3; } to { transform:scale(1) rotate(0deg); opacity:1; } }
+                @keyframes mid { 0% { opacity:0; } 50% { opacity:.6; } 100% { opacity:1; } }
+              </style>
+              <div class="ok" style="animation:pop 900ms ease-out forwards;">Pop</div>
+              <div class="no" style="animation:mid 900ms ease-out forwards;">Mid</div>
+            </div>
+        """.trimIndent()
+
+        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
+        val textBlocks = flattenRichBlocks(root).filterIsInstance<RichTextBlock>()
+        val pop = textBlocks.single { it.content.text == "Pop" }
+        val mid = textBlocks.single { it.content.text == "Mid" }
+
+        assertEquals(900, pop.style.animation.nativeAnimation?.durationMs)
+        assertEquals(0.96f, pop.style.animation.nativeAnimation?.fromTransform?.scaleX ?: -1f, 0.001f)
+        assertEquals(-2f, pop.style.animation.nativeAnimation?.fromTransform?.rotateZ ?: 0f, 0.001f)
+        assertEquals(null, mid.style.animation.nativeAnimation)
     }
 
     @Test

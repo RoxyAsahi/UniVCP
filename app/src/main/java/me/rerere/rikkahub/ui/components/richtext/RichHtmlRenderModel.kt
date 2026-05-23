@@ -386,6 +386,7 @@ internal data class RichAnimationStyle(
     val fillModeForwards: Boolean = false,
     val hasLayoutProperty: Boolean = false,
     val hasOpacityOrTransform: Boolean = false,
+    val nativeAnimation: RichNativeAnimation? = null,
 ) {
     val isDeclared: Boolean
         get() = names.isNotEmpty()
@@ -400,6 +401,15 @@ internal data class RichAnimationStyle(
         val None = RichAnimationStyle()
     }
 }
+
+internal data class RichNativeAnimation(
+    val fromOpacity: Float? = null,
+    val toOpacity: Float? = null,
+    val fromTransform: RichTransform = RichTransform.None,
+    val toTransform: RichTransform = RichTransform.None,
+    val durationMs: Int,
+    val delayMs: Int,
+)
 
 internal data class RichTransitionStyle(
     val properties: List<String> = emptyList(),

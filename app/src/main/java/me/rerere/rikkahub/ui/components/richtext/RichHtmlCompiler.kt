@@ -855,6 +855,9 @@ private data class CssParseResult(
 private data class RichKeyframesSummary(
     val name: String,
     val properties: Set<String>,
+    val fromDeclarations: Map<String, String> = emptyMap(),
+    val toDeclarations: Map<String, String> = emptyMap(),
+    val hasIntermediateFrame: Boolean = false,
 ) {
     val hasOpacityOrTransform: Boolean
         get() = properties.any { it == "opacity" || it == "transform" }
@@ -1441,11 +1444,51 @@ private fun mediaMatches(selector: String, options: RichHtmlCompileOptions): Boo
 
 private fun hintsForKeyframes(selector: String, body: String): RichKeyframesSummary? {
     val name = selector.substringAfter("@keyframes", "").trim().takeIf { it.isNotBlank() } ?: return null
-    val properties = CSS_PROPERTY_NAME.findAll(body)
-        .map { it.groupValues[1].trim().lowercase() }
-        .filterNot { it.matches(Regex("""\d+%|from|to""")) }
-        .toSet()
-    return RichKeyframesSummary(name = name, properties = properties)
+    val frames = parseKeyframeDeclarations(body)
+    val properties = if (frames.isEmpty()) {
+        CSS_PROPERTY_NAME.findAll(body)
+            .map { it.groupValues[1].trim().lowercase() }
+            .filterNot { it.matches(Regex("""\d+%|from|to""")) }
+            .toSet()
+    } else {
+        frames.flatMap { it.declarations.keys }.map { it.lowercase() }.toSet()
+    }
+    val fromDeclarations = frames.firstOrNull { it.isFrom }?.declarations.orEmpty()
+    val toDeclarations = frames.lastOrNull { it.isTo }?.declarations.orEmpty()
+    val hasIntermediateFrame = frames.any { !it.isFrom && !it.isTo }
+    return RichKeyframesSummary(
+        name = name,
+        properties = properties,
+        fromDeclarations = fromDeclarations,
+        toDeclarations = toDeclarations,
+        hasIntermediateFrame = hasIntermediateFrame,
+    )
+}
+
+private data class ParsedKeyframeDeclarations(
+    val isFrom: Boolean,
+    val isTo: Boolean,
+    val declarations: Map<String, String>,
+)
+
+private fun parseKeyframeDeclarations(body: String): List<ParsedKeyframeDeclarations> {
+    val frames = mutableListOf<ParsedKeyframeDeclarations>()
+    var cursor = 0
+    while (cursor < body.length) {
+        val start = body.indexOf('{', cursor)
+        if (start < 0) break
+        val selector = body.substring(cursor, start).trim()
+        val end = findMatchingBrace(body, start)
+        if (end < 0) break
+        val labels = selector.split(",").map { it.trim().lowercase() }
+        frames += ParsedKeyframeDeclarations(
+            isFrom = labels.any { it == "from" || it == "0%" },
+            isTo = labels.any { it == "to" || it == "100%" },
+            declarations = parseCssDeclarations(body.substring(start + 1, end)),
+        )
+        cursor = end + 1
+    }
+    return frames
 }
 
 private fun matchCompoundSelector(element: Element, selector: String): Boolean {
@@ -2041,6 +2084,16 @@ private fun parseAnimationStyle(
         declarations.values.any { it.contains("transform", ignoreCase = true) }
     val hasLayoutProperty = summaries.any { it.hasLayoutProperty } ||
         declarations["animation-property"]?.let(::containsLayoutAnimationProperty) == true
+    val nativeAnimation = buildNativeAnimation(
+        summaries = summaries,
+        names = names,
+        durationMs = durationMs,
+        delayMs = delayMs,
+        iterationCount = iterationCount,
+        fillModeForwards = fillModeForwards,
+        hasLayoutProperty = hasLayoutProperty,
+        context = context,
+    )
     return RichAnimationStyle(
         names = names,
         durationMs = durationMs.coerceIn(0, 10_000),
@@ -2049,6 +2102,43 @@ private fun parseAnimationStyle(
         fillModeForwards = fillModeForwards,
         hasLayoutProperty = hasLayoutProperty,
         hasOpacityOrTransform = hasOpacityOrTransform || names.isNotEmpty(),
+        nativeAnimation = nativeAnimation,
+    )
+}
+
+private fun buildNativeAnimation(
+    summaries: List<RichKeyframesSummary>,
+    names: List<String>,
+    durationMs: Int,
+    delayMs: Int,
+    iterationCount: Float,
+    fillModeForwards: Boolean,
+    hasLayoutProperty: Boolean,
+    context: CssLengthContext,
+): RichNativeAnimation? {
+    val summary = summaries.singleOrNull() ?: return null
+    if (names.size != 1) return null
+    if (!fillModeForwards || iterationCount != 1f || hasLayoutProperty || summary.hasIntermediateFrame) return null
+    if (durationMs !in 1..MAX_NATIVE_ANIMATION_DURATION_MS) return null
+    if (delayMs !in 0..MAX_NATIVE_ANIMATION_DELAY_MS) return null
+    if (summary.properties.any { it !in NATIVE_ANIMATION_PROPERTIES }) return null
+    val from = summary.fromDeclarations
+    val to = summary.toDeclarations
+    if (from.isEmpty() || to.isEmpty()) return null
+    val fromOpacity = from["opacity"]?.let(::parseCssFloat)?.coerceIn(0f, 1f)
+    val toOpacity = to["opacity"]?.let(::parseCssFloat)?.coerceIn(0f, 1f)
+    val fromTransform = from["transform"]?.let { parseTransform(it, context) } ?: RichTransform.None
+    val toTransform = to["transform"]?.let { parseTransform(it, context) } ?: RichTransform.None
+    if (fromOpacity == null && toOpacity == null && fromTransform == RichTransform.None && toTransform == RichTransform.None) {
+        return null
+    }
+    return RichNativeAnimation(
+        fromOpacity = fromOpacity,
+        toOpacity = toOpacity,
+        fromTransform = fromTransform,
+        toTransform = toTransform,
+        durationMs = durationMs,
+        delayMs = delayMs,
     )
 }
 
@@ -2877,6 +2967,9 @@ private val ANIMATED_LAYOUT_PROPERTIES = setOf(
     "grid-template-rows",
     "flex-basis",
 )
+private val NATIVE_ANIMATION_PROPERTIES = setOf("opacity", "transform")
+private const val MAX_NATIVE_ANIMATION_DURATION_MS = 1_200
+private const val MAX_NATIVE_ANIMATION_DELAY_MS = 1_500
 private val ANIMATION_SHORTHAND_KEYWORDS = setOf(
     "none",
     "linear",
