@@ -46,7 +46,6 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.Node
 import org.jsoup.nodes.TextNode
-import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
@@ -782,6 +781,22 @@ private fun visualHintsForDeclarations(declarations: Map<String, String>): Set<R
     val hints = linkedSetOf<RichVisualHint>()
     val background = declarations["background-image"] ?: declarations["background"]
     if (background != null && countExtraBackgroundLayers(background) > 0) hints += RichVisualHint.BackgroundExtraLayer
+    val colorDeclarations = listOf(
+        "color",
+        "background",
+        "background-color",
+        "border",
+        "border-color",
+        "border-top-color",
+        "border-right-color",
+        "border-bottom-color",
+        "border-left-color",
+        "box-shadow",
+        "text-shadow",
+    )
+    if (colorDeclarations.any { key -> declarations[key]?.let(::containsUnresolvedCssColor) == true }) {
+        hints += RichVisualHint.CssUnsupportedColor
+    }
     declarations["filter"]?.takeIf { it.isNotBlank() && !it.equals("none", ignoreCase = true) }
         ?.let { hints += RichVisualHint.CssFilter }
     declarations["backdrop-filter"]?.takeIf { it.isNotBlank() && !it.equals("none", ignoreCase = true) }
@@ -935,7 +950,6 @@ private fun computeStyle(
         viewportWidth = options.viewportWidthDp.dp,
         fontSize = fontSize,
     )
-    val border = parseBorder(declarations, inherited.border, lengthContext)
     val gapShorthand = (declarations["gap"] ?: declarations["grid-gap"])
         ?.let { parseCssGap(it, lengthContext) }
     val rowGap = (declarations["row-gap"] ?: declarations["grid-row-gap"])
@@ -950,15 +964,26 @@ private fun computeStyle(
     val backgroundShorthand = declarations["background"]?.let { parseBackgroundShorthand(it, lengthContext) }
     val flexShorthand = declarations["flex"]?.let { parseFlexShorthand(it, lengthContext) }
     val flexFlow = declarations["flex-flow"]?.let(::parseFlexFlow)
+    val declaredColor = declarations["color"]?.let(::parseRichCssColor)
+    val resolvedColor = declarations["color"]?.let { resolveRichCssColor(declaredColor, inherited.color) } ?: inherited.color
+    val declaredBackgroundColor = declarations["background-color"]?.let(::parseRichCssColor)
+        ?: backgroundShorthand?.declaredColor
+        ?: declarations["background"]?.let(::parseRichCssColor)
+    val resolvedBackgroundColor = when {
+        declarations.containsKey("background-color") -> resolveRichCssColor(declaredBackgroundColor, resolvedColor)
+        backgroundShorthand?.declaredColor != null -> resolveRichCssColor(backgroundShorthand.declaredColor, resolvedColor)
+        declarations.containsKey("background") -> resolveRichCssColor(declaredBackgroundColor, resolvedColor)
+        else -> inherited.backgroundColor
+    }
+    val border = parseBorder(declarations, inherited.border, lengthContext, resolvedColor)
     return inherited.copy(
         display = declarations["display"]?.let(::parseDisplay) ?: inherited.display,
         position = declarations["position"]?.let(::parsePosition) ?: inherited.position,
         visibility = declarations["visibility"]?.let(::parseVisibility) ?: inherited.visibility,
-        color = declarations["color"]?.let(::parseCssColor) ?: inherited.color,
-        backgroundColor = declarations["background-color"]?.let(::parseCssColor)
-            ?: backgroundShorthand?.color
-            ?: declarations["background"]?.let(::parseCssColor)
-            ?: inherited.backgroundColor,
+        color = resolvedColor,
+        declaredColor = declaredColor ?: inherited.declaredColor,
+        backgroundColor = resolvedBackgroundColor,
+        declaredBackgroundColor = declaredBackgroundColor ?: inherited.declaredBackgroundColor,
         backgroundImage = declarations["background-image"]?.let(::parseBackgroundImage)
             ?: backgroundShorthand?.image
             ?: declarations["background"]?.let(::parseBackgroundImage)
@@ -994,7 +1019,7 @@ private fun computeStyle(
         margin = parseCssSpacing(declarations, "margin", lengthContext) ?: inherited.margin,
         border = border,
         borderRadius = parseCssCornerRadius(declarations, lengthContext) ?: inherited.borderRadius,
-        shadows = declarations["box-shadow"]?.let { parseShadows(it, lengthContext) } ?: inherited.shadows,
+        shadows = declarations["box-shadow"]?.let { parseShadows(it, lengthContext, resolvedColor) } ?: inherited.shadows,
         width = declarations["width"]?.let { parseRichSize(it, lengthContext) } ?: inherited.width,
         height = declarations["height"]?.let { parseRichSize(it, lengthContext) } ?: inherited.height,
         minWidth = declarations["min-width"]?.let { parseCssDp(it, lengthContext) } ?: inherited.minWidth,
@@ -1041,7 +1066,7 @@ private fun computeStyle(
         textAlign = declarations["text-align"]?.let(::parseCssTextAlign) ?: inherited.textAlign,
         letterSpacing = declarations["letter-spacing"]?.let { parseCssFontSize(it, fontSize) } ?: inherited.letterSpacing,
         textDecoration = declarations["text-decoration"]?.let(::parseTextDecoration) ?: inherited.textDecoration,
-        textShadow = declarations["text-shadow"]?.let(::parseTextShadow) ?: inherited.textShadow,
+        textShadow = declarations["text-shadow"]?.let { parseTextShadow(it, resolvedColor) } ?: inherited.textShadow,
         textTransform = declarations["text-transform"]?.let(::parseTextTransform) ?: inherited.textTransform,
         verticalAlign = declarations["vertical-align"]?.let(::parseVerticalAlign) ?: inherited.verticalAlign,
         fontVariantNumeric = declarations["font-variant-numeric"]?.let(::parseFontVariantNumeric)
@@ -1813,12 +1838,17 @@ private fun parseCornerTokens(value: String, context: CssLengthContext): RichCor
     }
 }
 
-private fun parseBorder(css: Map<String, String>, parent: RichBorder, context: CssLengthContext): RichBorder {
-    val shorthand = css["border"]?.let { parseBorderSide(it, context) }
+private fun parseBorder(
+    css: Map<String, String>,
+    parent: RichBorder,
+    context: CssLengthContext,
+    currentColor: Color?,
+): RichBorder {
+    val shorthand = css["border"]?.let { parseBorderSide(it, context, currentColor) }
     fun side(name: String, current: RichBorderSide): RichBorderSide {
-        val parsed = css["border-$name"]?.let { parseBorderSide(it, context) }
+        val parsed = css["border-$name"]?.let { parseBorderSide(it, context, currentColor) }
         val width = css["border-$name-width"]?.let { parseCssDp(it, context) }
-        val color = css["border-$name-color"]?.let(::parseCssColor)
+        val color = css["border-$name-color"]?.let { resolveRichCssColor(parseRichCssColor(it), currentColor) }
         val style = css["border-$name-style"]?.let(::parseBorderStyle)
         return current.copy(
             width = width ?: parsed?.width ?: shorthand?.width ?: current.width,
@@ -1827,7 +1857,7 @@ private fun parseBorder(css: Map<String, String>, parent: RichBorder, context: C
         )
     }
     val baseWidth = css["border-width"]?.let { parseCssDp(it, context) }
-    val baseColor = css["border-color"]?.let(::parseCssColor)
+    val baseColor = css["border-color"]?.let { resolveRichCssColor(parseRichCssColor(it), currentColor) }
     val baseStyle = css["border-style"]?.let(::parseBorderStyle)
     val base = shorthand?.let { RichBorder.all(it) } ?: parent
     val withBase = if (baseWidth != null || baseColor != null || baseStyle != null) {
@@ -1849,10 +1879,10 @@ private fun parseBorder(css: Map<String, String>, parent: RichBorder, context: C
     )
 }
 
-private fun parseBorderSide(value: String, context: CssLengthContext): RichBorderSide? {
+private fun parseBorderSide(value: String, context: CssLengthContext, currentColor: Color?): RichBorderSide? {
     val parts = value.split(Regex("\\s+"))
     val width = parts.firstNotNullOfOrNull { parseCssDp(it, context) } ?: 1.dp
-    val color = parts.firstNotNullOfOrNull(::parseCssColor) ?: Color.Gray
+    val color = parts.firstNotNullOfOrNull { resolveRichCssColor(parseRichCssColor(it), currentColor) } ?: currentColor ?: Color.Gray
     val style = parts.firstNotNullOfOrNull(::parseBorderStyle) ?: RichBorderStyle.Solid
     return RichBorderSide(width, color, style)
 }
@@ -1866,26 +1896,30 @@ private fun parseBorderStyle(value: String): RichBorderStyle? = when (value.trim
     else -> null
 }
 
-private fun parseShadows(value: String, context: CssLengthContext): List<RichShadow> {
+private fun parseShadows(value: String, context: CssLengthContext, currentColor: Color?): List<RichShadow> {
     if (value.equals("none", ignoreCase = true)) return emptyList()
     return splitCssTopLevel(value, ',').mapNotNull { shadow ->
         val inset = shadow.contains("inset", ignoreCase = true)
-        val color = CSS_COLOR_TOKEN.find(shadow)?.value?.let(::parseCssColor) ?: Color.Black.copy(alpha = 0.24f)
+        val color = CSS_COLOR_TOKEN.find(shadow)?.value
+            ?.let { resolveRichCssColor(parseRichCssColor(it), currentColor) }
+            ?: Color.Black.copy(alpha = 0.24f)
         val lengths = CSS_LENGTH_TOKEN.findAll(shadow).mapNotNull { parseCssDp(it.value, context) }.toList()
         if (lengths.isEmpty()) null else RichShadow(
             offsetX = lengths.getOrNull(0) ?: 0.dp,
             offsetY = lengths.getOrNull(1) ?: 0.dp,
-            blurRadius = lengths.getOrNull(2) ?: 0.dp,
-            spread = lengths.getOrNull(3) ?: 0.dp,
+            blurRadius = lengths.getOrNull(2)?.coerceIn(0.dp, 96.dp) ?: 0.dp,
+            spread = lengths.getOrNull(3)?.coerceIn((-48).dp, 48.dp) ?: 0.dp,
             color = color,
             inset = inset,
         )
     }
 }
 
-private fun parseTextShadow(value: String): RichTextShadow? {
+private fun parseTextShadow(value: String, currentColor: Color?): RichTextShadow? {
     if (value.equals("none", ignoreCase = true)) return null
-    val color = CSS_COLOR_TOKEN.find(value)?.value?.let(::parseCssColor) ?: Color.Black.copy(alpha = 0.35f)
+    val color = CSS_COLOR_TOKEN.find(value)?.value
+        ?.let { resolveRichCssColor(parseRichCssColor(it), currentColor) }
+        ?: Color.Black.copy(alpha = 0.35f)
     val lengths = CSS_LENGTH_TOKEN.findAll(value).mapNotNull { parseCssLengthFloat(it.value) }.toList()
     return RichTextShadow(
         offsetX = lengths.getOrNull(0) ?: 0f,
@@ -1929,6 +1963,7 @@ private fun parseBackgroundUrl(value: String): String? {
 
 private data class ParsedBackgroundShorthand(
     val color: Color? = null,
+    val declaredColor: RichCssColor? = null,
     val image: RichBackgroundImage? = null,
     val url: String? = null,
     val size: RichBackgroundSize? = null,
@@ -1950,14 +1985,16 @@ private fun parseBackgroundShorthand(value: String, context: CssLengthContext): 
     val sizeTokens = afterSlashTokens.filter { parseBackgroundBox(it) == null }
     val repeat = tokens.firstNotNullOfOrNull(::parseBackgroundRepeat)
     val positionTokens = tokens.filter { token ->
-        parseBackgroundRepeat(token) == null &&
+            parseBackgroundRepeat(token) == null &&
             parseBackgroundBox(token) == null &&
-            parseCssColor(token) == null &&
+            parseRichCssColor(token) == null &&
             !token.contains("gradient", ignoreCase = true) &&
             !token.startsWith("url", ignoreCase = true)
     }
+    val declaredColor = tokens.firstNotNullOfOrNull(::parseRichCssColor)
     return ParsedBackgroundShorthand(
-        color = tokens.firstNotNullOfOrNull(::parseCssColor),
+        color = resolveRichCssColor(declaredColor, null),
+        declaredColor = declaredColor,
         image = parseBackgroundImage(firstLayer),
         url = parseBackgroundUrl(firstLayer),
         size = sizeTokens.takeIf { it.isNotEmpty() }?.joinToString(" ")?.let { parseBackgroundSize(it, context) },
@@ -2617,139 +2654,6 @@ private fun parseCssTextAlign(value: String): TextAlign? = when (value.trim().lo
     else -> null
 }
 
-private fun parseCssColor(value: String): Color? {
-    val token = when {
-        value.contains("gradient", ignoreCase = true) -> CSS_COLOR_TOKEN.find(value)?.value ?: return null
-        value.contains(" ") &&
-            !value.trim().startsWith("rgb", true) &&
-            !value.trim().startsWith("hsl", true) -> value.trim().substringBefore(" ")
-        else -> value.trim()
-    }
-    return runCatching {
-        when {
-            token.startsWith("#") -> parseHexColor(token)
-            token.startsWith("rgb", ignoreCase = true) -> parseRgbColor(token)
-            token.startsWith("hsl", ignoreCase = true) -> parseHslColor(token)
-            else -> NAMED_COLORS[token.lowercase()]
-        }
-    }.getOrNull()
-}
-
-private fun parseHexColor(token: String): Color? {
-    val hex = token.removePrefix("#")
-    fun doubled(index: Int): Int = "${hex[index]}${hex[index]}".toInt(16)
-    fun pair(start: Int): Int = hex.substring(start, start + 2).toInt(16)
-    return when (hex.length) {
-        3 -> Color(doubled(0), doubled(1), doubled(2))
-        4 -> Color(doubled(0), doubled(1), doubled(2), doubled(3))
-        6 -> Color(pair(0), pair(2), pair(4))
-        8 -> Color(pair(0), pair(2), pair(4), pair(6))
-        else -> null
-    }
-}
-
-private fun parseRgbColor(token: String): Color? {
-    val body = token.substringAfter("(").substringBeforeLast(")").replace("/", " ")
-    val parts = body.split(Regex("""[\s,]+""")).filter { it.isNotBlank() }
-    if (parts.size < 3) return null
-    val r = parseColorChannel(parts[0]) ?: return null
-    val g = parseColorChannel(parts[1]) ?: return null
-    val b = parseColorChannel(parts[2]) ?: return null
-    val a = parts.getOrNull(3)?.let(::parseAlphaChannel) ?: 255
-    return Color(r, g, b, a)
-}
-
-private fun parseHslColor(token: String): Color? {
-    val body = token.substringAfter("(").substringBeforeLast(")").replace("/", " ")
-    val parts = body.split(Regex("""[\s,]+""")).filter { it.isNotBlank() }
-    if (parts.size < 3) return null
-    val h = parseHueDegrees(parts[0]) ?: return null
-    val s = parseCssPercentUnit(parts[1]) ?: return null
-    val l = parseCssPercentUnit(parts[2]) ?: return null
-    val a = parts.getOrNull(3)?.let(::parseAlphaChannel) ?: 255
-    val c = (1f - abs(2f * l - 1f)) * s
-    val hPrime = ((h % 360f) + 360f) % 360f / 60f
-    val x = c * (1f - abs(hPrime % 2f - 1f))
-    val (r1, g1, b1) = when {
-        hPrime < 1f -> Triple(c, x, 0f)
-        hPrime < 2f -> Triple(x, c, 0f)
-        hPrime < 3f -> Triple(0f, c, x)
-        hPrime < 4f -> Triple(0f, x, c)
-        hPrime < 5f -> Triple(x, 0f, c)
-        else -> Triple(c, 0f, x)
-    }
-    val m = l - c / 2f
-    fun channel(value: Float): Int = ((value + m).coerceIn(0f, 1f) * 255f).roundToInt()
-    return Color(channel(r1), channel(g1), channel(b1), a)
-}
-
-private fun parseHueDegrees(value: String): Float? {
-    val normalized = value.trim().lowercase()
-    return when {
-        normalized.endsWith("deg") -> normalized.removeSuffix("deg").toFloatOrNull()
-        normalized.endsWith("turn") -> normalized.removeSuffix("turn").toFloatOrNull()?.times(360f)
-        normalized.endsWith("rad") -> normalized.removeSuffix("rad").toFloatOrNull()?.times(57.29578f)
-        else -> normalized.toFloatOrNull()
-    }
-}
-
-private fun parseCssPercentUnit(value: String): Float? {
-    return value.trim().removeSuffix("%").toFloatOrNull()?.div(100f)?.coerceIn(0f, 1f)
-}
-
-private fun parseColorChannel(value: String): Int? {
-    return if (value.endsWith("%")) {
-        value.removeSuffix("%").toFloatOrNull()?.let { (it.coerceIn(0f, 100f) * 2.55f).roundToInt() }
-    } else {
-        value.toFloatOrNull()?.roundToInt()?.coerceIn(0, 255)
-    }
-}
-
-private fun parseAlphaChannel(value: String): Int? {
-    return if (value.endsWith("%")) {
-        value.removeSuffix("%").toFloatOrNull()?.let { (it.coerceIn(0f, 100f) * 2.55f).roundToInt() }
-    } else {
-        parseCssFloat(value)?.let { (it.coerceIn(0f, 1f) * 255f).roundToInt() }
-    }
-}
-
-private val NAMED_COLORS = mapOf(
-    "transparent" to Color.Transparent,
-    "black" to Color.Black,
-    "white" to Color.White,
-    "red" to Color.Red,
-    "green" to Color.Green,
-    "blue" to Color.Blue,
-    "yellow" to Color.Yellow,
-    "cyan" to Color.Cyan,
-    "magenta" to Color.Magenta,
-    "gray" to Color.Gray,
-    "grey" to Color.Gray,
-    "orange" to Color(0xFFFFA500),
-    "purple" to Color(0xFF800080),
-    "brown" to Color(0xFFA52A2A),
-    "pink" to Color(0xFFFFC0CB),
-    "navy" to Color(0xFF000080),
-    "teal" to Color(0xFF008080),
-    "lime" to Color(0xFF00FF00),
-    "olive" to Color(0xFF808000),
-    "maroon" to Color(0xFF800000),
-    "silver" to Color(0xFFC0C0C0),
-    "gold" to Color(0xFFFFD700),
-    "indigo" to Color(0xFF4B0082),
-    "violet" to Color(0xFFEE82EE),
-    "lightgray" to Color(0xFFD3D3D3),
-    "lightgrey" to Color(0xFFD3D3D3),
-    "darkgray" to Color(0xFFA9A9A9),
-    "darkgrey" to Color(0xFFA9A9A9),
-    "slategray" to Color(0xFF708090),
-    "slategrey" to Color(0xFF708090),
-)
-
-private val CSS_COLOR_TOKEN = Regex(
-    """#[0-9a-fA-F]{3,8}|rgba?\([^)]+\)|hsla?\([^)]+\)|\b(?:${NAMED_COLORS.keys.joinToString("|")})\b""",
-    RegexOption.IGNORE_CASE,
-)
 private val CSS_LENGTH_TOKEN = Regex("""-?[0-9]*\.?[0-9]+(?:px|dp|rem|em)?""")
 private val CSS_FUNCTION_TOKEN = Regex("""([a-zA-Z-]+)\(([^()]*)\)""")
 private val DEFAULT_CSS_FONT_SIZE = 16.sp

@@ -26,7 +26,9 @@ import me.rerere.rikkahub.ui.components.richtext.RichBorderStyle
 import me.rerere.rikkahub.ui.components.richtext.RichBorderCollapse
 import me.rerere.rikkahub.ui.components.richtext.RichCaptionSide
 import me.rerere.rikkahub.ui.components.richtext.RichBlock
+import me.rerere.rikkahub.ui.components.richtext.RichColorResolver
 import me.rerere.rikkahub.ui.components.richtext.RichContainerBlock
+import me.rerere.rikkahub.ui.components.richtext.RichCssColor
 import me.rerere.rikkahub.ui.components.richtext.RichDisplay
 import me.rerere.rikkahub.ui.components.richtext.RichFlexDirection
 import me.rerere.rikkahub.ui.components.richtext.RichFlexWrap
@@ -49,8 +51,10 @@ import me.rerere.rikkahub.ui.components.richtext.RichSvgTextAnchor
 import me.rerere.rikkahub.ui.components.richtext.RichTableBlock
 import me.rerere.rikkahub.ui.components.richtext.RichTableSectionType
 import me.rerere.rikkahub.ui.components.richtext.RichTextBlock
+import me.rerere.rikkahub.ui.components.richtext.RichVisualHint
 import me.rerere.rikkahub.ui.components.richtext.RichWhiteSpace
 import me.rerere.rikkahub.ui.components.richtext.RichWordBreak
+import me.rerere.rikkahub.ui.components.richtext.parseRichCssColor
 import me.rerere.rikkahub.ui.components.richtext.validateRichHtmlBubbleBlock
 
 class MessageTextBlocksTest {
@@ -654,6 +658,79 @@ class MessageTextBlocksTest {
 
         assertEquals(Color(0, 128, 255), root.style.color)
         assertEquals(Color(170, 0, 255, 128), root.style.backgroundColor)
+    }
+
+    @Test
+    fun `rich css color parser distinguishes semantic color values`() {
+        assertEquals(RichCssColor.Solid(Color(17, 34, 51)), parseRichCssColor("#123"))
+        assertEquals(RichCssColor.Solid(Color(17, 34, 51, 68)), parseRichCssColor("#1234"))
+        assertEquals(RichCssColor.Solid(Color(255, 0, 0, 128)), parseRichCssColor("rgb(100% 0% 0% / 50%)"))
+        assertEquals(RichCssColor.Solid(Color(80, 122, 206, 204)), parseRichCssColor("hsl(220 56% 56% / .8)"))
+        assertEquals(RichCssColor.Transparent, parseRichCssColor("transparent"))
+        assertEquals(RichCssColor.CurrentColor, parseRichCssColor("currentColor"))
+        assertTrue(parseRichCssColor("color-mix(in srgb, red 40%, blue)") is RichCssColor.Unresolved)
+        assertEquals(null, parseRichCssColor("definitely-not-a-color"))
+    }
+
+    @Test
+    fun `native compiler resolves currentColor and preserves explicit transparent`() {
+        val html = """
+            <div id="vcp-root" style="color:#336699;">
+              <div style="color:currentColor;background:transparent;border:1px solid currentColor;">Inherited</div>
+            </div>
+        """.trimIndent()
+
+        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
+        val text = flattenRichBlocks(root).filterIsInstance<RichTextBlock>().single()
+
+        assertEquals(Color(0xFF336699), text.style.color)
+        assertEquals(RichCssColor.CurrentColor, text.style.declaredColor)
+        assertEquals(Color.Transparent, text.style.backgroundColor)
+        assertEquals(RichCssColor.Transparent, text.style.declaredBackgroundColor)
+        assertEquals(Color(0xFF336699), text.style.border.top.color)
+    }
+
+    @Test
+    fun `native compiler records unsupported color hint without black fallback`() {
+        val html = """
+            <div id="vcp-root" style="color:color-mix(in srgb, red 40%, blue);background:#fff;">Text</div>
+        """.trimIndent()
+
+        val model = RichHtmlCompiler.compile(html)
+        val root = model.blocks.single() as RichContainerBlock
+
+        assertEquals(null, root.style.color)
+        assertTrue(root.style.declaredColor is RichCssColor.Unresolved)
+        assertTrue(model.visualHints.contains(RichVisualHint.CssUnsupportedColor))
+    }
+
+    @Test
+    fun `rich color resolver fixes only low contrast text`() {
+        val adjustedLight = RichColorResolver.resolveTextColor(
+            requested = Color(0xFFDDDDDD),
+            fallback = Color.Black,
+            background = Color.White,
+        )
+        val adjustedDark = RichColorResolver.resolveTextColor(
+            requested = Color(0xFF222222),
+            fallback = Color.White,
+            background = Color.Black,
+        )
+        val unchanged = RichColorResolver.resolveTextColor(
+            requested = Color(0xFF111111),
+            fallback = Color.Black,
+            background = Color.White,
+        )
+        val gradientUnknown = RichColorResolver.resolveTextColor(
+            requested = Color(0xFFDDDDDD),
+            fallback = Color.Black,
+            background = null,
+        )
+
+        assertTrue(RichColorResolver.contrastRatio(adjustedLight, Color.White) > 1.4)
+        assertTrue(RichColorResolver.contrastRatio(adjustedDark, Color.Black) > 1.4)
+        assertEquals(Color(0xFF111111), unchanged)
+        assertEquals(Color(0xFFDDDDDD), gradientUnknown)
     }
 
     @Test

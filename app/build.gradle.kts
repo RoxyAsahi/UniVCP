@@ -225,6 +225,7 @@ dependencies {
     implementation(libs.androidx.material3)
     implementation(libs.androidx.material3.adaptive)
     implementation(libs.androidx.material3.adaptive.layout)
+    implementation(libs.material)
 
     // Navigation 3
     implementation(libs.androidx.navigation3.runtime)

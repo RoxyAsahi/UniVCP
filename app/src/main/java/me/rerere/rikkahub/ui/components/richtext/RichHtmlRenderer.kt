@@ -47,15 +47,18 @@ import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.foundation.text.appendInlineContent
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.LocalTextStyle
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ProvideTextStyle
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -84,6 +87,7 @@ import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -104,6 +108,9 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
+private val LocalRichRenderColorDefaults = staticCompositionLocalOf { RichRenderColorDefaults.Fallback }
+private val LocalRichEffectiveBackground = staticCompositionLocalOf<Color?> { null }
+
 @OptIn(ExperimentalLayoutApi::class, ExperimentalFlexBoxApi::class)
 @Composable
 internal fun RichHtmlRenderer(
@@ -111,20 +118,27 @@ internal fun RichHtmlRenderer(
     modifier: Modifier = Modifier,
     onSendInput: (String) -> Unit = {},
 ) {
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .testTag("rich-html-renderer"),
-        verticalArrangement = Arrangement.spacedBy(0.dp),
+    val defaults = MaterialTheme.colorScheme.toRichRenderColorDefaults().harmonized()
+    CompositionLocalProvider(
+        LocalRichRenderColorDefaults provides defaults,
+        LocalRichEffectiveBackground provides defaults.surface,
+        LocalContentColor provides defaults.text,
     ) {
-        model.blocks.forEach { block ->
-            androidx.compose.runtime.key(block.blockId) {
-                RichBlockView(
-                    block = block,
-                    onSendInput = onSendInput,
-                    modifier = Modifier.testTag("rich-html-block-${block.blockId}"),
-                    root = true,
-                )
+        Column(
+            modifier = modifier
+                .fillMaxWidth()
+                .testTag("rich-html-renderer"),
+            verticalArrangement = Arrangement.spacedBy(0.dp),
+        ) {
+            model.blocks.forEach { block ->
+                androidx.compose.runtime.key(block.blockId) {
+                    RichBlockView(
+                        block = block,
+                        onSendInput = onSendInput,
+                        modifier = Modifier.testTag("rich-html-block-${block.blockId}"),
+                        root = true,
+                    )
+                }
             }
         }
     }
@@ -158,7 +172,7 @@ private fun RichContainerBlockView(
     root: Boolean,
 ) {
     StyledContainer(block.style, modifier = modifier, root = root) {
-        ProvideTextStyle(LocalTextStyle.current.merge(block.style.toTextStyle())) {
+        ProvideTextStyle(LocalTextStyle.current.merge(block.style.toTextStyle(LocalContentColor.current))) {
             val positionedChildren = block.children.filter { it.style.isPositionedOverlay() }
                 .sortedBy { it.style.zIndex }
             val flowChildren = block.children.filterNot { it.style.isPositionedOverlay() }
@@ -278,7 +292,7 @@ private fun RichFlexBoxChildren(
 @Composable
 private fun RichTextBlockView(block: RichTextBlock, modifier: Modifier) {
     StyledContainer(block.style, modifier = modifier, root = false) {
-        val textStyle = LocalTextStyle.current.merge(block.style.toTextStyle())
+        val textStyle = LocalTextStyle.current.merge(block.style.toTextStyle(LocalContentColor.current))
         val text = block.content.withTextClipBrush(block.style)
         val marker = block.listMarker
         val markerImage = block.style.listStyleImage
@@ -364,12 +378,13 @@ private fun RichImageBlockView(block: RichImageBlock, modifier: Modifier) {
 @Composable
 private fun RichTableBlockView(block: RichTableBlock, modifier: Modifier) {
     StyledContainer(block.style, modifier = modifier, root = false) {
+        val defaults = LocalRichRenderColorDefaults.current
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             val caption: @Composable () -> Unit = {
                 block.caption?.let { caption ->
                     Text(
                         caption,
-                        style = MaterialTheme.typography.labelMedium.merge(block.captionStyle?.toTextStyle() ?: TextStyle.Default),
+                        style = MaterialTheme.typography.labelMedium.merge(block.captionStyle?.toTextStyle(LocalContentColor.current) ?: TextStyle.Default),
                         textAlign = block.captionStyle?.textAlign?.takeIf { it != TextAlign.Unspecified } ?: TextAlign.Center,
                         modifier = Modifier.fillMaxWidth(),
                     )
@@ -404,7 +419,7 @@ private fun RichTableBlockView(block: RichTableBlock, modifier: Modifier) {
                     } else {
                         BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f))
                     },
-                    headerBackground = block.style.backgroundColor ?: MaterialTheme.colorScheme.surfaceVariant,
+                    headerBackground = block.style.backgroundColor ?: defaults.tableHeaderBackground,
                     columnMinWidths = List(columnCount) { 80.dp },
                     columnMaxWidths = List(columnCount) { 260.dp },
                     headerColSpans = headerCells.map { it.colspan },
@@ -426,7 +441,7 @@ private fun TableCellContent(cell: RichTableCell) {
     StyledContainer(cell.style, root = false) {
         Text(
             text = cell.content,
-            style = cell.style.toTextStyle(),
+            style = cell.style.toTextStyle(LocalContentColor.current),
             maxLines = if (cell.style.whiteSpace == RichWhiteSpace.NoWrap) 1 else Int.MAX_VALUE,
             overflow = if (cell.style.textOverflow == RichTextOverflow.Ellipsis) TextOverflow.Ellipsis else TextOverflow.Clip,
         )
@@ -542,8 +557,8 @@ private fun RichButtonBlockView(
     ) {
         Text(
             text = block.label,
-            style = LocalTextStyle.current.merge(block.style.toTextStyle()),
-            color = block.style.color ?: LocalContentColor.current,
+            style = LocalTextStyle.current.merge(block.style.toTextStyle(LocalContentColor.current)),
+            color = LocalContentColor.current,
         )
     }
 }
@@ -607,9 +622,21 @@ private fun StyledContainer(
     content: @Composable () -> Unit,
 ) {
     val shape = style.shape(default = 0.dp)
+    val defaults = LocalRichRenderColorDefaults.current
+    val parentBackground = LocalRichEffectiveBackground.current
     val effectiveOpacity = style.effectiveOpacity()
-    val contentColor = style.color?.copy(alpha = style.color.alpha * effectiveOpacity) ?: LocalContentColor.current
     val backgroundColor = style.backgroundColor?.copy(alpha = style.backgroundColor.alpha * effectiveOpacity)
+    val effectiveBackground = RichColorResolver.effectiveBackground(
+        parent = parentBackground,
+        declared = backgroundColor,
+        fallback = defaults.surface,
+    )
+    val contentColor = RichColorResolver.resolveTextColor(
+        requested = style.color,
+        fallback = LocalContentColor.current,
+        background = effectiveBackground,
+        largeOrBold = style.isLargeOrBoldText(),
+    ).copy(alpha = (style.color?.alpha ?: 1f) * effectiveOpacity)
     val paintBoxBackground = style.backgroundClip != RichBackgroundBox.Text
     val brush = style.backgroundBrush().takeIf { paintBoxBackground }
     val surfaceBorder = style.surfaceBorderStroke()
@@ -633,38 +660,48 @@ private fun StyledContainer(
             contentColor = contentColor,
             border = surfaceBorder,
         ) {
-            Box(
-                Modifier
-                    .then(if (brush != null) style.backgroundBrushModifier(brush, shape) else Modifier)
-                    .then(if (paintBoxBackground && style.backgroundUrl != null && style.backgroundRepeat != RichBackgroundRepeat.NoRepeat) style.repeatedBackgroundModifier() else Modifier)
-                    .then(if (paintBoxBackground && style.backgroundUrl != null) Modifier.background(Color.Transparent, shape) else Modifier)
-                    .then(if (drawBorder) style.borderDrawModifier(shape) else Modifier)
-                    .padding(style.padding.toPaddingValues(root))
+            CompositionLocalProvider(
+                LocalRichEffectiveBackground provides effectiveBackground,
+                LocalContentColor provides contentColor,
             ) {
-                style.backgroundUrl?.takeIf { paintBoxBackground && style.backgroundRepeat == RichBackgroundRepeat.NoRepeat }?.let { url ->
-                    val areaPadding = style.backgroundAreaPadding(style.backgroundOrigin)
-                    ZoomableAsyncImage(
-                        model = url,
-                        contentDescription = null,
-                        modifier = Modifier
-                            .matchParentSize()
-                            .clip(shape)
-                            .padding(areaPadding.toPaddingValues(root = false)),
-                        contentScale = style.backgroundSize.toContentScale(),
-                        alignment = style.backgroundPosition.toAlignment(),
-                        alpha = 0.45f,
-                    )
+                Box(
+                    Modifier
+                        .then(if (brush != null) style.backgroundBrushModifier(brush, shape) else Modifier)
+                        .then(if (paintBoxBackground && style.backgroundUrl != null && style.backgroundRepeat != RichBackgroundRepeat.NoRepeat) style.repeatedBackgroundModifier() else Modifier)
+                        .then(if (paintBoxBackground && style.backgroundUrl != null) Modifier.background(Color.Transparent, shape) else Modifier)
+                        .then(if (drawBorder) style.borderDrawModifier(shape) else Modifier)
+                        .padding(style.padding.toPaddingValues(root))
+                ) {
+                    style.backgroundUrl?.takeIf { paintBoxBackground && style.backgroundRepeat == RichBackgroundRepeat.NoRepeat }?.let { url ->
+                        val areaPadding = style.backgroundAreaPadding(style.backgroundOrigin)
+                        ZoomableAsyncImage(
+                            model = url,
+                            contentDescription = null,
+                            modifier = Modifier
+                                .matchParentSize()
+                                .clip(shape)
+                                .padding(areaPadding.toPaddingValues(root = false)),
+                            contentScale = style.backgroundSize.toContentScale(),
+                            alignment = style.backgroundPosition.toAlignment(),
+                            alpha = 0.45f,
+                        )
+                    }
+                    content()
                 }
-                content()
             }
         }
     } else {
-        Box(
-            outer
-                .then(if (drawBorder) style.borderDrawModifier(shape) else Modifier)
-                .padding(style.padding.toPaddingValues(root)),
+        CompositionLocalProvider(
+            LocalRichEffectiveBackground provides effectiveBackground,
+            LocalContentColor provides contentColor,
         ) {
-            content()
+            Box(
+                outer
+                    .then(if (drawBorder) style.borderDrawModifier(shape) else Modifier)
+                    .padding(style.padding.toPaddingValues(root)),
+            ) {
+                content()
+            }
         }
     }
 }
@@ -759,10 +796,12 @@ private fun buildInlineMathText(
     return InlineMathText(text, inlineContent)
 }
 
-private fun ComputedStyle.toTextStyle(): TextStyle {
+private fun ComputedStyle.toTextStyle(textColor: Color? = null): TextStyle {
     val effectiveOpacity = effectiveOpacity()
     return TextStyle(
-        color = color?.copy(alpha = color.alpha * effectiveOpacity) ?: Color.Unspecified,
+        color = textColor
+            ?: color?.copy(alpha = color.alpha * effectiveOpacity)
+            ?: Color.Unspecified,
         fontSize = fontSize,
         fontWeight = fontWeight,
         fontStyle = fontStyle,
@@ -772,6 +811,29 @@ private fun ComputedStyle.toTextStyle(): TextStyle {
         letterSpacing = letterSpacing,
         shadow = textShadow?.toShadow(),
     )
+}
+
+private fun ColorScheme.toRichRenderColorDefaults(): RichRenderColorDefaults {
+    return RichRenderColorDefaults(
+        text = onSurface,
+        weakText = onSurfaceVariant,
+        surface = surface,
+        surfaceLow = surfaceContainerLow,
+        outline = outlineVariant,
+        codeBackground = surfaceContainerHighest.copy(alpha = 0.72f),
+        quoteBackground = surfaceContainerLow.copy(alpha = 0.72f),
+        tableHeaderBackground = surfaceContainerHigh,
+        tableBodyBackground = Color.Transparent,
+        tableFooterBackground = surfaceContainerLow,
+        buttonBackground = primary,
+        buttonText = onPrimary,
+        accent = primary,
+    )
+}
+
+private fun ComputedStyle.isLargeOrBoldText(): Boolean {
+    return (fontWeight?.weight ?: FontWeight.Normal.weight) >= FontWeight.SemiBold.weight ||
+        (fontSize.type == TextUnitType.Sp && fontSize.value >= 18f)
 }
 
 private fun ComputedStyle.baseModifier(root: Boolean): Modifier {
