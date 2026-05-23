@@ -156,6 +156,7 @@ assistant text
 - Color Fidelity v4 首片：颜色解析抽出 `RichColorUtils`，新增 `RichCssColor` 语义，区分未声明、`transparent`、`currentColor` 和无法解析的颜色函数；CSS color parser 支持完整 named colors、modern `rgb(... / alpha)`、百分比 RGB、modern `hsl(... / alpha)`；renderer 新增 `RichRenderColorDefaults` 和 `RichColorResolver`，由 MaterialTheme 补缺省色，并用 AndroidX `ColorUtils.calculateContrast()` 对低对比纯色文本做最小可读性修正。
 - Animation Static v1：CSS `animation/transition/@keyframes` 不再作为聊天列表原生渲染的一票否决条件；compiler 会记录 `CssAnimation/CssTransition/CssKeyframes/CssInfiniteAnimation/CssLayoutAnimation/CssInteractivePseudoClass/AnimationDependentVisibility` visual hints，并把安全动画默认静态化显示。`:hover/:active/:focus` 规则只记录 hint，不作为普通静态样式套到元素上；`opacity:0 + animation-fill-mode:forwards` 的有限 opacity/transform 动画会被保护为可见静态态，避免内容空白。
 - Native Animated v1 首片：有限 `@keyframes` 入场动画如果只包含 `opacity` 和 `transform: translate/scale/rotate`，且 `animation-fill-mode: forwards/both`、非 infinite、无布局属性、无中间关键帧、duration <= 1200ms、delay <= 1500ms，会被编译成 `RichNativeAnimation` 并由 Compose 播放一次；无限 pulse、hover transition、布局动画和复杂多段 keyframes 仍静态化并保留 hint。
+- Animation Budget v2 首片：`RichHtmlRenderModel` 新增内部 `animationStats`，统计 animated/native/staticized/infinite/layout/transition/dependent visibility/budget exceeded；每个富 HTML 气泡默认最多保留 3 个原生播放动画，超出部分静态化并记录 `AnimationBudgetExceeded` hint。fidelity report 会输出策略和计数，不包含正文。
 - CSS 驱动按钮：`RichButtonBlock` 不再使用 Material Button 默认字号、内边距和最小高度覆盖作者 CSS，而是通过 `StyledContainer + Text + clickable` 渲染。
 - 盒模型边界：renderer 不再给 root 容器偷偷加默认圆角或默认间距；margin 作为外层 spacing 应用，padding 只来自 UA/作者 CSS。
 - 空视觉装饰盒保留：空的 `div/span` 如果带有 position、尺寸、背景、边框、阴影、透明度、filter 或 transform，会保留为 `RichContainerBlock`；这类节点常用于背景光斑、badge、圆点、分隔装饰，不再因为没有正文而被拍平成空文本丢失。
@@ -213,7 +214,7 @@ assistant text
 - `background-position` 已支持常见两值/四值偏移，并会基于 `background-origin` 的近似绘制区域定位，但偏移仍基于静态 dp，不实现浏览器对 containing block 的完整重排算法。
 - `background-clip:text` 已支持 gradient 文字 Brush；但 URL 背景裁文字、复杂 `-webkit-text-fill-color` 组合和多层背景裁文字仍降级。
 - `filter/backdrop-filter` 已有安全函数解析，`filter: opacity()/brightness()/grayscale()` 已有渲染闭环；`blur()` 与 backdrop blur 暂不做实时像素滤镜，继续作为结构化 visual hint 排期。
-- CSS animation 当前是 Native Animated v1 首片：简单 finite opacity/transform from/to 入场动画已可原生播放一次；滚动中禁播、离屏禁播、每气泡动画元素预算、snapshot fallback 策略和更完整 easing/keyframe 插值仍是后续阶段。
+- CSS animation 当前是 Native Animated v1 + Animation Budget v2 首片：简单 finite opacity/transform from/to 入场动画已可原生播放一次，且每气泡有原生动画数量预算；滚动中禁播、离屏禁播、snapshot fallback 策略和更完整 easing/keyframe 插值仍是后续阶段。
 - `currentColor` 已用于普通文本色继承、背景色和边框/阴影的静态解析；但渐变 stop、SVG 外的复杂 paint server 和 `color-mix()/lab()/lch()/oklch()` 仍不做完整颜色空间计算，当前只记录 unsupported color hint。
 - 对比度兜底只处理纯色背景下的文本色；不会对渐变、背景图、透明叠层或 backdrop-filter 做浏览器级有效背景采样，也不会自动重绘作者品牌配色。
 - `z-index` 的完整 browser stacking context。
@@ -300,7 +301,7 @@ assistant text
 - `mermaid.`
 - `javascript:` URL
 
-动画策略当前处于 Native Animated v1 首片：简单动画默认原生静态化，finite `opacity/transform` forwards/both from/to 入场动画可由 Compose 原生播放一次并停在最终态；infinite、layout property 动画、交互伪类和复杂 keyframes 会进入 visual hints。后续 Phase 2/3 继续做动画预算、滚动/离屏禁播和 snapshot fallback，不在当前聊天列表持续跑 CSS 动画。
+动画策略当前处于 Native Animated v1 + Budget v2 首片：简单动画默认原生静态化，finite `opacity/transform` forwards/both from/to 入场动画可由 Compose 原生播放一次并停在最终态；每气泡默认最多播放 3 个原生动画，超预算会静态化并记录 hint；infinite、layout property 动画、交互伪类和复杂 keyframes 会进入 visual hints。后续继续做滚动/离屏禁播和 snapshot fallback，不在当前聊天列表持续跑 CSS 动画。
 
 事件属性策略：
 
@@ -439,8 +440,8 @@ app/src/debug/assets/render_seed/chat_render_seed.json
 
 1. CSS Painting v3.2：支持 `clip-path: inset()/circle()/ellipse()` 的安全静态子集，先用于圆形头像、光斑裁剪和胶囊装饰；复杂 path/polygon 继续 hint。
 2. Color Fidelity v4.1：补 `color-mix()` 的 sRGB 静态近似，只支持 safe 两色混合和百分比；`lab/lch/oklch` 继续 hint。
-3. Animation Budget v2：增加动画预算统计和 fallback reason，统计 animated element count、infinite count、layout animation count、最终策略 `Staticized/NativeAnimated/Snapshot/DynamicPreview`；超预算先静态化或动态预览，不持续重绘。
-4. Native Animated v1.1：在现有 opacity/translate/scale/rotate from/to 播放基础上增加滚动中禁播、离屏禁播、每气泡最多 3 个动画元素的预算；继续拒绝 infinite、布局属性、中间关键帧、filter/color 动画。
+3. Animation Runtime v2.1：在现有 opacity/translate/scale/rotate from/to 播放基础上增加滚动中禁播、离屏禁播和“历史消息默认不重播”的运行时门控；继续拒绝 infinite、布局属性、中间关键帧、filter/color 动画。
+4. Animation Snapshot v2.2：当动画超预算且静态化会明显丢失关键视觉时，记录 snapshot candidate/fallback reason；复杂动态内容仍进动态预览，不常驻 live WebView。
 5. CSS Painting v3.3：多背景层从“第一层渲染 + 其余 hint”推进到最多两层安全静态绘制，覆盖图案纹理叠 gradient 的高频卡片。
 6. CSS Painting v3.4：继续评估 `filter: blur()` 的低成本近似，只允许小半径/低频装饰层；`backdrop-filter` 仍优先保持 hint，避免聊天列表实时模糊开销。
 7. CSS Painting v3.5：`mix-blend-mode`、mask、复杂 clip-path 保持 visual hint，并通过 render seed report 统计真实频率，频率不足则不进入主线实现。

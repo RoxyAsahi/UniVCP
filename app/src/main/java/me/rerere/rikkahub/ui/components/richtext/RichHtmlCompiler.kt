@@ -58,6 +58,7 @@ internal data class RichHtmlCompileOptions(
 
 internal object RichHtmlCompiler {
     private val cache = RenderLruCache<String, RichHtmlRenderModel>(maxEntries = 128)
+    private val transientCache = RenderLruCache<String, RichHtmlRenderModel>(maxEntries = 24)
     private val inFlightLock = Any()
     private val inFlightCompiles = mutableMapOf<String, Deferred<RichHtmlRenderModel>>()
 
@@ -68,7 +69,8 @@ internal object RichHtmlCompiler {
     fun getCached(
         html: String,
         options: RichHtmlCompileOptions = RichHtmlCompileOptions(),
-    ): RichHtmlRenderModel? = cache.get(cacheKey(html, options))
+        cacheMode: RichHtmlCompileCacheMode = RichHtmlCompileCacheMode.Persistent,
+    ): RichHtmlRenderModel? = cacheFor(cacheMode).get(cacheKey(html, options))
 
     fun compile(
         html: String,
@@ -91,13 +93,16 @@ internal object RichHtmlCompiler {
     suspend fun compileAsync(
         html: String,
         options: RichHtmlCompileOptions = RichHtmlCompileOptions(),
+        cacheMode: RichHtmlCompileCacheMode = RichHtmlCompileCacheMode.Persistent,
     ): RichHtmlRenderModel {
         currentCoroutineContext().ensureActive()
         val key = cacheKey(html, options)
-        cache.get(key)?.let { return it }
+        val targetCache = cacheFor(cacheMode)
+        targetCache.get(key)?.let { return it }
+        val inFlightKey = "${cacheMode.name}:$key"
         val deferred = synchronized(inFlightLock) {
-            cache.get(key)?.let { return it }
-            inFlightCompiles[key] ?: compileScope.async {
+            targetCache.get(key)?.let { return it }
+            inFlightCompiles[inFlightKey] ?: compileScope.async {
             withTimeout(RICH_HTML_COMPILE_TIMEOUT_MS) {
                 val job = currentCoroutineContext()[Job]
                 job?.ensureActive()
@@ -113,14 +118,14 @@ internal object RichHtmlCompiler {
                     )
                 }
                 job?.ensureActive()
-                cache.putIfAbsent(key, model)
+                targetCache.putIfAbsent(key, model)
             }
             }.also { created ->
-                inFlightCompiles[key] = created
+                inFlightCompiles[inFlightKey] = created
                 created.invokeOnCompletion {
                     synchronized(inFlightLock) {
-                        if (inFlightCompiles[key] === created) {
-                            inFlightCompiles.remove(key)
+                        if (inFlightCompiles[inFlightKey] === created) {
+                            inFlightCompiles.remove(inFlightKey)
                         }
                     }
                 }
@@ -133,6 +138,7 @@ internal object RichHtmlCompiler {
 
     fun clearCacheForTest() {
         cache.clear()
+        transientCache.clear()
         synchronized(inFlightLock) {
             inFlightCompiles.clear()
         }
@@ -207,11 +213,14 @@ internal object RichHtmlCompiler {
             )
         }
 
+        val animationBudget = applyAnimationBudget(blocks, options.budget.maxNativeAnimatedElements)
+
         return RichHtmlRenderModel(
             id = renderTextCacheKey(html),
-            blocks = blocks,
+            blocks = animationBudget.blocks,
             unsupported = compiler.unsupported.toList(),
-            visualHints = (resolver.visualHints + compiler.visualHints).distinct(),
+            visualHints = (resolver.visualHints + compiler.visualHints + animationBudget.visualHints).distinct(),
+            animationStats = animationBudget.stats,
         )
     }
 
@@ -219,6 +228,122 @@ internal object RichHtmlCompiler {
         html: String,
         options: RichHtmlCompileOptions,
     ): String = "${renderTextCacheKey(html)}:$options"
+
+    private fun cacheFor(mode: RichHtmlCompileCacheMode): RenderLruCache<String, RichHtmlRenderModel> {
+        return when (mode) {
+            RichHtmlCompileCacheMode.Persistent -> cache
+            RichHtmlCompileCacheMode.Transient -> transientCache
+        }
+    }
+}
+
+internal enum class RichHtmlCompileCacheMode {
+    Persistent,
+    Transient,
+}
+
+private data class AnimationBudgetResult(
+    val blocks: List<RichBlock>,
+    val stats: RichAnimationStats,
+    val visualHints: List<RichVisualHint>,
+)
+
+private fun applyAnimationBudget(
+    blocks: List<RichBlock>,
+    maxNativeAnimatedElements: Int,
+): AnimationBudgetResult {
+    val budget = AnimationBudgetRun(maxNativeAnimatedElements.coerceAtLeast(0))
+    val mapped = blocks.map { budget.visit(it) }
+    return AnimationBudgetResult(
+        blocks = mapped,
+        stats = budget.toStats(),
+        visualHints = if (budget.budgetExceededCount > 0) listOf(RichVisualHint.AnimationBudgetExceeded) else emptyList(),
+    )
+}
+
+private class AnimationBudgetRun(
+    private val maxNativeAnimatedElements: Int,
+) {
+    private var nativeAllowed = 0
+    var animatedElementCount = 0
+        private set
+    var nativeAnimatedCount = 0
+        private set
+    var staticizedCount = 0
+        private set
+    var infiniteCount = 0
+        private set
+    var layoutAnimationCount = 0
+        private set
+    var transitionCount = 0
+        private set
+    var dependentVisibilityCount = 0
+        private set
+    var budgetExceededCount = 0
+        private set
+
+    fun visit(block: RichBlock): RichBlock {
+        val style = budgetStyle(block.style)
+        return when (block) {
+            is RichContainerBlock -> block.copy(
+                style = style,
+                children = block.children.map(::visit),
+            )
+            is RichTextBlock -> block.copy(style = style)
+            is RichImageBlock -> block.copy(style = style)
+            is RichTableBlock -> block.copy(style = style)
+            is RichSvgBlock -> block.copy(style = style)
+            is RichMathBlock -> block.copy(style = style)
+            is RichButtonBlock -> block.copy(style = style)
+            is RichDetailsBlock -> block.copy(
+                style = style,
+                children = block.children.map(::visit),
+            )
+            is RichUnsupportedBlock -> block.copy(style = style)
+        }
+    }
+
+    private fun budgetStyle(style: ComputedStyle): ComputedStyle {
+        if (style.transition.isDeclared) transitionCount += 1
+        val animation = style.animation
+        if (!animation.isDeclared) return style
+        animatedElementCount += 1
+        if (animation.isInfinite) infiniteCount += 1
+        if (animation.hasLayoutProperty) layoutAnimationCount += 1
+        if (animation.mayHideStaticContent) dependentVisibilityCount += 1
+        if (animation.nativeAnimation == null) {
+            staticizedCount += 1
+            return style
+        }
+        if (nativeAllowed < maxNativeAnimatedElements) {
+            nativeAllowed += 1
+            nativeAnimatedCount += 1
+            return style
+        }
+        budgetExceededCount += 1
+        staticizedCount += 1
+        return style.copy(animation = animation.copy(nativeAnimation = null))
+    }
+
+    fun toStats(): RichAnimationStats {
+        val strategy = when {
+            animatedElementCount == 0 && transitionCount == 0 -> RichAnimationStrategy.None
+            budgetExceededCount > 0 -> RichAnimationStrategy.BudgetExceededStaticized
+            nativeAnimatedCount > 0 -> RichAnimationStrategy.NativeAnimated
+            else -> RichAnimationStrategy.Staticized
+        }
+        return RichAnimationStats(
+            strategy = strategy,
+            animatedElementCount = animatedElementCount,
+            nativeAnimatedCount = nativeAnimatedCount,
+            staticizedCount = staticizedCount,
+            infiniteCount = infiniteCount,
+            layoutAnimationCount = layoutAnimationCount,
+            transitionCount = transitionCount,
+            dependentVisibilityCount = dependentVisibilityCount,
+            budgetExceededCount = budgetExceededCount,
+        )
+    }
 }
 
 private class CompilerRun(

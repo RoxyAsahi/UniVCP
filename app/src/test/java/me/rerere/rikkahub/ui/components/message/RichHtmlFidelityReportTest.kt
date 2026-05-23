@@ -101,6 +101,17 @@ class RichHtmlFidelityReportTest {
             svgFeatures = svgFeatures,
             visualHints = model.visualHints.groupingBy { it.name }.eachCount(),
             unsupported = model.unsupported.groupingBy { it.name }.eachCount(),
+            animationStrategy = model.animationStats.strategy.name,
+            animationCounts = mapOf(
+                "animated" to model.animationStats.animatedElementCount,
+                "native" to model.animationStats.nativeAnimatedCount,
+                "staticized" to model.animationStats.staticizedCount,
+                "infinite" to model.animationStats.infiniteCount,
+                "layout" to model.animationStats.layoutAnimationCount,
+                "transition" to model.animationStats.transitionCount,
+                "dependentVisibility" to model.animationStats.dependentVisibilityCount,
+                "budgetExceeded" to model.animationStats.budgetExceededCount,
+            ).filterValues { it > 0 },
             compileMs = compileMs,
             blockCount = model.blocks.sumOf(::countBlocks),
         )
@@ -139,6 +150,8 @@ private data class FidelityReport(
     val svgFeatures: Map<String, Int>,
     val visualHints: Map<String, Int>,
     val unsupported: Map<String, Int>,
+    val animationStrategy: String,
+    val animationCounts: Map<String, Int>,
     val compileMs: Long,
     val blockCount: Int,
 ) {
@@ -150,6 +163,8 @@ private data class FidelityReport(
             "svg=${svgFeatures.toSortedMap()}",
             "hints=${visualHints.toSortedMap()}",
             "unsupported=${unsupported.toSortedMap()}",
+            "animationStrategy=$animationStrategy",
+            "animation=${animationCounts.toSortedMap()}",
             "compileMs=$compileMs",
             "blocks=$blockCount",
         ).joinToString(" ")

@@ -18,6 +18,7 @@ internal data class RichHtmlRenderModel(
     val blocks: List<RichBlock>,
     val unsupported: List<RichUnsupportedReason> = emptyList(),
     val visualHints: List<RichVisualHint> = emptyList(),
+    val animationStats: RichAnimationStats = RichAnimationStats.Empty,
 )
 
 internal enum class RichVisualHint {
@@ -36,6 +37,7 @@ internal enum class RichVisualHint {
     CssInfiniteAnimation,
     CssLayoutAnimation,
     AnimationDependentVisibility,
+    AnimationBudgetExceeded,
     TableComplexSpan,
     SvgClipPath,
     SvgMask,
@@ -45,6 +47,29 @@ internal enum class RichVisualHint {
     SvgPattern,
     SvgForeignObject,
     SvgMarker,
+}
+
+internal data class RichAnimationStats(
+    val strategy: RichAnimationStrategy = RichAnimationStrategy.None,
+    val animatedElementCount: Int = 0,
+    val nativeAnimatedCount: Int = 0,
+    val staticizedCount: Int = 0,
+    val infiniteCount: Int = 0,
+    val layoutAnimationCount: Int = 0,
+    val transitionCount: Int = 0,
+    val dependentVisibilityCount: Int = 0,
+    val budgetExceededCount: Int = 0,
+) {
+    companion object {
+        val Empty = RichAnimationStats()
+    }
+}
+
+internal enum class RichAnimationStrategy {
+    None,
+    Staticized,
+    NativeAnimated,
+    BudgetExceededStaticized,
 }
 
 internal sealed interface RichBlock {

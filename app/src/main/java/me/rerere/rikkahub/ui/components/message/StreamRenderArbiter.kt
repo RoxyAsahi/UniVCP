@@ -15,6 +15,7 @@ internal data class StreamRenderDecision(
 
 internal class StreamRenderArbiter(
     private val sampleWindowMs: Long = 120L,
+    private val richBlockSampleWindowMs: Long = 500L,
 ) {
     private var lastPublishedContent: String? = null
     private var lastPublishedAtMs: Long = Long.MIN_VALUE / 4
@@ -33,19 +34,24 @@ internal class StreamRenderArbiter(
             finalFrame -> true
             lastPublishedContent == null -> true
             enteredUnclosedRichBlock -> true
-            richState.hasUnclosedRichBlock -> false
             closedRichBlock -> true
+            richState.hasUnclosedRichBlock && elapsedMs >= richBlockSampleWindowMs -> true
+            richState.hasUnclosedRichBlock -> false
             elapsedMs >= sampleWindowMs -> true
             else -> false
+        }
+        val activeWindowMs = if (richState.hasUnclosedRichBlock) {
+            richBlockSampleWindowMs
+        } else {
+            sampleWindowMs
         }
         val nextDelay = if (
             frame.streaming &&
             contentChanged &&
             !publish &&
-            !richState.hasUnclosedRichBlock &&
-            elapsedMs in 0 until sampleWindowMs
+            elapsedMs in 0 until activeWindowMs
         ) {
-            sampleWindowMs - elapsedMs
+            activeWindowMs - elapsedMs
         } else {
             null
         }

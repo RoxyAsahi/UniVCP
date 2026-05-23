@@ -28,6 +28,7 @@ fun RichHtmlBubbleBlock(
     modifier: Modifier = Modifier,
     onSendInput: (String) -> Unit = {},
     renderFallback: (@Composable () -> Unit)? = null,
+    transientCache: Boolean = false,
 ) {
     BoxWithConstraints(modifier = modifier.testTag("rich-html-bubble")) {
         val rootModifier = Modifier.fillMaxWidth()
@@ -38,6 +39,7 @@ fun RichHtmlBubbleBlock(
         val model = rememberRichHtmlRenderModel(
             html = html,
             viewportWidthDp = viewportWidthDp,
+            transientCache = transientCache,
             onFailure = {
                 failed = true
                 RichHtmlRenderTelemetry.recordFallback(
@@ -125,16 +127,22 @@ private fun GuardedRichHtmlRender(
 internal fun rememberRichHtmlRenderModel(
     html: String,
     viewportWidthDp: Float = 360f,
+    transientCache: Boolean = false,
     onFailure: (Throwable) -> Unit = {},
 ): RichHtmlRenderModel? {
     val options = remember(viewportWidthDp) {
         RichHtmlCompileOptions(viewportWidthDp = viewportWidthDp)
     }
-    var model by remember(html, viewportWidthDp) {
-        mutableStateOf(RichHtmlCompiler.getCached(html, options))
+    val cacheMode = if (transientCache) {
+        RichHtmlCompileCacheMode.Transient
+    } else {
+        RichHtmlCompileCacheMode.Persistent
     }
-    LaunchedEffect(html, viewportWidthDp) {
-        RichHtmlCompiler.getCached(html, options)?.let {
+    var model by remember(html, viewportWidthDp, cacheMode) {
+        mutableStateOf(RichHtmlCompiler.getCached(html, options, cacheMode))
+    }
+    LaunchedEffect(html, viewportWidthDp, cacheMode) {
+        RichHtmlCompiler.getCached(html, options, cacheMode)?.let {
             model = it
             return@LaunchedEffect
         }
@@ -146,7 +154,7 @@ internal fun rememberRichHtmlRenderModel(
             length = html.length,
         )
         runCatching {
-            RichHtmlCompiler.compileAsync(html, options)
+            RichHtmlCompiler.compileAsync(html, options, cacheMode)
         }.onSuccess {
             model = it
         }.onFailure { throwable ->

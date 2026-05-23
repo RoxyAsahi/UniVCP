@@ -22,6 +22,7 @@ import me.rerere.rikkahub.ui.components.richtext.RichBackgroundImage
 import me.rerere.rikkahub.ui.components.richtext.RichBackgroundBox
 import me.rerere.rikkahub.ui.components.richtext.RichAlign
 import me.rerere.rikkahub.ui.components.richtext.RichAlignContent
+import me.rerere.rikkahub.ui.components.richtext.RichAnimationStrategy
 import me.rerere.rikkahub.ui.components.richtext.RichBorderStyle
 import me.rerere.rikkahub.ui.components.richtext.RichBorderCollapse
 import me.rerere.rikkahub.ui.components.richtext.RichCaptionSide
@@ -34,6 +35,7 @@ import me.rerere.rikkahub.ui.components.richtext.RichFlexDirection
 import me.rerere.rikkahub.ui.components.richtext.RichFlexWrap
 import me.rerere.rikkahub.ui.components.richtext.RichGridColumns
 import me.rerere.rikkahub.ui.components.richtext.RichHtmlCompiler
+import me.rerere.rikkahub.ui.components.richtext.RichHtmlCompileOptions
 import me.rerere.rikkahub.ui.components.richtext.hasLowCostColorEffect
 import me.rerere.rikkahub.ui.components.richtext.RichImageBlock
 import me.rerere.rikkahub.ui.components.richtext.RichJustify
@@ -154,6 +156,8 @@ class MessageTextBlocksTest {
         val html = blocks[1] as MessageTextBlock.VcpHtml
         assertTrue(html.partial)
         assertEquals("<div id=\"vcp-root\"><div>loading", html.html)
+        assertTrue(html.previewHtml?.contains("loading") == true)
+        assertTrue(html.previewHtml?.endsWith("</div>") == true)
     }
 
     @Test
@@ -172,7 +176,73 @@ class MessageTextBlocksTest {
 
         assertTrue(partialHtml.partial)
         assertFalse(finalHtml.partial)
+        assertTrue(partialHtml.previewHtml?.contains("loading") == true)
+        assertEquals(null, finalHtml.previewHtml)
         assertTrue(finalHtml.html.endsWith("</div></div>"))
+    }
+
+    @Test
+    fun `streaming partial rich html preview compiles nested and styled content`() {
+        val blocks = parseMessageTextBlocks(
+            text = """
+                intro
+                <style>.card{background:#101827;color:white;padding:16px;border-radius:12px;}</style>
+                <div id="vcp-root" class="card"><h2>学习计划</h2><div><p>第一步
+            """.trimIndent(),
+            streaming = true,
+        )
+
+        val html = blocks.last() as MessageTextBlock.VcpHtml
+        val preview = html.previewHtml
+
+        assertTrue(html.partial)
+        assertTrue(preview?.contains("<style>") == true)
+        assertTrue(preview?.contains("学习计划") == true)
+        assertEquals(RichHtmlRenderKind.NativeStatic, analyzeRichHtml(preview!!).kind)
+        assertTrue(RichHtmlCompiler.compile(preview).blocks.isNotEmpty())
+    }
+
+    @Test
+    fun `streaming partial details preview can render before final close`() {
+        val block = parseMessageTextBlocks(
+            text = "<details><summary>更多</summary><p>正在生成",
+            streaming = true,
+        ).single() as MessageTextBlock.VcpHtml
+
+        val preview = block.previewHtml
+
+        assertTrue(block.partial)
+        assertTrue(preview?.contains("<details") == true)
+        assertTrue(preview?.contains("正在生成") == true)
+        assertEquals(RichHtmlRenderKind.NativeStatic, analyzeRichHtml(preview!!).kind)
+    }
+
+    @Test
+    fun `streaming partial dynamic html stays classified as dynamic preview`() {
+        val block = parseMessageTextBlocks(
+            text = """<div id="vcp-root"><canvas></canvas><p>chart loading""",
+            streaming = true,
+        ).single() as MessageTextBlock.VcpHtml
+
+        val preview = block.previewHtml
+
+        assertTrue(block.partial)
+        assertTrue(preview?.contains("<canvas") == true)
+        assertEquals(RichHtmlRenderKind.ComplexDynamic, analyzeRichHtml(preview!!).kind)
+    }
+
+    @Test
+    fun `streaming partial unsafe html preview is rejected by safety gate`() {
+        val block = parseMessageTextBlocks(
+            text = """<div id="vcp-root"><img src="javascript:alert(1)">""",
+            streaming = true,
+        ).single() as MessageTextBlock.VcpHtml
+
+        val preview = block.previewHtml
+
+        assertTrue(block.partial)
+        assertTrue(preview?.contains("javascript:alert") == true)
+        assertFalse(inspectRichHtmlSafety(preview!!).safeForNative)
     }
 
     @Test
@@ -677,6 +747,9 @@ class MessageTextBlocksTest {
         assertEquals(1f, card.style.animation.nativeAnimation?.toOpacity ?: -1f, 0.001f)
         assertEquals(12.dp, card.style.animation.nativeAnimation?.fromTransform?.translateY)
         assertEquals(RichTransform.None, card.style.animation.nativeAnimation?.toTransform)
+        assertEquals(RichAnimationStrategy.NativeAnimated, model.animationStats.strategy)
+        assertEquals(1, model.animationStats.animatedElementCount)
+        assertEquals(1, model.animationStats.nativeAnimatedCount)
         assertTrue(card.style.transition.isDeclared)
         assertTrue(model.visualHints.contains(RichVisualHint.CssAnimation))
         assertTrue(model.visualHints.contains(RichVisualHint.CssTransition))
@@ -703,6 +776,12 @@ class MessageTextBlocksTest {
         assertTrue(block.style.animation.isInfinite)
         assertTrue(block.style.animation.hasLayoutProperty)
         assertEquals(null, block.style.animation.nativeAnimation)
+        assertEquals(RichAnimationStrategy.Staticized, model.animationStats.strategy)
+        assertEquals(1, model.animationStats.animatedElementCount)
+        assertEquals(1, model.animationStats.staticizedCount)
+        assertEquals(1, model.animationStats.infiniteCount)
+        assertEquals(1, model.animationStats.layoutAnimationCount)
+        assertEquals(1, model.animationStats.transitionCount)
         assertTrue(model.visualHints.contains(RichVisualHint.CssAnimation))
         assertTrue(model.visualHints.contains(RichVisualHint.CssInfiniteAnimation))
         assertTrue(model.visualHints.contains(RichVisualHint.CssLayoutAnimation))
@@ -731,6 +810,39 @@ class MessageTextBlocksTest {
         assertEquals(0.96f, pop.style.animation.nativeAnimation?.fromTransform?.scaleX ?: -1f, 0.001f)
         assertEquals(-2f, pop.style.animation.nativeAnimation?.fromTransform?.rotateZ ?: 0f, 0.001f)
         assertEquals(null, mid.style.animation.nativeAnimation)
+    }
+
+    @Test
+    fun `native animation budget keeps first safe animations and staticizes overflow`() {
+        val html = """
+            <div id="vcp-root">
+              <style>
+                @keyframes fade { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+              </style>
+              <div style="animation:fade .4s ease-out forwards;">One</div>
+              <div style="animation:fade .4s ease-out forwards;">Two</div>
+              <div style="animation:fade .4s ease-out forwards;">Three</div>
+              <div style="animation:fade .4s ease-out forwards;">Four</div>
+            </div>
+        """.trimIndent()
+
+        val model = RichHtmlCompiler.compile(
+            html,
+            options = RichHtmlCompileOptions(
+                budget = RichHtmlBudget(maxNativeAnimatedElements = 2),
+            ),
+        )
+        val root = model.blocks.single() as RichContainerBlock
+        val textBlocks = flattenRichBlocks(root).filterIsInstance<RichTextBlock>()
+
+        assertEquals(RichAnimationStrategy.BudgetExceededStaticized, model.animationStats.strategy)
+        assertEquals(4, model.animationStats.animatedElementCount)
+        assertEquals(2, model.animationStats.nativeAnimatedCount)
+        assertEquals(2, model.animationStats.staticizedCount)
+        assertEquals(2, model.animationStats.budgetExceededCount)
+        assertTrue(model.visualHints.contains(RichVisualHint.AnimationBudgetExceeded))
+        assertTrue(textBlocks.take(2).all { it.style.animation.nativeAnimation != null })
+        assertTrue(textBlocks.drop(2).all { it.style.animation.nativeAnimation == null })
     }
 
     @Test

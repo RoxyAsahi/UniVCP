@@ -106,6 +106,7 @@ import java.util.Locale
 import kotlin.time.Duration.Companion.milliseconds
 
 private const val STREAMING_RENDER_SAMPLE_MS = 120L
+private const val STREAMING_RICH_HTML_SAMPLE_MS = 500L
 
 @Composable
 fun ChatMessage(
@@ -365,9 +366,38 @@ private fun AssistantTextBlocks(
                     is MessageTextBlock.VcpHtml -> {
                         val analysis = remember(block.html) { analyzeRichHtml(block.html) }
                         if (block.partial) {
-                            StreamingRichHtmlPlaceholder(
-                                previewText = analysis.previewText,
-                            )
+                            val previewHtml = block.previewHtml
+                            val previewAnalysis = remember(previewHtml) {
+                                previewHtml?.let(::analyzeRichHtml)
+                            }
+                            when (previewAnalysis?.kind) {
+                                RichHtmlRenderKind.NativeStatic,
+                                RichHtmlRenderKind.InteractiveStatic -> {
+                                    if (previewHtml != null) {
+                                        RichHtmlBubbleBlock(
+                                            html = previewHtml,
+                                            onSendInput = onBubbleInput,
+                                            transientCache = true,
+                                            renderFallback = {
+                                                StreamingRichHtmlPlaceholder(
+                                                    previewText = previewAnalysis.previewText.ifBlank { analysis.previewText },
+                                                )
+                                            },
+                                        )
+                                    } else {
+                                        StreamingRichHtmlPlaceholder(
+                                            previewText = analysis.previewText,
+                                        )
+                                    }
+                                }
+
+                                RichHtmlRenderKind.ComplexDynamic,
+                                null -> {
+                                    StreamingRichHtmlPlaceholder(
+                                        previewText = previewAnalysis?.previewText ?: analysis.previewText,
+                                    )
+                                }
+                            }
                         } else when (analysis.kind) {
                             RichHtmlRenderKind.NativeStatic,
                             RichHtmlRenderKind.InteractiveStatic -> {
@@ -528,7 +558,10 @@ private fun rememberStreamingRenderText(
 ): androidx.compose.runtime.State<String> {
     val latestContent by rememberUpdatedState(content)
     return produceState(initialValue = content, streaming) {
-        val arbiter = StreamRenderArbiter(sampleWindowMs = STREAMING_RENDER_SAMPLE_MS)
+        val arbiter = StreamRenderArbiter(
+            sampleWindowMs = STREAMING_RENDER_SAMPLE_MS,
+            richBlockSampleWindowMs = STREAMING_RICH_HTML_SAMPLE_MS,
+        )
 
         fun applyFrame(frameContent: String, frameStreaming: Boolean): StreamRenderDecision {
             val decision = arbiter.onFrame(

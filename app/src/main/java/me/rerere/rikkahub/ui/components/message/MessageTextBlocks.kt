@@ -2,13 +2,15 @@ package me.rerere.rikkahub.ui.components.message
 
 import me.rerere.rikkahub.ui.components.render.RenderLruCache
 import me.rerere.rikkahub.ui.components.render.renderTextCacheKey
+import org.jsoup.Jsoup
 
 internal sealed interface MessageTextBlock {
     data class Markdown(val text: String) : MessageTextBlock
     data class VcpHtml(
         val html: String,
         val partial: Boolean,
-        val executable: Boolean
+        val executable: Boolean,
+        val previewHtml: String? = null,
     ) : MessageTextBlock
 
     data class Protocol(
@@ -221,6 +223,7 @@ private fun findRichRootBlock(text: String, startIndex: Int, streaming: Boolean)
                     html = text.substring(start),
                     partial = true,
                     executable = false,
+                    previewHtml = null,
                 )
             )
         }
@@ -248,6 +251,7 @@ private fun findRichRootBlock(text: String, startIndex: Int, streaming: Boolean)
                     html = html,
                     partial = true,
                     executable = hasExecutableHtml(html),
+                    previewHtml = buildStreamingRichHtmlPreview(html),
                 )
             )
         }
@@ -255,6 +259,22 @@ private fun findRichRootBlock(text: String, startIndex: Int, streaming: Boolean)
         searchIndex = root.start + 1
     }
     return null
+}
+
+internal fun buildStreamingRichHtmlPreview(html: String): String? {
+    if (html.isBlank()) return null
+    val document = runCatching { Jsoup.parseBodyFragment(html) }.getOrNull() ?: return null
+    val normalized = document.body()
+        .children()
+        .joinToString(separator = "\n") { it.outerHtml() }
+        .trim()
+    if (normalized.isBlank()) return null
+
+    val root = RichHtmlRootDetector.findNextCandidate(normalized, 0) ?: return null
+    if (root.startTagEnd < 0) return null
+    val end = RichHtmlRootDetector.findMatchingElementEnd(normalized, root.startTagEnd + 1, root.tagName)
+        ?: return null
+    return normalized.take(end).trim()
 }
 
 private fun findAdjacentLeadingStyleStart(text: String, rootStart: Int, lowerBound: Int): Int {

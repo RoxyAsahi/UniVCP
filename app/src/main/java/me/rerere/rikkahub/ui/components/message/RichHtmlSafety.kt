@@ -14,6 +14,7 @@ internal data class RichHtmlBudget(
     val maxTableCells: Int = 160,
     val maxSvgCommands: Int = 128,
     val maxSvgPathChars: Int = 8_000,
+    val maxNativeAnimatedElements: Int = 3,
 )
 
 internal enum class RichHtmlSafetyReason {

@@ -22,7 +22,7 @@ class StreamRenderArbiterTest {
 
     @Test
     fun `unclosed vcp root publishes placeholder once then holds updates`() {
-        val arbiter = StreamRenderArbiter(sampleWindowMs = 120)
+        val arbiter = StreamRenderArbiter(sampleWindowMs = 120, richBlockSampleWindowMs = 500)
 
         assertTrue(arbiter.onFrame(frame("intro", nowMs = 0)).publishText)
         val partialStart = arbiter.onFrame(
@@ -36,6 +36,24 @@ class StreamRenderArbiterTest {
         assertTrue(partialStart.hasUnclosedRichBlock)
         assertFalse(partialUpdate.publishText)
         assertTrue(partialUpdate.hasUnclosedRichBlock)
+    }
+
+    @Test
+    fun `unclosed vcp root samples latest content after rich window`() {
+        val arbiter = StreamRenderArbiter(sampleWindowMs = 120, richBlockSampleWindowMs = 500)
+
+        arbiter.onFrame(frame("""<div id="vcp-root"><h2>title""", nowMs = 0))
+        val held = arbiter.onFrame(
+            frame("""<div id="vcp-root"><h2>title</h2><p>body""", nowMs = 300)
+        )
+        val sampled = arbiter.onFrame(
+            frame("""<div id="vcp-root"><h2>title</h2><p>body grows""", nowMs = 500)
+        )
+
+        assertFalse(held.publishText)
+        assertEquals(200L, held.nextCheckDelayMs)
+        assertTrue(sampled.publishText)
+        assertTrue(sampled.hasUnclosedRichBlock)
     }
 
     @Test
