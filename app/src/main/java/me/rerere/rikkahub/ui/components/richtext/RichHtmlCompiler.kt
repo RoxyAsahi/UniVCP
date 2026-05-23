@@ -46,6 +46,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.Node
 import org.jsoup.nodes.TextNode
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
@@ -2619,13 +2620,16 @@ private fun parseCssTextAlign(value: String): TextAlign? = when (value.trim().lo
 private fun parseCssColor(value: String): Color? {
     val token = when {
         value.contains("gradient", ignoreCase = true) -> CSS_COLOR_TOKEN.find(value)?.value ?: return null
-        value.contains(" ") && !value.trim().startsWith("rgb", true) -> value.trim().substringBefore(" ")
+        value.contains(" ") &&
+            !value.trim().startsWith("rgb", true) &&
+            !value.trim().startsWith("hsl", true) -> value.trim().substringBefore(" ")
         else -> value.trim()
     }
     return runCatching {
         when {
             token.startsWith("#") -> parseHexColor(token)
             token.startsWith("rgb", ignoreCase = true) -> parseRgbColor(token)
+            token.startsWith("hsl", ignoreCase = true) -> parseHslColor(token)
             else -> NAMED_COLORS[token.lowercase()]
         }
     }.getOrNull()
@@ -2653,6 +2657,44 @@ private fun parseRgbColor(token: String): Color? {
     val b = parseColorChannel(parts[2]) ?: return null
     val a = parts.getOrNull(3)?.let(::parseAlphaChannel) ?: 255
     return Color(r, g, b, a)
+}
+
+private fun parseHslColor(token: String): Color? {
+    val body = token.substringAfter("(").substringBeforeLast(")").replace("/", " ")
+    val parts = body.split(Regex("""[\s,]+""")).filter { it.isNotBlank() }
+    if (parts.size < 3) return null
+    val h = parseHueDegrees(parts[0]) ?: return null
+    val s = parseCssPercentUnit(parts[1]) ?: return null
+    val l = parseCssPercentUnit(parts[2]) ?: return null
+    val a = parts.getOrNull(3)?.let(::parseAlphaChannel) ?: 255
+    val c = (1f - abs(2f * l - 1f)) * s
+    val hPrime = ((h % 360f) + 360f) % 360f / 60f
+    val x = c * (1f - abs(hPrime % 2f - 1f))
+    val (r1, g1, b1) = when {
+        hPrime < 1f -> Triple(c, x, 0f)
+        hPrime < 2f -> Triple(x, c, 0f)
+        hPrime < 3f -> Triple(0f, c, x)
+        hPrime < 4f -> Triple(0f, x, c)
+        hPrime < 5f -> Triple(x, 0f, c)
+        else -> Triple(c, 0f, x)
+    }
+    val m = l - c / 2f
+    fun channel(value: Float): Int = ((value + m).coerceIn(0f, 1f) * 255f).roundToInt()
+    return Color(channel(r1), channel(g1), channel(b1), a)
+}
+
+private fun parseHueDegrees(value: String): Float? {
+    val normalized = value.trim().lowercase()
+    return when {
+        normalized.endsWith("deg") -> normalized.removeSuffix("deg").toFloatOrNull()
+        normalized.endsWith("turn") -> normalized.removeSuffix("turn").toFloatOrNull()?.times(360f)
+        normalized.endsWith("rad") -> normalized.removeSuffix("rad").toFloatOrNull()?.times(57.29578f)
+        else -> normalized.toFloatOrNull()
+    }
+}
+
+private fun parseCssPercentUnit(value: String): Float? {
+    return value.trim().removeSuffix("%").toFloatOrNull()?.div(100f)?.coerceIn(0f, 1f)
 }
 
 private fun parseColorChannel(value: String): Int? {
@@ -2705,7 +2747,7 @@ private val NAMED_COLORS = mapOf(
 )
 
 private val CSS_COLOR_TOKEN = Regex(
-    """#[0-9a-fA-F]{3,8}|rgba?\([^)]+\)|\b(?:${NAMED_COLORS.keys.joinToString("|")})\b""",
+    """#[0-9a-fA-F]{3,8}|rgba?\([^)]+\)|hsla?\([^)]+\)|\b(?:${NAMED_COLORS.keys.joinToString("|")})\b""",
     RegexOption.IGNORE_CASE,
 )
 private val CSS_LENGTH_TOKEN = Regex("""-?[0-9]*\.?[0-9]+(?:px|dp|rem|em)?""")

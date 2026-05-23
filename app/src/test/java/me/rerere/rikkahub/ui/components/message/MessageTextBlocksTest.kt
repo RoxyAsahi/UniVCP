@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.ui.components.message
 
 import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.isSpecified
 import kotlinx.serialization.json.Json
@@ -31,6 +32,7 @@ import me.rerere.rikkahub.ui.components.richtext.RichFlexDirection
 import me.rerere.rikkahub.ui.components.richtext.RichFlexWrap
 import me.rerere.rikkahub.ui.components.richtext.RichGridColumns
 import me.rerere.rikkahub.ui.components.richtext.RichHtmlCompiler
+import me.rerere.rikkahub.ui.components.richtext.hasLowCostColorEffect
 import me.rerere.rikkahub.ui.components.richtext.RichImageBlock
 import me.rerere.rikkahub.ui.components.richtext.RichJustify
 import me.rerere.rikkahub.ui.components.richtext.RichListStylePosition
@@ -634,9 +636,24 @@ class MessageTextBlocksTest {
         assertEquals(1.15f, root.style.cssFilter.brightness ?: -1f, 0.001f)
         assertEquals(0.25f, root.style.cssFilter.grayscale ?: -1f, 0.001f)
         assertTrue(root.style.cssFilter.requiresVisualApproximation)
+        assertTrue(root.style.cssFilter.hasLowCostColorEffect())
         assertEquals(8.dp, root.style.backdropFilter.blurRadius)
         assertTrue(model.visualHints.any { it.name == "CssFilter" })
         assertTrue(model.visualHints.any { it.name == "CssBackdropFilter" })
+    }
+
+    @Test
+    fun `native compiler supports hsl colors for static painting`() {
+        val html = """
+            <div id="vcp-root" style="color:hsl(210 100% 50%);background-color:hsla(280,100%,50%,.5);">
+              hsl color
+            </div>
+        """.trimIndent()
+
+        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
+
+        assertEquals(Color(0, 128, 255), root.style.color)
+        assertEquals(Color(170, 0, 255, 128), root.style.backgroundColor)
     }
 
     @Test

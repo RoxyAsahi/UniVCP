@@ -151,7 +151,8 @@ assistant text
 - SVG v2.5 首片：SVG paint 扩展到 `radialGradient` shader；元素/stop 的 `opacity/fill-opacity/stroke-opacity` 会进入颜色 alpha；`g` 上的 fill/stroke/stroke-width 可被子图元继承；stroke linecap/linejoin/dasharray、text-anchor 和基础 font-weight 会进入 renderer。
 - Fidelity foundation 首片：`RichHtmlRenderModel` 新增内部 visual hints，用于记录不含正文的静态保真缺口；render seed fidelity report 测试会统计标签、CSS 属性、SVG 特性、fallback、hint、编译耗时和 model block count。
 - background repeat：`repeat/repeat-x/repeat-y/round/space` 不再只停在 model，URL/data 背景会在 renderer 中以安全 Canvas tile 近似绘制；`no-repeat` 仍走单图背景路径。
-- CSS filter 首片：`filter/backdrop-filter` 不再只是不可见 hint；compiler 会记录安全静态子集 `blur()/brightness()/opacity()/grayscale()`，renderer 先低成本消费 `filter: opacity(...)` 到 alpha，其余滤镜保留结构化 model 与 visual hint，避免引入昂贵实时模糊/颜色矩阵。
+- CSS filter 首片：`filter/backdrop-filter` 不再只是不可见 hint；compiler 会记录安全静态子集 `blur()/brightness()/opacity()/grayscale()`，renderer 已低成本消费 `filter: opacity(...)` 到 alpha，并用颜色矩阵近似渲染 `filter: brightness()/grayscale()`；`blur()` 和 backdrop blur 仍保留结构化 model 与 visual hint，避免引入昂贵实时模糊。
+- CSS color v3.1：颜色解析新增 `hsl()/hsla()`，覆盖 AI 生成卡片中常见的 hue/saturation/lightness 写法；hex/rgb/rgba/named colors 仍保持原有支持。
 - CSS 驱动按钮：`RichButtonBlock` 不再使用 Material Button 默认字号、内边距和最小高度覆盖作者 CSS，而是通过 `StyledContainer + Text + clickable` 渲染。
 - 盒模型边界：renderer 不再给 root 容器偷偷加默认圆角或默认间距；margin 作为外层 spacing 应用，padding 只来自 UA/作者 CSS。
 - 空视觉装饰盒保留：空的 `div/span` 如果带有 position、尺寸、背景、边框、阴影、透明度、filter 或 transform，会保留为 `RichContainerBlock`；这类节点常用于背景光斑、badge、圆点、分隔装饰，不再因为没有正文而被拍平成空文本丢失。
@@ -175,7 +176,7 @@ assistant text
 - 选择器：tag、class、id、后代选择器、子选择器、相邻/兄弟选择器、属性选择器、`:first-child`、`:last-child`、`:nth-child(...)`、`:not(...)` 的静态匹配。
 - 级联：specificity、声明顺序、inline style 优先级、继承属性、`:root` 和 `var(--x)`。
 - `@media`：支持按当前宽度和 dark/light 做静态分支选择。
-- 颜色：`#rgb`、`#rgba`、`#rrggbb`、`#rrggbbaa`、`rgb(...)`、`rgba(...)`、部分常见命名色。
+- 颜色：`#rgb`、`#rgba`、`#rrggbb`、`#rrggbbaa`、`rgb(...)`、`rgba(...)`、`hsl(...)`、`hsla(...)`、部分常见命名色。
 - 背景：纯色、`background-color`、`background`、`background-image`、URL/data image 背景、带 color stop 的 linear/radial/conic gradient 静态近似；`background-size` 支持 `cover/contain/auto`、双值长度/百分比，`background-position` 支持常见关键字、百分比和 `right 12px bottom 8px` 这类四值偏移，`background-repeat` 支持 `no-repeat/repeat/repeat-x/repeat-y/round/space`，repeat 类 URL/data 背景会走 Canvas tile 近似，`background-origin/clip` 会影响背景绘制/裁剪区域；`background-clip:text` 的 gradient 背景会作为文字 Brush 渲染。
 - 保真度提示：多背景层、CSS filter/backdrop-filter/mix-blend/mask/clip-path、复杂 table span、SVG clip/mask/filter/use/symbol/pattern/marker 等会记录 debug-only visual hints，后续用真实样例频率决定实现优先级；其中 `filter/backdrop-filter` 的安全静态函数已进入结构化 model。
 - 间距：`padding`/`margin` 的 1 到 4 值，以及 `padding-*`、`margin-*`；长度值支持 px/dp/rem/em/%，并对嵌套 `calc()/min()/max()/clamp()` 做编译期静态近似。
@@ -191,7 +192,7 @@ assistant text
 - Overflow：`hidden` 裁切，`scroll/auto` 降级为滚动容器。
 - 阴影：多层 `box-shadow` 编译进 model；renderer 按 offset、blur、spread、color 绘制非 inset 静态近似。
 - 透明度：`opacity`。
-- CSS filter：`filter/backdrop-filter` 支持解析 `blur()/brightness()/opacity()/grayscale()` 到内部 model；renderer 当前只将 `filter: opacity(...)` 合并到现有 alpha，其他滤镜作为结构化静态缺口继续由 visual hint 统计。
+- CSS filter：`filter/backdrop-filter` 支持解析 `blur()/brightness()/opacity()/grayscale()` 到内部 model；renderer 当前将 `filter: opacity(...)` 合并到现有 alpha，并用低成本颜色矩阵近似渲染 `brightness()/grayscale()`；`blur()` 和 backdrop blur 继续作为结构化静态缺口由 visual hint 统计。
 - 列表：`list-style-type`、`list-style-position` 和安全 `list-style-image` 会进入 model；`ol start/reversed/type` 会影响 marker；安全图片 marker 会以小图近似渲染，失败回退文本 marker；嵌套列表按深度增加缩进。
 - 伪元素：`::before/::after` 的静态纯文本 `content`，支持字符串拼接、多个 `attr(...)`、`\00xx` unicode escape，以及列表内简单 `counter()/counters()` 静态编号。
 - 图片：`object-fit` 和背景图 `background-size/background-position/background-repeat` 的基础近似。
@@ -206,7 +207,7 @@ assistant text
 - `background-repeat` 已有安全 tile 近似，`round/space` 已有尺寸/间隔近似；仍不实现浏览器完整 background painting area、多背景层绘制和 sub-pixel 级 repeat 算法。
 - `background-position` 已支持常见两值/四值偏移，并会基于 `background-origin` 的近似绘制区域定位，但偏移仍基于静态 dp，不实现浏览器对 containing block 的完整重排算法。
 - `background-clip:text` 已支持 gradient 文字 Brush；但 URL 背景裁文字、复杂 `-webkit-text-fill-color` 组合和多层背景裁文字仍降级。
-- `filter/backdrop-filter` 已有安全函数解析和 `filter: opacity(...)` 渲染闭环；`blur()/brightness()/grayscale()` 与 backdrop blur 暂不做实时像素滤镜，继续作为结构化 visual hint 排期。
+- `filter/backdrop-filter` 已有安全函数解析，`filter: opacity()/brightness()/grayscale()` 已有渲染闭环；`blur()` 与 backdrop blur 暂不做实时像素滤镜，继续作为结构化 visual hint 排期。
 - `z-index` 的完整 browser stacking context。
 - `list-style-image` 已有小图 marker 近似，但尚未实现浏览器级 marker sizing、baseline 对齐和 marker box。
 - `::before/::after` 已支持列表内简单 counter；复杂 counter reset/increment、URL content 和完整 generated content 仍降级。
@@ -408,7 +409,7 @@ app/src/debug/assets/render_seed/chat_render_seed.json
 
 - 不执行 JS。
 - 不运行 CSS 动画，只静态展示内容。
-- `filter/backdrop-filter/mix-blend-mode` 这类视觉特效会忽略或静态降级。
+- `filter: opacity()/brightness()/grayscale()` 已静态生效；`filter: blur()`、`backdrop-filter`、`mix-blend-mode` 这类视觉特效仍会记录 hint 或静态降级。
 - `@font-face` 首版只识别并降级到系统字体族。
 - 字体 metrics 仍由 Android/Compose 决定，无法做到浏览器像素级一致；当前目标是解决明显字号、行高和盒模型偏差。
 - `position:absolute/fixed/sticky` 是安全静态近似，复杂 overlay 和 z-index stacking context 不保证浏览器级重叠效果。
@@ -423,10 +424,10 @@ app/src/debug/assets/render_seed/chat_render_seed.json
 
 优先级从高到低：
 
-1. 真机视觉回归：用 Pixel 8 当前真实聊天记录逐类截图，对比背景、间距、按钮、公式、表格、图片。
-2. 在真实聊天页接入 debug-only 聚合面板或 log：分类数量、原生渲染数量、动态预览数量、fallback reason、编译耗时和缓存命中率，不输出正文。
-3. 建立 debug-only parity harness：同一段 HTML 输出 native height、WebView height、height delta、classification、fallback reason、compile/render time，不记录正文。
-4. Phase 3 下一片：基于官方 FlexBox 做实机视觉校准，继续补 grid 显式行列、grid span 高度策略，以及 `order` 与 positioned overlay 的交互边界。
-5. Phase 4 下一片：继续补复杂 rowspan 高度分摊、`border-collapse` 冲突规则近似、caption-side、thead/tfoot sticky 暂不做但可记录，以及宽表稳定横向滚动的视觉回归。
-6. 继续扩大 ph-css 使用范围，但保持 selector matcher 可控，避免一次性替换成浏览器级 CSS 引擎。
-7. 研究 WebView 静态快照缓存作为第二阶段兜底，只给复杂但安全的静态内容或高度差过大的样本用，避免长聊天恢复成“一堆 live WebView”。
+1. CSS Painting v3.2：支持 `clip-path: inset()/circle()/ellipse()` 的安全静态子集，先用于圆形头像、光斑裁剪和胶囊装饰；复杂 path/polygon 继续 hint。
+2. CSS Painting v3.3：多背景层从“第一层渲染 + 其余 hint”推进到最多两层安全静态绘制，覆盖图案纹理叠 gradient 的高频卡片。
+3. CSS Painting v3.4：继续评估 `filter: blur()` 的低成本近似，只允许小半径/低频装饰层；`backdrop-filter` 仍优先保持 hint，避免聊天列表实时模糊开销。
+4. CSS Painting v3.5：`mix-blend-mode`、mask、复杂 clip-path 保持 visual hint，并通过 render seed report 统计真实频率，频率不足则不进入主线实现。
+5. SVG Paint v3：补 `gradientUnits/gradientTransform/spreadMethod`、安全 `clipPath` 子集和 marker 箭头，用于流程图、坐标轴和图标。
+6. 质量闭环：真机视觉回归继续对比背景、色彩、滤镜、渐变文字、阴影和 SVG；debug-only report 只输出 hint/耗时/样例 id，不输出正文。
+7. 继续扩大 ph-css 使用范围，但保持 selector matcher 可控，避免一次性替换成浏览器级 CSS 引擎。

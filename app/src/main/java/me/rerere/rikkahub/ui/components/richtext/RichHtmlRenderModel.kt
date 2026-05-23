@@ -242,6 +242,10 @@ internal fun ComputedStyle.effectiveOpacity(): Float {
     return (opacity * (cssFilter.opacity ?: 1f)).coerceIn(0f, 1f)
 }
 
+internal fun RichCssFilter.hasLowCostColorEffect(): Boolean {
+    return brightness != null || grayscale != null
+}
+
 internal enum class RichDisplay {
     None,
     Block,

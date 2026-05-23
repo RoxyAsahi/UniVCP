@@ -1,6 +1,8 @@
 package me.rerere.rikkahub.ui.components.richtext
 
 import android.graphics.DashPathEffect
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Shader
@@ -616,6 +618,7 @@ private fun StyledContainer(
         .then(style.marginModifier())
         .then(style.baseModifier(root))
     outer = outer.then(style.richShadowModifier(shape))
+    outer = outer.then(style.cssColorFilterModifier())
     if (style.overflow == RichOverflow.Hidden) outer = outer.clip(shape)
     if (onClick != null) outer = outer.clickable(onClick = onClick)
     if (style.overflow == RichOverflow.Scroll || style.overflow == RichOverflow.Auto) {
@@ -664,6 +667,42 @@ private fun StyledContainer(
             content()
         }
     }
+}
+
+private fun ComputedStyle.cssColorFilterModifier(): Modifier {
+    val matrix = cssFilter.toAndroidColorMatrix() ?: return Modifier
+    return Modifier.drawWithContent {
+        val paint = Paint().apply {
+            colorFilter = ColorMatrixColorFilter(matrix)
+        }
+        val checkpoint = drawContext.canvas.nativeCanvas.saveLayer(
+            RectF(0f, 0f, size.width, size.height),
+            paint,
+        )
+        drawContent()
+        drawContext.canvas.nativeCanvas.restoreToCount(checkpoint)
+    }
+}
+
+private fun RichCssFilter.toAndroidColorMatrix(): ColorMatrix? {
+    if (!hasLowCostColorEffect()) return null
+    val matrix = ColorMatrix()
+    grayscale?.let { amount ->
+        matrix.setSaturation((1f - amount).coerceIn(0f, 1f))
+    }
+    brightness?.let { factor ->
+        val clamped = factor.coerceAtLeast(0f)
+        val brightnessMatrix = ColorMatrix(
+            floatArrayOf(
+                clamped, 0f, 0f, 0f, 0f,
+                0f, clamped, 0f, 0f, 0f,
+                0f, 0f, clamped, 0f, 0f,
+                0f, 0f, 0f, 1f, 0f,
+            )
+        )
+        matrix.postConcat(brightnessMatrix)
+    }
+    return matrix
 }
 
 private data class InlineMathText(
