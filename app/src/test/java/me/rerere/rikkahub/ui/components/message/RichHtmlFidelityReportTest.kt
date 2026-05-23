@@ -42,6 +42,8 @@ class RichHtmlFidelityReportTest {
     fun `visual hints cover css svg table and background gaps`() {
         val html = """
             <div id="vcp-root" style="background:url(data:image/png;base64,AAAA) no-repeat right 8px bottom 4px / 20px 20px content-box padding-box,linear-gradient(#000,#fff);filter:blur(2px);backdrop-filter:brightness(.9);mix-blend-mode:multiply;clip-path:inset(0);mask-image:url(data:image/png;base64,BBBB);">
+              <style>@keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}.x:hover{opacity:.8}</style>
+              <div class="x" style="animation:fade .4s ease-out forwards;transition:transform .2s ease;">Animated</div>
               <table><tr><td rowspan="2" colspan="2">A</td></tr></table>
               <svg width="40" height="40" viewBox="0 0 40 40">
                 <defs><clipPath id="c"><rect width="10" height="10"/></clipPath><marker id="m"/></defs>
@@ -64,6 +66,10 @@ class RichHtmlFidelityReportTest {
         assertTrue(hints.contains("CssMixBlendMode"))
         assertTrue(hints.contains("CssMask"))
         assertTrue(hints.contains("CssClipPath"))
+        assertTrue(hints.contains("CssAnimation"))
+        assertTrue(hints.contains("CssTransition"))
+        assertTrue(hints.contains("CssKeyframes"))
+        assertTrue(hints.contains("CssInteractivePseudoClass"))
         assertTrue(hints.contains("TableComplexSpan"))
         assertTrue(hints.contains("SvgClipPath"))
         assertTrue(hints.contains("SvgUse"))

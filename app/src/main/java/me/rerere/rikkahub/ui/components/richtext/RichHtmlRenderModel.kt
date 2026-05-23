@@ -29,6 +29,13 @@ internal enum class RichVisualHint {
     CssMask,
     CssClipPath,
     CssUnsupportedColor,
+    CssAnimation,
+    CssTransition,
+    CssKeyframes,
+    CssInteractivePseudoClass,
+    CssInfiniteAnimation,
+    CssLayoutAnimation,
+    AnimationDependentVisibility,
     TableComplexSpan,
     SvgClipPath,
     SvgMask,
@@ -162,6 +169,8 @@ internal data class ComputedStyle(
     val extraBackgroundLayers: Int = 0,
     val objectFit: RichObjectFit = RichObjectFit.Contain,
     val opacity: Float = 1f,
+    val animation: RichAnimationStyle = RichAnimationStyle.None,
+    val transition: RichTransitionStyle = RichTransitionStyle.None,
     val cssFilter: RichCssFilter = RichCssFilter.None,
     val backdropFilter: RichCssFilter = RichCssFilter.None,
     val padding: RichSpacing = RichSpacing.Zero,
@@ -367,6 +376,41 @@ internal enum class RichObjectFit {
     Cover,
     Fill,
     None,
+}
+
+internal data class RichAnimationStyle(
+    val names: List<String> = emptyList(),
+    val durationMs: Int = 0,
+    val delayMs: Int = 0,
+    val iterationCount: Float = 1f,
+    val fillModeForwards: Boolean = false,
+    val hasLayoutProperty: Boolean = false,
+    val hasOpacityOrTransform: Boolean = false,
+) {
+    val isDeclared: Boolean
+        get() = names.isNotEmpty()
+
+    val isInfinite: Boolean
+        get() = iterationCount.isInfinite()
+
+    val mayHideStaticContent: Boolean
+        get() = isDeclared && fillModeForwards && hasOpacityOrTransform
+
+    companion object {
+        val None = RichAnimationStyle()
+    }
+}
+
+internal data class RichTransitionStyle(
+    val properties: List<String> = emptyList(),
+    val durationMs: Int = 0,
+) {
+    val isDeclared: Boolean
+        get() = properties.isNotEmpty()
+
+    companion object {
+        val None = RichTransitionStyle()
+    }
 }
 
 internal data class RichCssFilter(

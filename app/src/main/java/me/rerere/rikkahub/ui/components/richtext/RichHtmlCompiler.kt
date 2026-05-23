@@ -667,6 +667,7 @@ internal data class ResolvedStyle(
 
 internal class StyleResolver private constructor(
     private val rules: List<CssRule>,
+    private val keyframes: Map<String, RichKeyframesSummary>,
     val rootVariables: Map<String, String>,
     private val options: RichHtmlCompileOptions,
     private val cancellationCheck: () -> Unit,
@@ -708,7 +709,7 @@ internal class StyleResolver private constructor(
             }
         }
 
-        val style = computeStyle(parentStyle, declarations, options).copy(
+        val style = computeStyle(parentStyle, declarations, options, keyframes).copy(
             beforeContent = declarations["__before-content"]?.let { parsePseudoContent(it, element) },
             afterContent = declarations["__after-content"]?.let { parsePseudoContent(it, element) },
         )
@@ -735,7 +736,7 @@ internal class StyleResolver private constructor(
                     if (key.startsWith("--")) rootVars[key] = value
                 }
             }
-            return StyleResolver(parsed.rules, rootVars, options, cancellationCheck, parsed.visualHints)
+            return StyleResolver(parsed.rules, parsed.keyframes, rootVars, options, cancellationCheck, parsed.visualHints)
         }
     }
 }
@@ -813,6 +814,28 @@ private fun visualHintsForDeclarations(declarations: Map<String, String>): Set<R
     }
     declarations["clip-path"]?.takeIf { it.isNotBlank() && !it.equals("none", ignoreCase = true) }
         ?.let { hints += RichVisualHint.CssClipPath }
+    val animationValues = declarations.filterKeys { it == "animation" || it.startsWith("animation-") }.values
+    if (animationValues.any { it.isNotBlank() && !it.equals("none", ignoreCase = true) }) {
+        hints += RichVisualHint.CssAnimation
+    }
+    if (animationValues.any { it.contains("infinite", ignoreCase = true) } ||
+        declarations["animation-iteration-count"]?.contains("infinite", ignoreCase = true) == true
+    ) {
+        hints += RichVisualHint.CssInfiniteAnimation
+    }
+    val transitionValues = declarations.filterKeys { it == "transition" || it.startsWith("transition-") }.values
+    if (transitionValues.any { it.isNotBlank() && !it.equals("none", ignoreCase = true) }) {
+        hints += RichVisualHint.CssTransition
+    }
+    val animatedPropertyText = (animationValues + transitionValues).joinToString(" ").lowercase()
+    if (ANIMATED_LAYOUT_PROPERTIES.any { Regex("""(^|[\s,])${Regex.escape(it)}($|[\s,])""").containsMatchIn(animatedPropertyText) }) {
+        hints += RichVisualHint.CssLayoutAnimation
+    }
+    if (declarations["opacity"]?.trim()?.toFloatOrNull() == 0f &&
+        animationValues.any { it.contains("forwards", ignoreCase = true) || it.contains("both", ignoreCase = true) }
+    ) {
+        hints += RichVisualHint.AnimationDependentVisibility
+    }
     return hints
 }
 
@@ -825,8 +848,20 @@ private data class CssRule(
 
 private data class CssParseResult(
     val rules: List<CssRule>,
+    val keyframes: Map<String, RichKeyframesSummary>,
     val visualHints: List<RichVisualHint>,
 )
+
+private data class RichKeyframesSummary(
+    val name: String,
+    val properties: Set<String>,
+) {
+    val hasOpacityOrTransform: Boolean
+        get() = properties.any { it == "opacity" || it == "transform" }
+
+    val hasLayoutProperty: Boolean
+        get() = properties.any { it in ANIMATED_LAYOUT_PROPERTIES }
+}
 
 private data class CssSelector(
     val raw: String,
@@ -853,15 +888,17 @@ private object CssParser {
         cancellationCheck: () -> Unit = {},
     ): CssParseResult {
         val rules = mutableListOf<CssRule>()
+        val keyframes = linkedMapOf<String, RichKeyframesSummary>()
         val hints = linkedSetOf<RichVisualHint>()
-        parseInto(css.removeCssComments(), options, rules, hints, cancellationCheck)
-        return CssParseResult(rules = rules, visualHints = hints.toList())
+        parseInto(css.removeCssComments(), options, rules, keyframes, hints, cancellationCheck)
+        return CssParseResult(rules = rules, keyframes = keyframes, visualHints = hints.toList())
     }
 
     private fun parseInto(
         css: String,
         options: RichHtmlCompileOptions,
         output: MutableList<CssRule>,
+        keyframes: MutableMap<String, RichKeyframesSummary>,
         visualHints: MutableSet<RichVisualHint>,
         cancellationCheck: () -> Unit,
     ) {
@@ -876,10 +913,17 @@ private object CssParser {
             val body = css.substring(start + 1, end)
             when {
                 selector.startsWith("@media", ignoreCase = true) -> {
-                    if (mediaMatches(selector, options)) parseInto(body, options, output, visualHints, cancellationCheck)
+                    if (mediaMatches(selector, options)) parseInto(body, options, output, keyframes, visualHints, cancellationCheck)
                 }
                 selector.startsWith("@font-face", ignoreCase = true) -> Unit
-                selector.startsWith("@keyframes", ignoreCase = true) -> Unit
+                selector.startsWith("@keyframes", ignoreCase = true) -> {
+                    hintsForKeyframes(selector, body)?.let { summary ->
+                        visualHints += RichVisualHint.CssKeyframes
+                        if (summary.hasOpacityOrTransform) visualHints += RichVisualHint.CssAnimation
+                        if (summary.hasLayoutProperty) visualHints += RichVisualHint.CssLayoutAnimation
+                        keyframes[summary.name] = summary
+                    }
+                }
                 selector.startsWith("@") -> Unit
                 else -> {
                     val declarations = parseCssDeclarations(body)
@@ -890,6 +934,10 @@ private object CssParser {
                             raw.endsWith("::before", ignoreCase = true) || raw.endsWith(":before", ignoreCase = true) -> "__before-content"
                             raw.endsWith("::after", ignoreCase = true) || raw.endsWith(":after", ignoreCase = true) -> "__after-content"
                             else -> null
+                        }
+                        if (pseudoTarget == null && raw.contains(INTERACTIVE_PSEUDO_SELECTOR)) {
+                            visualHints += RichVisualHint.CssInteractivePseudoClass
+                            return@forEach
                         }
                         val selectorRaw = raw
                             .removeSuffix("::before")
@@ -923,6 +971,7 @@ private fun computeStyle(
     parent: ComputedStyle,
     declarations: Map<String, String>,
     options: RichHtmlCompileOptions,
+    keyframes: Map<String, RichKeyframesSummary> = emptyMap(),
 ): ComputedStyle {
     val inherited = parent.inheritedCssStyle()
     val fontShorthand = declarations["font"]?.let { parseCssFontShorthand(it, inherited.fontSize) }
@@ -964,6 +1013,16 @@ private fun computeStyle(
     val backgroundShorthand = declarations["background"]?.let { parseBackgroundShorthand(it, lengthContext) }
     val flexShorthand = declarations["flex"]?.let { parseFlexShorthand(it, lengthContext) }
     val flexFlow = declarations["flex-flow"]?.let(::parseFlexFlow)
+    val animation = parseAnimationStyle(declarations, keyframes, lengthContext)
+        ?: inherited.animation
+    val transition = parseTransitionStyle(declarations)
+        ?: inherited.transition
+    val declaredOpacity = declarations["opacity"]?.let(::parseCssFloat)?.coerceIn(0f, 1f)
+    val opacity = if (declaredOpacity != null && declaredOpacity <= 0.001f && animation.shouldStaticizeVisible()) {
+        1f
+    } else {
+        declaredOpacity ?: inherited.opacity
+    }
     val declaredColor = declarations["color"]?.let(::parseRichCssColor)
     val resolvedColor = declarations["color"]?.let { resolveRichCssColor(declaredColor, inherited.color) } ?: inherited.color
     val declaredBackgroundColor = declarations["background-color"]?.let(::parseRichCssColor)
@@ -1012,7 +1071,9 @@ private fun computeStyle(
             ?.let(::countExtraBackgroundLayers)
             ?: inherited.extraBackgroundLayers,
         objectFit = declarations["object-fit"]?.let(::parseObjectFit) ?: inherited.objectFit,
-        opacity = declarations["opacity"]?.let(::parseCssFloat)?.coerceIn(0f, 1f) ?: inherited.opacity,
+        opacity = opacity,
+        animation = animation,
+        transition = transition,
         cssFilter = declarations["filter"]?.let { parseCssFilter(it, lengthContext) } ?: inherited.cssFilter,
         backdropFilter = declarations["backdrop-filter"]?.let { parseCssFilter(it, lengthContext) } ?: inherited.backdropFilter,
         padding = parseCssSpacing(declarations, "padding", lengthContext) ?: inherited.padding,
@@ -1376,6 +1437,15 @@ private fun mediaMatches(selector: String, options: RichHtmlCompileOptions): Boo
         if (options.viewportWidthDp > it) return false
     }
     return true
+}
+
+private fun hintsForKeyframes(selector: String, body: String): RichKeyframesSummary? {
+    val name = selector.substringAfter("@keyframes", "").trim().takeIf { it.isNotBlank() } ?: return null
+    val properties = CSS_PROPERTY_NAME.findAll(body)
+        .map { it.groupValues[1].trim().lowercase() }
+        .filterNot { it.matches(Regex("""\d+%|from|to""")) }
+        .toSet()
+    return RichKeyframesSummary(name = name, properties = properties)
 }
 
 private fun matchCompoundSelector(element: Element, selector: String): Boolean {
@@ -1927,6 +1997,127 @@ private fun parseTextShadow(value: String, currentColor: Color?): RichTextShadow
         blurRadius = lengths.getOrNull(2) ?: 2f,
         color = color,
     )
+}
+
+private fun parseAnimationStyle(
+    declarations: Map<String, String>,
+    keyframes: Map<String, RichKeyframesSummary>,
+    context: CssLengthContext,
+): RichAnimationStyle? {
+    val shorthand = declarations["animation"]
+    val nameDeclaration = declarations["animation-name"]
+    if (shorthand == null && nameDeclaration == null && declarations.keys.none { it.startsWith("animation-") }) return null
+    if (shorthand?.trim()?.equals("none", ignoreCase = true) == true || nameDeclaration?.trim()?.equals("none", ignoreCase = true) == true) {
+        return RichAnimationStyle.None
+    }
+    val shorthandTokens = shorthand
+        ?.let { splitCssTopLevel(it, ',').firstOrNull().orEmpty() }
+        ?.let(::splitCssTopLevelWhitespace)
+        .orEmpty()
+    val explicitNames = nameDeclaration
+        ?.split(",")
+        ?.map { it.trim() }
+        ?.filter { it.isNotBlank() && !it.equals("none", ignoreCase = true) }
+        .orEmpty()
+    val names = explicitNames.ifEmpty {
+        shorthandTokens.filter { token -> token.isLikelyAnimationName() }
+    }
+    val timeTokens = shorthandTokens.mapNotNull(::parseCssTimeMs)
+    val durationMs = declarations["animation-duration"]?.let(::parseCssTimeMs)
+        ?: timeTokens.getOrNull(0)
+        ?: 0
+    val delayMs = declarations["animation-delay"]?.let(::parseCssTimeMs)
+        ?: timeTokens.getOrNull(1)
+        ?: 0
+    val iterationCount = declarations["animation-iteration-count"]?.let(::parseAnimationIterationCount)
+        ?: shorthandTokens.firstNotNullOfOrNull(::parseAnimationIterationCount)
+        ?: 1f
+    val fillModeValue = declarations["animation-fill-mode"].orEmpty() + " " + shorthandTokens.joinToString(" ")
+    val fillModeForwards = fillModeValue.contains("forwards", ignoreCase = true) ||
+        fillModeValue.contains("both", ignoreCase = true)
+    val summaries = names.mapNotNull { keyframes[it] }
+    val hasOpacityOrTransform = summaries.any { it.hasOpacityOrTransform } ||
+        shorthand.orEmpty().contains("opacity", ignoreCase = true) ||
+        declarations.values.any { it.contains("transform", ignoreCase = true) }
+    val hasLayoutProperty = summaries.any { it.hasLayoutProperty } ||
+        declarations["animation-property"]?.let(::containsLayoutAnimationProperty) == true
+    return RichAnimationStyle(
+        names = names,
+        durationMs = durationMs.coerceIn(0, 10_000),
+        delayMs = delayMs.coerceIn(0, 10_000),
+        iterationCount = iterationCount,
+        fillModeForwards = fillModeForwards,
+        hasLayoutProperty = hasLayoutProperty,
+        hasOpacityOrTransform = hasOpacityOrTransform || names.isNotEmpty(),
+    )
+}
+
+private fun parseTransitionStyle(declarations: Map<String, String>): RichTransitionStyle? {
+    val shorthand = declarations["transition"]
+    val propertyDeclaration = declarations["transition-property"]
+    if (shorthand == null && propertyDeclaration == null && declarations.keys.none { it.startsWith("transition-") }) return null
+    if (shorthand?.trim()?.equals("none", ignoreCase = true) == true || propertyDeclaration?.trim()?.equals("none", ignoreCase = true) == true) {
+        return RichTransitionStyle.None
+    }
+    val shorthandTokens = shorthand
+        ?.let { splitCssTopLevel(it, ',').firstOrNull().orEmpty() }
+        ?.let(::splitCssTopLevelWhitespace)
+        .orEmpty()
+    val properties = propertyDeclaration
+        ?.split(",")
+        ?.map { it.trim().lowercase() }
+        ?.filter { it.isNotBlank() }
+        ?: shorthandTokens.filter { token -> token.isLikelyTransitionProperty() }.map { it.lowercase() }
+    val durationMs = declarations["transition-duration"]?.let(::parseCssTimeMs)
+        ?: shorthandTokens.firstNotNullOfOrNull(::parseCssTimeMs)
+        ?: 0
+    return RichTransitionStyle(
+        properties = properties.ifEmpty { listOf("all") },
+        durationMs = durationMs.coerceIn(0, 10_000),
+    )
+}
+
+private fun RichAnimationStyle.shouldStaticizeVisible(): Boolean {
+    return isDeclared && fillModeForwards && !isInfinite && (hasOpacityOrTransform || names.isNotEmpty())
+}
+
+private fun String.isLikelyAnimationName(): Boolean {
+    val lower = lowercase()
+    if (parseCssTimeMs(this) != null) return false
+    if (parseAnimationIterationCount(this) != null) return false
+    if (lower in ANIMATION_SHORTHAND_KEYWORDS) return false
+    if (lower.startsWith("cubic-bezier") || lower.startsWith("steps(")) return false
+    return lower.matches(Regex("""-?[_a-zA-Z][\w-]*"""))
+}
+
+private fun String.isLikelyTransitionProperty(): Boolean {
+    val lower = lowercase()
+    if (parseCssTimeMs(this) != null) return false
+    if (lower in TRANSITION_SHORTHAND_KEYWORDS) return false
+    if (lower.startsWith("cubic-bezier") || lower.startsWith("steps(")) return false
+    return lower.matches(Regex("""-?[_a-zA-Z][\w-]*"""))
+}
+
+private fun parseCssTimeMs(value: String): Int? {
+    val normalized = value.trim().lowercase()
+    return when {
+        normalized.endsWith("ms") -> normalized.removeSuffix("ms").toFloatOrNull()?.roundToInt()
+        normalized.endsWith("s") -> normalized.removeSuffix("s").toFloatOrNull()?.times(1000f)?.roundToInt()
+        else -> null
+    }?.coerceAtLeast(0)
+}
+
+private fun parseAnimationIterationCount(value: String): Float? {
+    val normalized = value.trim().lowercase()
+    return when (normalized) {
+        "infinite" -> Float.POSITIVE_INFINITY
+        else -> normalized.toFloatOrNull()?.takeIf { it >= 0f }
+    }
+}
+
+private fun containsLayoutAnimationProperty(value: String): Boolean {
+    val lower = value.lowercase()
+    return ANIMATED_LAYOUT_PROPERTIES.any { Regex("""(^|[\s,])${Regex.escape(it)}($|[\s,])""").containsMatchIn(lower) }
 }
 
 private fun parseCssFilter(value: String, context: CssLengthContext): RichCssFilter {
@@ -2656,6 +2847,69 @@ private fun parseCssTextAlign(value: String): TextAlign? = when (value.trim().lo
 
 private val CSS_LENGTH_TOKEN = Regex("""-?[0-9]*\.?[0-9]+(?:px|dp|rem|em)?""")
 private val CSS_FUNCTION_TOKEN = Regex("""([a-zA-Z-]+)\(([^()]*)\)""")
+private val CSS_PROPERTY_NAME = Regex("""([A-Za-z-]+)\s*:""")
+private val INTERACTIVE_PSEUDO_SELECTOR = Regex(""":(hover|active|focus|focus-visible|focus-within)\b""", RegexOption.IGNORE_CASE)
+private val ANIMATED_LAYOUT_PROPERTIES = setOf(
+    "width",
+    "height",
+    "min-width",
+    "max-width",
+    "min-height",
+    "max-height",
+    "margin",
+    "margin-top",
+    "margin-right",
+    "margin-bottom",
+    "margin-left",
+    "padding",
+    "padding-top",
+    "padding-right",
+    "padding-bottom",
+    "padding-left",
+    "top",
+    "right",
+    "bottom",
+    "left",
+    "gap",
+    "row-gap",
+    "column-gap",
+    "grid-template-columns",
+    "grid-template-rows",
+    "flex-basis",
+)
+private val ANIMATION_SHORTHAND_KEYWORDS = setOf(
+    "none",
+    "linear",
+    "ease",
+    "ease-in",
+    "ease-out",
+    "ease-in-out",
+    "step-start",
+    "step-end",
+    "forwards",
+    "backwards",
+    "both",
+    "normal",
+    "reverse",
+    "alternate",
+    "alternate-reverse",
+    "running",
+    "paused",
+    "infinite",
+)
+private val TRANSITION_SHORTHAND_KEYWORDS = setOf(
+    "none",
+    "all",
+    "linear",
+    "ease",
+    "ease-in",
+    "ease-out",
+    "ease-in-out",
+    "step-start",
+    "step-end",
+    "allow-discrete",
+    "normal",
+)
 private val DEFAULT_CSS_FONT_SIZE = 16.sp
 private const val DEFAULT_CSS_NORMAL_LINE_HEIGHT = 1.2f
 private const val COUNTER_PLACEHOLDER_START = "\uE100"

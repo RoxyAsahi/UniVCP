@@ -622,6 +622,10 @@ class MessageTextBlocksTest {
         """.trimIndent()
 
         assertEquals(RichHtmlRenderKind.NativeStatic, analyzeRichHtml(html).kind)
+        val model = RichHtmlCompiler.compile(html)
+        assertTrue(model.visualHints.contains(RichVisualHint.CssAnimation))
+        assertTrue(model.visualHints.contains(RichVisualHint.CssKeyframes))
+        assertTrue(model.visualHints.contains(RichVisualHint.CssInfiniteAnimation))
     }
 
     @Test
@@ -644,6 +648,59 @@ class MessageTextBlocksTest {
         assertEquals(8.dp, root.style.backdropFilter.blurRadius)
         assertTrue(model.visualHints.any { it.name == "CssFilter" })
         assertTrue(model.visualHints.any { it.name == "CssBackdropFilter" })
+    }
+
+    @Test
+    fun `css animation is native static with visibility protection`() {
+        val html = """
+            <div id="vcp-root">
+              <style>
+                @keyframes fadeIn { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
+                .card:hover { transform:scale(1.02); }
+              </style>
+              <div class="card" style="opacity:0;animation:fadeIn .6s ease-out forwards;transition:transform .2s ease;">Visible</div>
+            </div>
+        """.trimIndent()
+
+        val analysis = analyzeRichHtml(html)
+        val model = RichHtmlCompiler.compile(html)
+        val root = model.blocks.single() as RichContainerBlock
+        val card = flattenRichBlocks(root).filterIsInstance<RichTextBlock>().single()
+
+        assertEquals(RichHtmlRenderKind.NativeStatic, analysis.kind)
+        assertEquals(1f, card.style.opacity, 0.001f)
+        assertTrue(card.style.animation.isDeclared)
+        assertEquals(600, card.style.animation.durationMs)
+        assertTrue(card.style.animation.fillModeForwards)
+        assertTrue(card.style.transition.isDeclared)
+        assertTrue(model.visualHints.contains(RichVisualHint.CssAnimation))
+        assertTrue(model.visualHints.contains(RichVisualHint.CssTransition))
+        assertTrue(model.visualHints.contains(RichVisualHint.CssKeyframes))
+        assertTrue(model.visualHints.contains(RichVisualHint.CssInteractivePseudoClass))
+        assertTrue(model.visualHints.contains(RichVisualHint.AnimationDependentVisibility))
+    }
+
+    @Test
+    fun `layout and massive infinite css animation stay observable hints`() {
+        val html = """
+            <div id="vcp-root">
+              <style>
+                @keyframes grow { from { width:10px; } to { width:80px; } }
+              </style>
+              <div style="animation:grow 1s infinite alternate;transition:width .2s ease;">Grow</div>
+            </div>
+        """.trimIndent()
+
+        val model = RichHtmlCompiler.compile(html)
+        val root = model.blocks.single() as RichContainerBlock
+        val block = flattenRichBlocks(root).filterIsInstance<RichTextBlock>().single()
+
+        assertTrue(block.style.animation.isInfinite)
+        assertTrue(block.style.animation.hasLayoutProperty)
+        assertTrue(model.visualHints.contains(RichVisualHint.CssAnimation))
+        assertTrue(model.visualHints.contains(RichVisualHint.CssInfiniteAnimation))
+        assertTrue(model.visualHints.contains(RichVisualHint.CssLayoutAnimation))
+        assertTrue(model.visualHints.contains(RichVisualHint.CssTransition))
     }
 
     @Test
