@@ -438,3 +438,43 @@ app/src/debug/assets/render_seed/chat_render_seed.json
 6. SVG Paint v3：补 `gradientUnits/gradientTransform/spreadMethod`、安全 `clipPath` 子集和 marker 箭头，用于流程图、坐标轴和图标。
 7. 质量闭环：真机视觉回归继续对比背景、色彩、滤镜、渐变文字、阴影和 SVG；debug-only report 只输出 hint/耗时/样例 id，不输出正文。
 8. 继续扩大 ph-css 使用范围，但保持 selector matcher 可控，避免一次性替换成浏览器级 CSS 引擎。
+
+## 少造轮子路线
+
+结论：不要找“替代 RichHtmlRenderer 的万能库”。聊天列表的安全静态路径仍保持 `Jsoup -> RichHtmlCompiler -> Compose Renderer`，但把容易翻车的子系统逐步交给成熟库或官方工具。
+
+### P0：CSS 与安全输入硬化
+
+- **ph-css 深化**：继续用 `com.helger:ph-css` 承担 CSS 声明解析、容错 tokenization、`@media`/shorthand/嵌套函数切分；computed style、selector 白名单、specificity、安全预算仍由项目控制。验收目标是减少手写 split/regex，尤其覆盖 `background`、`border`、`font`、`filter`、颜色函数和复杂 selector body。
+- **jsoup Cleaner/Safelist 收口**：在现有 jsoup 解析基础上增加标准化安全清洗层，统一危险 tag、危险 attribute、URL protocol 白名单和 data image 策略。验收目标是把分散的 tag/attribute 检查变成一份可测试 safelist，同时不改变现有 root detector 和 WebView fallback 策略。
+
+### P1：媒体与 SVG 分层
+
+- **Coil 继续作为唯一图片加载底座**：`img`、安全远程图、data image、GIF、普通 SVG image 都优先走 Coil Compose/decoder/cache，不自建下载、缓存、占位和尺寸探测。验收目标是 HTML 图片和背景图复用同一安全 request builder、尺寸约束和缓存策略。
+- **AndroidSVG 作为复杂静态 SVG spike**：简单 inline SVG 继续走当前 IR/Canvas，以便保留可观测 command budget；复杂但安全的静态 SVG 可研究 AndroidSVG 渲染到 `Picture`/bitmap 作为兜底。`script/filter/mask/foreignObject` 仍不在聊天列表执行。验收目标是用 render seed 对比 AndroidSVG 与当前 SVG IR 的命中率、耗时和内存。
+
+### P2：布局研究，不急于替换
+
+- **官方 Compose FlexBox 继续主线**：现有 FlexBox 映射已经承接 `direction/wrap/gap/order/grow/shrink/basis/align-self`，短期只补 CSS 语义翻译和真实样例差异，不再引入第三方 flex 库。
+- **Taffy 作为 Grid/Flex research spike**：Taffy 支持无 DOM 的 Flexbox/Grid 布局计算，但 Android/Compose 接入需要 Rust/WASM/JNI/缓存桥接，工程成本高。仅在 grid/table visual hints 显示真实高频且 Compose 近似无法推进时，做离线 spike：输入我们的 IR style tree，输出测量 box，再交 Compose 绘制；不直接替换 renderer 主路径。
+
+### P3：动画与美化效果边界
+
+- **Compose Animation 用于 App 级过渡**：只用于富 HTML 首帧淡入、动态预览入口、展开/折叠、高度变化等 App 控制动画；不执行模型输出的 CSS `@keyframes`。
+- **Lottie/Rive 只处理明确资源**：只有当模型输出或未来协议明确给出安全 Lottie/Rive 资源时再接入，不用它们解释 CSS animation。
+- **Haze 暂作 backdrop blur 评估项**：项目已有 Haze 依赖，但聊天列表实时 blur 成本高；只有当真实样例中玻璃拟态高频且 perf gate 可控时，才在低频装饰层试验。
+
+### P4：性能治理成为硬门禁
+
+- **Baseline Profiles**：为聊天列表冷启动、打开历史会话、首个富 HTML 编译/渲染、动态预览入口建立 baseline profile，减少首次运行解释/JIT 抖动。
+- **Macrobenchmark**：新增富 HTML 场景 benchmark，覆盖长列表滚动、富 HTML 首帧、SVG/表格/渐变卡片、历史消息切换；验收指标至少记录 frame timing、startup/interaction latency、compile time 和 memory snapshot。
+- **质量闭环**：每次引入库或重构子系统，都必须同时比较 visual hints 数量、compile time、model block count、APK/DEX 变化和真机首帧体验；低频能力不进主线，只保留 hint。
+
+### 实施顺序
+
+1. ph-css declaration/shorthand 迁移扩大到 color/background/border/font/filter，补 parser equivalence tests。
+2. jsoup Cleaner/Safelist spike，先只做 report-only 对比，不直接改变渲染路径。
+3. Coil request builder 收口，统一 `img`、background image、list-style-image 的安全加载策略。
+4. AndroidSVG spike，用 10-20 个复杂静态 SVG seed 评估命中率和性能。
+5. Baseline Profile + Macrobenchmark 模块化接入，把富 HTML 首帧和长列表作为性能门禁。
+6. Taffy 仅做离线 research，不进入默认构建，除非真实 grid/flex 缺口证明收益大于 JNI/桥接成本。
