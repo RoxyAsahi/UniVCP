@@ -41,6 +41,12 @@ import org.jsoup.nodes.Element
 import org.jsoup.nodes.Node
 import org.jsoup.nodes.TextNode
 
+/**
+ * Small HTML compatibility block used by Markdown rendering.
+ *
+ * Do not grow this into the VCP rich-bubble renderer; assistant rich HTML should go through
+ * MessageTextBlocks -> RichHtmlCompiler -> RichHtmlRenderer, with WebView only for previews/fallback.
+ */
 @Composable
 fun SimpleHtmlBlock(
     html: String,

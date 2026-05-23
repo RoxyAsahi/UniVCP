@@ -184,6 +184,80 @@ cd C:\VCP\Eric\UniVCP
 .\gradlew.bat :app:testDebugUnitTest --tests "me.rerere.rikkahub.data.sync.chat.ChatSyncMapperTest" --console=plain
 ```
 
+## 渲染测试种子数据
+
+Debug 包支持导入一组脱敏的聊天渲染种子数据，用于测试聊天页面的 Markdown、LaTeX、代码块、Mermaid、HTML/VCP 块、工具调用、附件和长线程。
+
+聊天列表中的安全静态/交互型富 HTML 当前走 Compose 原生管线：
+
+```text
+RichHtmlCompiler -> RichHtmlRenderModel -> RichHtmlRenderer
+```
+
+WebView 只保留给动态预览、全屏检查和 WebView 调试路径。
+
+当前聊天富 HTML 渲染链路的开发现状记录在：
+
+```text
+docs/rich-html-rendering-status.md
+```
+
+当前 seed 还专门加入了来自 VCPChat 真实记录形态的合成 HTML/CSS 覆盖：`<style>`、选择器级联、CSS 变量、`@keyframes`、`button`、`details/summary`、`pre/code`、`svg/path/rect/circle/ellipse/line/polyline/polygon/text`、`sub/sup`、HTML 表格、`vcp-card-*`、`vcp-feature-card`、`vcp-param-tag`、`action-btn`、`window-item`、`proc-name`、`pid-badge`、`hwnd-tag`、`VCPDesktop`、`vcp-net-widget` 和 `vcp-clock-widget`。脚本样例只以转义文本保存在代码块中，不写入可执行 `<script>`。
+
+种子文件位置：
+
+```text
+app/src/debug/assets/render_seed/chat_render_seed.json
+```
+
+导入器位置：
+
+```text
+app/src/main/java/me/rerere/rikkahub/data/renderseed/RenderSeedImporter.kt
+```
+
+在 `local.properties` 中打开：
+
+```properties
+univcp.renderSeed.enabled=true
+```
+
+然后重新安装并启动 debug 包：
+
+```powershell
+cd C:\VCP\Eric\UniVCP
+.\gradlew.bat :app:installDebug --console=plain
+
+$adb = "C:\Users\CHENXI\AppData\Local\Android\Sdk\platform-tools\adb.exe"
+$serial = "192.168.6.121:46127"
+& $adb -s $serial shell am force-stop com.univcp.android.debug
+& $adb -s $serial logcat -c
+& $adb -s $serial shell am start -W -n com.univcp.android.debug/me.rerere.rikkahub.RouteActivity
+```
+
+检查导入日志：
+
+```powershell
+& $adb -s $serial logcat -d -v time | Select-String -Pattern 'RenderSeedImporter'
+```
+
+期望类似：
+
+```text
+Seeded render conversations inserted=9 updated=0
+```
+
+种子导入是幂等的：同 ID 已存在且未过期时不会重复插入。需要重置时，可以卸载 debug 包或手动删除对应会话。
+
+渲染编译器快速回归：
+
+```powershell
+cd C:\VCP\Eric\UniVCP
+.\gradlew.bat :app:testDebugUnitTest --tests "me.rerere.rikkahub.ui.components.message.MessageTextBlocksTest" --tests "me.rerere.rikkahub.ui.components.message.StreamRenderArbiterTest" --tests "me.rerere.rikkahub.data.renderseed.RenderSeedFixtureTest" --tests "me.rerere.rikkahub.ui.components.message.RichHtmlHardeningTest" --console=plain
+```
+
+富 HTML 视觉保真调试时，优先看 `docs/rich-html-rendering-status.md`。当前聊天列表安全静态/交互 HTML 默认走 Compose 原生 IR 渲染，WebView 只保留给动态预览、全屏检查、debug renderer server，以及后续可能的静态快照兜底。
+
 VCPChat 插件语法检查：
 
 ```powershell
@@ -401,4 +475,3 @@ Imported remote conversation title=..., messages=...
 - VCPChat 没推送：检查 `config.env`、`CHAT_SYNC_ENABLED=true`、`CHAT_SYNC_PROVIDER=firebase-rtdb`。
 - 无线调试失效：重新 `adb connect`，必要时手机端重新关闭/开启无线调试，端口会变。
 - 看不到 Assistant：确认 Firebase 中 conversation 是否包含 `conversation.assistant.name` 和 `conversation.assistant.systemPrompt`。
-

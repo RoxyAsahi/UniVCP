@@ -73,6 +73,8 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.mapLatest
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Tick01
+import me.rerere.rikkahub.ui.components.render.RenderLruCache
+import me.rerere.rikkahub.ui.components.render.renderTextCacheKey
 import me.rerere.rikkahub.ui.components.table.DataTable
 import me.rerere.rikkahub.ui.context.LocalSettings
 import me.rerere.rikkahub.ui.theme.JetbrainsMono
@@ -196,6 +198,12 @@ private fun ASTNode.containsHtml(): Boolean {
 }
 
 private fun parseMarkdown(content: String): MarkdownParseResult {
+    return markdownParseCache.getOrPut(renderTextCacheKey(content)) {
+        parseMarkdownUncached(content)
+    }
+}
+
+private fun parseMarkdownUncached(content: String): MarkdownParseResult {
     val preprocessed = preProcess(content)
     val astTree = parser.buildMarkdownTreeFromString(preprocessed)
     return MarkdownParseResult(preprocessed, astTree, astTree.containsHtml())
@@ -243,6 +251,8 @@ fun MarkdownBlock(
         }
     }
 }
+
+private val markdownParseCache = RenderLruCache<String, MarkdownParseResult>(maxEntries = 256)
 
 // for debug
 private fun dumpAst(node: ASTNode, text: String, indent: String = "") {

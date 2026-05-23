@@ -1,6 +1,9 @@
 package me.rerere.rikkahub.ui.components.message
 
 import android.content.Intent
+import android.net.Uri
+import android.util.Log
+import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.fadeIn
@@ -31,6 +34,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -58,8 +62,11 @@ import androidx.compose.ui.util.fastForEachIndexed
 import androidx.core.content.FileProvider
 import androidx.core.net.toFile
 import androidx.core.net.toUri
+import java.io.File
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -70,6 +77,7 @@ import me.rerere.ai.ui.UIMessageAnnotation
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.ai.ui.isEmptyUIMessage
 import me.rerere.hugeicons.HugeIcons
+import me.rerere.rikkahub.BuildConfig
 import me.rerere.hugeicons.stroke.File02
 import me.rerere.hugeicons.stroke.MusicNote03
 import me.rerere.hugeicons.stroke.Video01
@@ -80,7 +88,7 @@ import me.rerere.rikkahub.data.model.AssistantAffectScope
 import me.rerere.rikkahub.data.model.MessageNode
 import me.rerere.rikkahub.data.model.replaceRegexes
 import me.rerere.rikkahub.ui.components.richtext.MarkdownBlock
-import me.rerere.rikkahub.ui.components.richtext.UniVcpLearningBubble
+import me.rerere.rikkahub.ui.components.richtext.RichHtmlBubbleBlock
 import me.rerere.rikkahub.ui.components.richtext.ZoomableAsyncImage
 import me.rerere.rikkahub.ui.components.richtext.buildMarkdownPreviewHtml
 import me.rerere.rikkahub.ui.components.ui.ChainOfThought
@@ -96,6 +104,8 @@ import me.rerere.rikkahub.utils.openUrl
 import me.rerere.rikkahub.utils.urlDecode
 import java.util.Locale
 import kotlin.time.Duration.Companion.milliseconds
+
+private const val STREAMING_RENDER_SAMPLE_MS = 120L
 
 @Composable
 fun ChatMessage(
@@ -173,6 +183,7 @@ fun ChatMessage(
                 onToolApproval = onToolApproval,
                 onToolAnswer = onToolAnswer,
                 onUserMessageClick = if (message.role == MessageRole.USER) onEdit else null,
+                messageId = message.id.toString(),
                 onBubbleInput = onBubbleInput,
             )
 
@@ -259,8 +270,76 @@ fun ChatMessage(
     }
 }
 
+private fun openMessageAttachment(
+    context: android.content.Context,
+    url: String,
+    mimeType: String,
+) {
+    val uri = resolveAttachmentUriForView(context, url)
+    if (uri == null) {
+        Log.w(TAG, "openMessageAttachment: unavailable attachment url=${url.redactAttachmentUrlForLog()}")
+        Toast.makeText(context, "附件文件不可用，可能来自其他设备。", Toast.LENGTH_SHORT).show()
+        return
+    }
+
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        setDataAndType(uri, mimeType.ifBlank { "*/*" })
+    }
+    val chooserIntent = Intent.createChooser(intent, null)
+    runCatching {
+        context.startActivity(chooserIntent)
+    }.onFailure { throwable ->
+        Log.w(TAG, "openMessageAttachment: failed to open url=${url.redactAttachmentUrlForLog()}", throwable)
+        Toast.makeText(context, "没有可打开该附件的应用。", Toast.LENGTH_SHORT).show()
+    }
+}
+
+private fun resolveAttachmentUriForView(
+    context: android.content.Context,
+    url: String,
+): Uri? {
+    val trimmed = url.trim()
+    if (trimmed.isBlank()) return null
+    val parsed = runCatching { trimmed.toUri() }.getOrNull() ?: return null
+    return when (parsed.scheme?.lowercase()) {
+        "content" -> parsed
+        "file" -> fileProviderUriOrNull(context, runCatching { parsed.toFile() }.getOrNull())
+        "http", "https" -> parsed
+        null, "" -> {
+            val file = File(trimmed)
+            fileProviderUriOrNull(context, file)
+        }
+        else -> parsed
+    }
+}
+
+private fun fileProviderUriOrNull(
+    context: android.content.Context,
+    file: File?,
+): Uri? {
+    if (file == null || !file.exists()) return null
+    return runCatching {
+        FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            file,
+        )
+    }.onFailure { throwable ->
+        Log.w(TAG, "fileProviderUriOrNull: file is outside configured roots path=${file.path.redactAttachmentUrlForLog()}", throwable)
+    }.getOrNull()
+}
+
+private fun String.redactAttachmentUrlForLog(): String {
+    return replace(Regex("""(?i)[0-9a-f]{32,}"""), "<hash>")
+        .takeLast(96)
+}
+
+private const val TAG = "ChatMessage"
+
 @Composable
 private fun AssistantTextBlocks(
+    messageId: String,
     blocks: List<MessageTextBlock>,
     loading: Boolean,
     onClickCitation: (String) -> Unit,
@@ -274,7 +353,7 @@ private fun AssistantTextBlocks(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         blocks.fastForEachIndexed { index, block ->
-            key(index) {
+            key(stableMessageTextBlockKey(messageId, index, block)) {
                 when (block) {
                     is MessageTextBlock.Markdown -> {
                         MarkdownBlock(
@@ -284,23 +363,31 @@ private fun AssistantTextBlocks(
                     }
 
                     is MessageTextBlock.VcpHtml -> {
-                        Column(
-                            modifier = Modifier.animateContentSize(),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
-                            UniVcpLearningBubble(
-                                content = block.html,
-                                isStreaming = loading && block.partial,
-                                onSendInput = onBubbleInput,
+                        val analysis = remember(block.html) { analyzeRichHtml(block.html) }
+                        if (block.partial) {
+                            StreamingRichHtmlPlaceholder(
+                                previewText = analysis.previewText,
                             )
-                            if (block.executable) {
-                                TextButton(
-                                    onClick = {
+                        } else when (analysis.kind) {
+                            RichHtmlRenderKind.NativeStatic,
+                            RichHtmlRenderKind.InteractiveStatic -> {
+                                SafeRichHtmlBubbleBlock(
+                                    html = block.html,
+                                    previewText = analysis.previewText,
+                                    onOpen = {
                                         navController.navigate(Screen.WebView(content = block.html.base64Encode()))
-                                    }
-                                ) {
-                                    Text("打开动态预览")
-                                }
+                                    },
+                                    onSendInput = onBubbleInput,
+                                )
+                            }
+
+                            RichHtmlRenderKind.ComplexDynamic -> {
+                                DynamicRichHtmlPreviewBlock(
+                                    previewText = analysis.previewText,
+                                    onOpen = {
+                                        navController.navigate(Screen.WebView(content = block.html.base64Encode()))
+                                    },
+                                )
                             }
                         }
                     }
@@ -312,6 +399,25 @@ private fun AssistantTextBlocks(
             }
         }
     }
+}
+
+@Composable
+private fun SafeRichHtmlBubbleBlock(
+    html: String,
+    previewText: String,
+    onOpen: () -> Unit,
+    onSendInput: (String) -> Unit,
+) {
+    RichHtmlBubbleBlock(
+        html = html,
+        onSendInput = onSendInput,
+        renderFallback = {
+            DynamicRichHtmlPreviewBlock(
+                previewText = previewText,
+                onOpen = onOpen,
+            )
+        },
+    )
 }
 
 @Composable
@@ -366,6 +472,139 @@ private fun ProtocolTextBlock(block: MessageTextBlock.Protocol) {
     }
 }
 
+@Composable
+private fun DynamicRichHtmlPreviewBlock(
+    previewText: String,
+    onOpen: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+        border = androidx.compose.foundation.BorderStroke(
+            width = 1.dp,
+            color = MaterialTheme.colorScheme.outlineVariant,
+        ),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = "动态 HTML 预览",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                text = previewText.ifBlank { "这段内容包含脚本、动画或画布，聊天列表中已暂停运行。" },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+            DynamicRichHtmlPreviewAction(
+                previewText = previewText,
+                onOpen = onOpen,
+            )
+        }
+    }
+}
+
+@Composable
+private fun DynamicRichHtmlPreviewAction(
+    @Suppress("UNUSED_PARAMETER")
+    previewText: String,
+    onOpen: () -> Unit,
+) {
+    TextButton(onClick = onOpen) {
+        Text("打开动态预览")
+    }
+}
+
+@Composable
+private fun rememberStreamingRenderText(
+    content: String,
+    streaming: Boolean,
+): androidx.compose.runtime.State<String> {
+    val latestContent by rememberUpdatedState(content)
+    return produceState(initialValue = content, streaming) {
+        val arbiter = StreamRenderArbiter(sampleWindowMs = STREAMING_RENDER_SAMPLE_MS)
+
+        fun applyFrame(frameContent: String, frameStreaming: Boolean): StreamRenderDecision {
+            val decision = arbiter.onFrame(
+                StreamRenderFrame(
+                    content = frameContent,
+                    streaming = frameStreaming,
+                    nowMs = System.currentTimeMillis(),
+                )
+            )
+            if (decision.publishText) {
+                value = frameContent
+            }
+            return decision
+        }
+
+        if (!streaming) {
+            applyFrame(latestContent, frameStreaming = false)
+            return@produceState
+        }
+
+        applyFrame(latestContent, frameStreaming = true)
+        snapshotFlow { latestContent }
+            .distinctUntilChanged()
+            .collect { next ->
+                val decision = applyFrame(next, frameStreaming = true)
+                val delayMs = decision.nextCheckDelayMs
+                if (delayMs != null) {
+                    delay(delayMs)
+                    applyFrame(latestContent, frameStreaming = true)
+                }
+            }
+    }
+}
+
+@Composable
+private fun StreamingRichHtmlPlaceholder(
+    previewText: String,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(156.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
+        border = androidx.compose.foundation.BorderStroke(
+            width = 1.dp,
+            color = MaterialTheme.colorScheme.outlineVariant,
+        ),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = "富 HTML 气泡生成中",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+            )
+            Text(
+                text = previewText.ifBlank { "正在等待完整容器闭合，完成后会切换为稳定渲染。" },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(58.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .shimmer(isLoading = true),
+            )
+        }
+    }
+}
+
 @OptIn(FlowPreview::class)
 @Composable
 private fun MessagePartsBlock(
@@ -378,6 +617,7 @@ private fun MessagePartsBlock(
     onToolApproval: ((toolCallId: String, approved: Boolean, reason: String) -> Unit)? = null,
     onToolAnswer: ((toolCallId: String, answer: String) -> Unit)? = null,
     onUserMessageClick: (() -> Unit)? = null,
+    messageId: String,
     onBubbleInput: (String) -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -485,16 +725,28 @@ private fun MessagePartsBlock(
                                     scope = AssistantAffectScope.ASSISTANT,
                                     visual = true,
                                 )
-                                val textBlocks = remember(assistantContent, loading) {
-                                    parseMessageTextBlocks(assistantContent, streaming = loading)
+                                val stableAssistantContent by rememberStreamingRenderText(
+                                    content = assistantContent,
+                                    streaming = loading,
+                                )
+                                val textBlocks = remember(stableAssistantContent, loading) {
+                                    parseMessageTextBlocks(stableAssistantContent, streaming = loading)
                                 }
+                                RichHtmlChatRenderTrace(
+                                    messageId = messageId,
+                                    loading = loading,
+                                    showAssistantBubble = settings.displaySetting.showAssistantBubble,
+                                    rawContent = assistantContent,
+                                    stableContent = stableAssistantContent,
+                                    blocks = textBlocks,
+                                )
                                 if (settings.displaySetting.showAssistantBubble) {
                                     Surface(
-                                        modifier = Modifier.animateContentSize(),
                                         shape = RoundedCornerShape(16.dp),
                                         color = MaterialTheme.colorScheme.surfaceContainerHigh,
                                     ) {
                                         AssistantTextBlocks(
+                                            messageId = messageId,
                                             blocks = textBlocks,
                                             loading = loading,
                                             onClickCitation = handleClickCitation,
@@ -504,11 +756,11 @@ private fun MessagePartsBlock(
                                     }
                                 } else {
                                     AssistantTextBlocks(
+                                        messageId = messageId,
                                         blocks = textBlocks,
                                         loading = loading,
                                         onClickCitation = handleClickCitation,
                                         onBubbleInput = onBubbleInput,
-                                        modifier = Modifier.animateContentSize(),
                                     )
                                 }
                             }
@@ -519,15 +771,11 @@ private fun MessagePartsBlock(
                         Surface(
                             tonalElevation = 2.dp,
                             onClick = {
-                                val intent = Intent(Intent.ACTION_VIEW)
-                                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                intent.data = FileProvider.getUriForFile(
-                                    context,
-                                    "${context.packageName}.fileprovider",
-                                    part.url.toUri().toFile()
+                                openMessageAttachment(
+                                    context = context,
+                                    url = part.url,
+                                    mimeType = "video/*",
                                 )
-                                val chooserIndent = Intent.createChooser(intent, null)
-                                context.startActivity(chooserIndent)
                             },
                             modifier = Modifier,
                             shape = RoundedCornerShape(8.dp),
@@ -542,15 +790,11 @@ private fun MessagePartsBlock(
                         Surface(
                             tonalElevation = 2.dp,
                             onClick = {
-                                val intent = Intent(Intent.ACTION_VIEW)
-                                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                intent.data = FileProvider.getUriForFile(
-                                    context,
-                                    "${context.packageName}.fileprovider",
-                                    part.url.toUri().toFile()
+                                openMessageAttachment(
+                                    context = context,
+                                    url = part.url,
+                                    mimeType = "audio/*",
                                 )
-                                val chooserIndent = Intent.createChooser(intent, null)
-                                context.startActivity(chooserIndent)
                             },
                             modifier = Modifier,
                             shape = RoundedCornerShape(50),
@@ -598,15 +842,11 @@ private fun MessagePartsBlock(
                         Surface(
                             tonalElevation = 2.dp,
                             onClick = {
-                                val intent = Intent(Intent.ACTION_VIEW)
-                                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                intent.data = FileProvider.getUriForFile(
-                                    context,
-                                    "${context.packageName}.fileprovider",
-                                    part.url.toUri().toFile()
+                                openMessageAttachment(
+                                    context = context,
+                                    url = part.url,
+                                    mimeType = part.mime,
                                 )
-                                val chooserIndent = Intent.createChooser(intent, null)
-                                context.startActivity(chooserIndent)
                             },
                             modifier = Modifier,
                             shape = RoundedCornerShape(50),
@@ -718,5 +958,32 @@ private fun MessagePartsBlock(
                 Text(stringResource(R.string.citations_count, annotations.size))
             }
         }
+    }
+}
+
+@Composable
+private fun RichHtmlChatRenderTrace(
+    messageId: String,
+    loading: Boolean,
+    showAssistantBubble: Boolean,
+    rawContent: String,
+    stableContent: String,
+    blocks: List<MessageTextBlock>,
+) {
+    if (!BuildConfig.DEBUG) return
+    LaunchedEffect(messageId, loading, showAssistantBubble, rawContent, stableContent, blocks) {
+        if (rawContent.isBlank() && stableContent.isBlank()) return@LaunchedEffect
+        val blockSummary = blocks.joinToString(separator = ",") { block ->
+            when (block) {
+                is MessageTextBlock.Markdown -> "md:${block.text.length}"
+                is MessageTextBlock.VcpHtml -> "html:${block.html.length}:partial=${block.partial}"
+                is MessageTextBlock.Protocol -> "protocol:${block.kind.name}:${block.raw.length}"
+            }
+        }
+        Log.d(
+            TAG,
+            "assistant text render message=${messageId.take(8)} loading=$loading bubble=$showAssistantBubble " +
+                "rawLen=${rawContent.length} stableLen=${stableContent.length} blocks=[$blockSummary]"
+        )
     }
 }

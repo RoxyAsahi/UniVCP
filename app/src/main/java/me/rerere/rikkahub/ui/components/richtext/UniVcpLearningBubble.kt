@@ -12,27 +12,26 @@ import com.univcp.bubble.BubblePayload
 import com.univcp.bubble.BubbleRenderMode
 import com.univcp.bubble.BubbleTheme
 import com.univcp.bubble.BubbleWebView
-import me.rerere.rikkahub.BuildConfig
-
-private const val DEBUG_RENDERER_SHELL_URL = "http://127.0.0.1:5179/renderer-shell.html"
 
 @Composable
 fun UniVcpLearningBubble(
     content: String,
     modifier: Modifier = Modifier,
     isStreaming: Boolean = false,
+    payloadId: String? = null,
+    deferRender: Boolean = false,
     onSendInput: (String) -> Unit = {},
 ) {
     val colorScheme = MaterialTheme.colorScheme
     val dark = isSystemInDarkTheme()
     val renderMode = remember(content) { detectRenderMode(content) }
-    val payloadId = remember {
+    val resolvedPayloadId = payloadId ?: remember {
         "univcp-${System.nanoTime().toString(16)}"
     }
 
     BubbleWebView(
         payload = BubblePayload(
-            id = payloadId,
+            id = resolvedPayloadId,
             rawContent = content,
             renderMode = renderMode,
             theme = BubbleTheme(
@@ -47,8 +46,9 @@ fun UniVcpLearningBubble(
             isStreaming = isStreaming,
             allowScript = false,
         ),
-        rendererShellUrl = if (BuildConfig.DEBUG) DEBUG_RENDERER_SHELL_URL else null,
+        rendererShellUrl = null,
         modifier = modifier.fillMaxWidth(),
+        deferRender = deferRender,
         onSendInput = onSendInput,
     )
 }

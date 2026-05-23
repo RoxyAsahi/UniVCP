@@ -1,5 +1,8 @@
 package me.rerere.rikkahub.ui.components.message
 
+import me.rerere.rikkahub.ui.components.render.RenderLruCache
+import me.rerere.rikkahub.ui.components.render.renderTextCacheKey
+
 internal sealed interface MessageTextBlock {
     data class Markdown(val text: String) : MessageTextBlock
     data class VcpHtml(
@@ -22,6 +25,20 @@ internal enum class ProtocolKind {
 }
 
 internal fun parseMessageTextBlocks(
+    text: String,
+    streaming: Boolean
+): List<MessageTextBlock> {
+    if (text.isBlank()) return emptyList()
+    if (!streaming) {
+        return messageTextBlockCache.getOrPut(renderTextCacheKey(text)) {
+            parseMessageTextBlocksUncached(text = text, streaming = false)
+        }
+    }
+
+    return parseMessageTextBlocksUncached(text = text, streaming = true)
+}
+
+private fun parseMessageTextBlocksUncached(
     text: String,
     streaming: Boolean
 ): List<MessageTextBlock> {
@@ -57,6 +74,24 @@ internal fun parseMessageTextBlocks(
     return result
 }
 
+internal fun stableMessageTextBlockKey(
+    messageId: String,
+    blockIndex: Int,
+    block: MessageTextBlock,
+): String {
+    val type = when (block) {
+        is MessageTextBlock.Markdown -> "markdown"
+        is MessageTextBlock.VcpHtml -> if (block.partial) "html-partial" else "html"
+        is MessageTextBlock.Protocol -> "protocol-${block.kind.name}"
+    }
+    val content = when (block) {
+        is MessageTextBlock.Markdown -> block.text
+        is MessageTextBlock.VcpHtml -> block.html
+        is MessageTextBlock.Protocol -> block.raw
+    }
+    return "$messageId:$blockIndex:$type:${renderTextCacheKey(content)}"
+}
+
 private data class SpecialBlock(
     val start: Int,
     val end: Int,
@@ -68,13 +103,22 @@ private fun findNextSpecialBlock(
     startIndex: Int,
     streaming: Boolean
 ): SpecialBlock? {
-    return listOfNotNull(
-        findMetaThinkingBlock(text, startIndex),
-        findToolFenceBlock(text, startIndex),
-        findToolRequestBlock(text, startIndex),
-        findToolResultBlock(text, startIndex),
-        findVcpRootBlock(text, startIndex, streaming),
-    ).minByOrNull { it.start }
+    var searchIndex = startIndex
+    while (searchIndex < text.length) {
+        val next = listOfNotNull(
+            findMetaThinkingBlock(text, searchIndex),
+            findToolFenceBlock(text, searchIndex),
+            findToolRequestBlock(text, searchIndex),
+            findToolResultBlock(text, searchIndex),
+            findRichRootBlock(text, searchIndex, streaming),
+        ).minByOrNull { it.start } ?: return null
+
+        if (!isInsidePlainMarkdownFence(text, next.start)) {
+            return next
+        }
+        searchIndex = next.end.coerceAtLeast(next.start + 1)
+    }
+    return null
 }
 
 private fun findMetaThinkingBlock(text: String, startIndex: Int): SpecialBlock? {
@@ -162,12 +206,12 @@ private fun findToolResultBlock(text: String, startIndex: Int): SpecialBlock? {
     )
 }
 
-private fun findVcpRootBlock(text: String, startIndex: Int, streaming: Boolean): SpecialBlock? {
+private fun findRichRootBlock(text: String, startIndex: Int, streaming: Boolean): SpecialBlock? {
     var searchIndex = startIndex
     while (searchIndex < text.length) {
-        val startMatch = VCP_ROOT_START.find(text, searchIndex) ?: return null
-        val start = startMatch.range.first
-        val startTagEnd = text.indexOf('>', startMatch.range.last)
+        val root = RichHtmlRootDetector.findNextCandidate(text, searchIndex) ?: return null
+        val start = findAdjacentLeadingStyleStart(text, root.start, startIndex)
+        val startTagEnd = root.startTagEnd
         if (startTagEnd < 0) {
             if (!streaming) return null
             return SpecialBlock(
@@ -181,7 +225,7 @@ private fun findVcpRootBlock(text: String, startIndex: Int, streaming: Boolean):
             )
         }
 
-        val end = findMatchingDivEnd(text, startTagEnd + 1)
+        val end = RichHtmlRootDetector.findMatchingElementEnd(text, startTagEnd + 1, root.tagName)
         if (end != null) {
             val html = text.substring(start, end)
             return SpecialBlock(
@@ -208,62 +252,34 @@ private fun findVcpRootBlock(text: String, startIndex: Int, streaming: Boolean):
             )
         }
 
-        searchIndex = startMatch.range.last + 1
+        searchIndex = root.start + 1
     }
     return null
 }
 
-private fun findMatchingDivEnd(text: String, startIndex: Int): Int? {
-    var cursor = startIndex
-    var depth = 1
+private fun findAdjacentLeadingStyleStart(text: String, rootStart: Int, lowerBound: Int): Int {
+    var blockStart = rootStart
+    while (true) {
+        val beforeStyleEnd = skipWhitespaceBackward(text, blockStart, lowerBound)
+        val closeStart = text.lastIndexOf("</style", beforeStyleEnd - 1, ignoreCase = true)
+        if (closeStart < lowerBound) return blockStart
 
-    while (cursor < text.length) {
-        val nextTag = text.indexOf('<', cursor)
-        if (nextTag < 0) return null
+        val closeEnd = RichHtmlRootDetector.findTagEnd(text, closeStart) ?: return blockStart
+        if (closeEnd + 1 != beforeStyleEnd) return blockStart
 
-        when {
-            text.startsWith("<!--", nextTag) -> {
-                cursor = text.indexOf("-->", nextTag + 4).let { if (it >= 0) it + 3 else text.length }
-            }
+        val openStart = text.lastIndexOf("<style", closeStart, ignoreCase = true)
+        if (openStart < lowerBound) return blockStart
 
-            text.regionMatches(nextTag, "<script", 0, "<script".length, ignoreCase = true) -> {
-                cursor = skipElementContent(text, nextTag, "script")
-            }
-
-            text.regionMatches(nextTag, "<style", 0, "<style".length, ignoreCase = true) -> {
-                cursor = skipElementContent(text, nextTag, "style")
-            }
-
-            text.regionMatches(nextTag, "<div", 0, "<div".length, ignoreCase = true) &&
-                isTagBoundary(text.getOrNull(nextTag + "<div".length)) -> {
-                depth += 1
-                cursor = text.indexOf('>', nextTag + 4).let { if (it >= 0) it + 1 else text.length }
-            }
-
-            text.regionMatches(nextTag, "</div", 0, "</div".length, ignoreCase = true) &&
-                isTagBoundary(text.getOrNull(nextTag + "</div".length)) -> {
-                val closeEnd = text.indexOf('>', nextTag + 5)
-                if (closeEnd < 0) return null
-                depth -= 1
-                cursor = closeEnd + 1
-                if (depth == 0) return cursor
-            }
-
-            else -> {
-                cursor = nextTag + 1
-            }
-        }
+        blockStart = openStart
     }
-    return null
 }
 
-private fun skipElementContent(text: String, tagStart: Int, tagName: String): Int {
-    val openEnd = text.indexOf('>', tagStart)
-    if (openEnd < 0) return text.length
-    val closeStart = text.indexOf("</$tagName", openEnd + 1, ignoreCase = true)
-    if (closeStart < 0) return text.length
-    val closeEnd = text.indexOf('>', closeStart)
-    return if (closeEnd >= 0) closeEnd + 1 else text.length
+private fun skipWhitespaceBackward(text: String, fromExclusive: Int, lowerBound: Int): Int {
+    var cursor = fromExclusive
+    while (cursor > lowerBound && text[cursor - 1].isWhitespace()) {
+        cursor -= 1
+    }
+    return cursor
 }
 
 private fun hasExecutableHtml(html: String): Boolean {
@@ -278,16 +294,49 @@ private fun parseToolResultSuccess(raw: String): Boolean? {
     }
 }
 
-private fun isTagBoundary(char: Char?): Boolean {
-    return char == null || char.isWhitespace() || char == '>' || char == '/'
+private data class MarkdownFence(
+    val marker: Char,
+    val length: Int,
+    val protectsContent: Boolean,
+)
+
+private fun isInsidePlainMarkdownFence(text: String, index: Int): Boolean {
+    var cursor = 0
+    var openFence: MarkdownFence? = null
+
+    while (cursor < index && cursor < text.length) {
+        val lineEnd = text.indexOf('\n', cursor).let { if (it >= 0) it else text.length }
+        val line = text.substring(cursor, lineEnd).trimStart()
+        val match = MARKDOWN_FENCE_LINE.find(line)
+        if (match != null) {
+            val marker = match.groupValues[1]
+            val fence = openFence
+            if (fence == null) {
+                val info = match.groupValues.getOrNull(2).orEmpty().trim()
+                val language = info.substringBefore(' ').substringBefore('\t')
+                openFence = MarkdownFence(
+                    marker = marker.first(),
+                    length = marker.length,
+                    protectsContent = !language.equals("VCPToolCall", ignoreCase = true),
+                )
+            } else if (marker.first() == fence.marker && marker.length >= fence.length) {
+                openFence = null
+            }
+        }
+
+        cursor = if (lineEnd < text.length) lineEnd + 1 else text.length
+    }
+
+    return openFence?.protectsContent == true
 }
 
 private val TOOL_FENCE_START = Regex("""(?m)^```\s*VCPToolCall\s*\r?\n""")
 private val TOOL_FENCE_END = Regex("""(?m)^```\s*$""")
-private val VCP_ROOT_START = Regex("""<div\b(?=[^>]*\bid\s*=\s*(['"])vcp-root\1)[^>]*>""", RegexOption.IGNORE_CASE)
+private val MARKDOWN_FENCE_LINE = Regex("""^(`{3,}|~{3,})(.*)$""")
 private val EXECUTABLE_HTML_PATTERNS = listOf(
     Regex("""<script\b""", RegexOption.IGNORE_CASE),
     Regex("""\shref\s*=\s*(['"])\s*javascript:""", RegexOption.IGNORE_CASE),
 )
 private val TOOL_RESULT_SUCCESS = Regex("""(✅\s*SUCCESS|执行状态:\s*✅?\s*SUCCESS|\bSUCCESS\b)""", RegexOption.IGNORE_CASE)
 private val TOOL_RESULT_FAILURE = Regex("""(❌|执行状态:\s*(FAILED|FAILURE|ERROR)|\b(FAILED|FAILURE|ERROR)\b)""", RegexOption.IGNORE_CASE)
+private val messageTextBlockCache = RenderLruCache<String, List<MessageTextBlock>>(maxEntries = 192)

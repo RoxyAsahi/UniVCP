@@ -1,9 +1,40 @@
 # Android Hot Reload
 
-UniVCP uses two different live loops during research:
+UniVCP uses these live loops during research:
 
 - Native Compose UI: use Android Studio Live Edit and Apply Changes.
-- Learning bubble renderer: use the local WebView renderer server below.
+- Compose native rich HTML renderer: edit Kotlin under `app/src/main/java/me/rerere/rikkahub/ui/components/richtext`.
+- Legacy/dynamic WebView renderer: use the local renderer server below only for `BubbleWebView` preview/debug paths.
+
+## Compose Native Renderer Loop
+
+The main chat-list rich HTML path is now Compose-native:
+
+```text
+RichHtmlBubbleBlock
+  -> RichHtmlCompiler
+  -> RichHtmlRenderModel
+  -> RichHtmlRenderer
+```
+
+For renderer changes, prefer Android Studio Live Edit / Apply Changes or reinstall the debug build. The most relevant files are:
+
+```text
+app/src/main/java/me/rerere/rikkahub/ui/components/richtext/RichHtmlBubbleBlock.kt
+app/src/main/java/me/rerere/rikkahub/ui/components/richtext/RichHtmlCompiler.kt
+app/src/main/java/me/rerere/rikkahub/ui/components/richtext/RichHtmlRenderModel.kt
+app/src/main/java/me/rerere/rikkahub/ui/components/richtext/RichHtmlRenderer.kt
+app/src/main/java/me/rerere/rikkahub/ui/components/richtext/RichSvgCompiler.kt
+```
+
+Quick regression command:
+
+```powershell
+cd C:\VCP\Eric\UniVCP
+.\gradlew.bat :app:testDebugUnitTest --tests "me.rerere.rikkahub.ui.components.message.MessageTextBlocksTest" --tests "me.rerere.rikkahub.ui.components.message.StreamRenderArbiterTest" --tests "me.rerere.rikkahub.data.renderseed.RenderSeedFixtureTest" --tests "me.rerere.rikkahub.ui.components.message.RichHtmlHardeningTest" --console=plain
+```
+
+For visual fidelity changes, also reinstall a debug build and watch `RichHtmlRender` logcat lines for `route=native`, `route=fallback`, compile time, and `widthDp`. The Compose path now compiles with the actual bubble width, so width changes can legitimately produce a separate cached model.
 
 ## WebView Renderer Loop
 
@@ -26,7 +57,7 @@ and runs:
 adb reverse tcp:5179 tcp:5179
 ```
 
-Debug builds load that URL inside `BubbleWebView`. If the server is not running, the WebView falls back to the bundled APK assets. Edit files under:
+Debug builds load that URL inside `BubbleWebView`. If the server is not running, the WebView falls back to the bundled APK assets. This path is for dynamic/fullscreen preview and WebView-specific debugging, not the default safe static HTML chat-list renderer. Edit files under:
 
 ```text
 C:\VCP\Eric\UniVCP\bubble-renderer\src\main\assets\renderer
@@ -48,4 +79,4 @@ Stop the background renderer server with:
 
 ## Full rikkaHub Baseline Direction
 
-The research direction is now rikkaHub-first: keep rikkaHub's app shell and provider/data capabilities as the baseline, then replace rich assistant message rendering with UniVCP's learning bubble WebView renderer. Because rikkaHub code is copied directly, keep the repository private until the copied code is replaced clean-room or separately licensed.
+The research direction is rikkaHub-first: keep rikkaHub's app shell and provider/data capabilities as the baseline, then render safe rich assistant messages through UniVCP's Compose-native HTML renderer. `BubbleWebView` remains available for dynamic preview, fullscreen inspection, and WebView fallback research. Because rikkaHub code is copied directly, keep the repository private until the copied code is replaced clean-room or separately licensed.

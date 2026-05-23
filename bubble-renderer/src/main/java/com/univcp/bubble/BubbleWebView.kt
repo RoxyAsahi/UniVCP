@@ -13,7 +13,6 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -35,41 +34,107 @@ import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.delay
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.util.Collections
 
 private const val TAG = "BubbleWebView"
 private const val RENDERER_BASE_URL = "file:///android_asset/renderer/"
+private const val DEFAULT_HEIGHT_PX = 220
+private const val HEIGHT_UPDATE_THRESHOLD_PX = 6
+private const val FIRST_RENDER_MAX_HEIGHT_UPDATE_MS = 1_500L
+private const val HEIGHT_CACHE_MAX_ENTRIES = 256
+private const val MAX_ESTIMATED_INITIAL_HEIGHT_PX = 720
 
 private val payloadJson = Json {
     encodeDefaults = true
     ignoreUnknownKeys = true
 }
 
-class BubbleBridge(
-    private val onHeight: (String, Int) -> Unit,
-    private val onStatus: (String, String) -> Unit,
-    private val onError: (String, String) -> Unit,
-    private val onSendInput: (String, String) -> Unit
-) {
+private val heightCache: MutableMap<String, Int> = Collections.synchronizedMap(
+    object : LinkedHashMap<String, Int>(HEIGHT_CACHE_MAX_ENTRIES, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Int>?): Boolean {
+            return size > HEIGHT_CACHE_MAX_ENTRIES
+        }
+    }
+)
+
+private fun estimateInitialHeightPx(payload: BubblePayload): Int {
+    val raw = payload.rawContent
+    val explicitHeight = HEIGHT_STYLE_REGEX.findAll(raw)
+        .mapNotNull { it.groupValues.getOrNull(1)?.toIntOrNull() }
+        .firstOrNull { it in 80..MAX_ESTIMATED_INITIAL_HEIGHT_PX }
+    if (explicitHeight != null) {
+        return explicitHeight.coerceAtLeast(DEFAULT_HEIGHT_PX)
+    }
+
+    val textLength = raw
+        .replace(TAG_REGEX, " ")
+        .replace(WHITESPACE_REGEX, " ")
+        .trim()
+        .length
+    val estimatedByText = DEFAULT_HEIGHT_PX + (textLength / 90) * 28
+    return estimatedByText.coerceIn(DEFAULT_HEIGHT_PX, MAX_ESTIMATED_INITIAL_HEIGHT_PX)
+}
+
+private val HEIGHT_STYLE_REGEX = Regex("""(?:^|[;\s])(?:min-)?height\s*:\s*(\d{2,4})px\b""", RegexOption.IGNORE_CASE)
+private val TAG_REGEX = Regex("""<[^>]+>""")
+private val WHITESPACE_REGEX = Regex("""\s+""")
+
+private data class BubbleBridgeHandlers(
+    val onHeight: (Int) -> Unit,
+    val onStatus: (String) -> Unit,
+    val onError: (String) -> Unit,
+    val onSendInput: (String) -> Unit
+)
+
+private object BubbleBridgeDispatcher {
+    private val handlers: MutableMap<String, BubbleBridgeHandlers> = Collections.synchronizedMap(mutableMapOf())
+
+    fun register(id: String, handlers: BubbleBridgeHandlers) {
+        this.handlers[id] = handlers
+    }
+
+    fun unregister(id: String) {
+        handlers.remove(id)
+    }
+
+    fun reportHeight(id: String, px: Int) {
+        handlers[id]?.onHeight?.invoke(px)
+    }
+
+    fun reportStatus(id: String, status: String) {
+        handlers[id]?.onStatus?.invoke(status)
+    }
+
+    fun reportError(id: String, message: String) {
+        handlers[id]?.onError?.invoke(message)
+    }
+
+    fun sendInput(id: String, text: String) {
+        handlers[id]?.onSendInput?.invoke(text)
+    }
+}
+
+class BubbleBridge {
     private val main = Handler(Looper.getMainLooper())
 
     @JavascriptInterface
     fun reportHeight(id: String, px: Int) {
-        main.post { onHeight(id, px.coerceAtLeast(80)) }
+        main.post { BubbleBridgeDispatcher.reportHeight(id, px.coerceAtLeast(80)) }
     }
 
     @JavascriptInterface
     fun reportStatus(id: String, status: String) {
-        main.post { onStatus(id, status) }
+        main.post { BubbleBridgeDispatcher.reportStatus(id, status) }
     }
 
     @JavascriptInterface
     fun reportError(id: String, message: String) {
-        main.post { onError(id, message) }
+        main.post { BubbleBridgeDispatcher.reportError(id, message) }
     }
 
     @JavascriptInterface
     fun sendInput(id: String, text: String) {
-        main.post { onSendInput(id, text) }
+        main.post { BubbleBridgeDispatcher.sendInput(id, text) }
     }
 }
 
@@ -79,6 +144,8 @@ fun BubbleWebView(
     payload: BubblePayload,
     modifier: Modifier = Modifier,
     rendererShellUrl: String? = null,
+    @Suppress("UNUSED_PARAMETER")
+    deferRender: Boolean = false,
     onStateChanged: (BubbleRenderState) -> Unit = {},
     onSendInput: (String) -> Unit = {}
 ) {
@@ -86,50 +153,83 @@ fun BubbleWebView(
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var loaded by remember { mutableStateOf(false) }
     var progress by remember { mutableFloatStateOf(0f) }
-    var renderState by remember(payload.id) { mutableStateOf(BubbleRenderState()) }
-    var heightPx by remember(payload.id) { mutableIntStateOf(renderState.heightPx) }
+    val initialHeightPx = remember(payload.id) {
+        heightCache[payload.id] ?: estimateInitialHeightPx(payload)
+    }
+    var renderState by remember(payload.id) { mutableStateOf(BubbleRenderState(heightPx = initialHeightPx)) }
+    var heightPx by remember(payload.id) { mutableIntStateOf(initialHeightPx) }
     var lastRenderedPayloadJson by remember(payload.id) { mutableStateOf<String?>(null) }
+    var lastRenderStartedAt by remember(payload.id) { mutableStateOf(0L) }
     val encodedPayload = remember(payload) { payloadJson.encodeToString(payload) }
     val currentOnSendInput = rememberUpdatedState(onSendInput)
+    val currentOnStateChanged = rememberUpdatedState(onStateChanged)
+    val currentHeightPx = rememberUpdatedState(heightPx)
+    val currentRenderState = rememberUpdatedState(renderState)
+    val currentLastRenderStartedAt = rememberUpdatedState(lastRenderStartedAt)
 
     fun updateState(next: BubbleRenderState) {
         renderState = next
-        onStateChanged(next)
+        currentOnStateChanged.value(next)
     }
 
-    val bridge = remember(payload.id) {
-        BubbleBridge(
-            onHeight = { id, px ->
-                if (id == payload.id) {
-                    heightPx = px
-                    updateState(renderState.copy(heightPx = px))
-                }
-            },
-            onStatus = { id, status ->
-                if (id == payload.id) {
-                    updateState(renderState.copy(status = status))
-                }
-            },
-            onError = { id, message ->
-                if (id == payload.id) {
-                    updateState(renderState.copy(status = "error", error = message))
-                }
-            },
-            onSendInput = { id, text ->
-                if (id == payload.id) {
+    DisposableEffect(payload.id) {
+        BubbleBridgeDispatcher.register(
+            id = payload.id,
+            handlers = BubbleBridgeHandlers(
+                onHeight = { px ->
+                    val lastRenderAt = currentLastRenderStartedAt.value
+                    val previousHeight = currentHeightPx.value
+                    val isFirstRenderSettling = lastRenderAt > 0L &&
+                        System.currentTimeMillis() - lastRenderAt < FIRST_RENDER_MAX_HEIGHT_UPDATE_MS
+                    val shouldUpdate = px > previousHeight ||
+                        isFirstRenderSettling ||
+                        kotlin.math.abs(previousHeight - px) >= HEIGHT_UPDATE_THRESHOLD_PX
+                    if (shouldUpdate) {
+                        heightPx = px
+                        heightCache[payload.id] = px
+                        updateState(currentRenderState.value.copy(heightPx = px))
+                    }
+                },
+                onStatus = { status ->
+                    updateState(currentRenderState.value.copy(status = status))
+                },
+                onError = { message ->
+                    updateState(currentRenderState.value.copy(status = "error", error = message))
+                },
+                onSendInput = { text ->
                     currentOnSendInput.value(text)
-                    updateState(renderState.copy(status = "input"))
+                    updateState(currentRenderState.value.copy(status = "input"))
                 }
-            }
+            )
         )
+        onDispose {
+            BubbleBridgeDispatcher.unregister(payload.id)
+        }
+    }
+
+    val bridge = remember {
+        BubbleBridge()
     }
 
     fun render(webView: WebView?, encoded: String = encodedPayload) {
         if (webView == null || !loaded) return
+        if (payload.isStreaming && deferRender && lastRenderedPayloadJson != null) return
         if (lastRenderedPayloadJson == encoded) return
         val script = "window.UniVCPRenderer && window.UniVCPRenderer.renderPayload($encoded);"
-        lastRenderedPayloadJson = encoded
-        webView.evaluateJavascript(script, null)
+        lastRenderStartedAt = System.currentTimeMillis()
+        webView.evaluateJavascript(script) { result ->
+            if (result != "null") {
+                lastRenderedPayloadJson = encoded
+            }
+        }
+    }
+
+    fun resetRenderer(webView: WebView) {
+        webView.stopLoading()
+        webView.evaluateJavascript("window.UniVCPRenderer && window.UniVCPRenderer.dispose();", null)
+        lastRenderedPayloadJson = null
+        progress = 1f
+        loaded = true
     }
 
     val shellHtml = remember {
@@ -236,8 +336,10 @@ fun BubbleWebView(
             },
             modifier = Modifier
                 .fillMaxWidth()
-                .animateContentSize()
                 .height(heightPx.dp),
+            onReset = { webView ->
+                resetRenderer(webView)
+            },
             update = { webView ->
                 webViewRef = webView
                 if (!payload.isStreaming) {
@@ -263,7 +365,7 @@ fun BubbleWebView(
         }
     }
 
-    LaunchedEffect(encodedPayload, loaded) {
+    LaunchedEffect(encodedPayload, loaded, deferRender) {
         if (!loaded) return@LaunchedEffect
         if (payload.isStreaming) {
             delay(80)

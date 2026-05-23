@@ -72,6 +72,8 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.mapLatest
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Tick01
+import me.rerere.rikkahub.ui.components.render.RenderLruCache
+import me.rerere.rikkahub.ui.components.render.renderTextCacheKey
 import me.rerere.rikkahub.ui.components.table.DataTable
 import me.rerere.rikkahub.ui.context.LocalSettings
 import me.rerere.rikkahub.ui.theme.JetbrainsMono
@@ -113,6 +115,12 @@ private val flavour by lazy {
 private val parser by lazy { MarkdownParser(flavour) }
 
 private fun generateMarkdownHtml(content: String): String {
+    return markdownHtmlCache.getOrPut(renderTextCacheKey(content)) {
+        generateMarkdownHtmlUncached(content)
+    }
+}
+
+private fun generateMarkdownHtmlUncached(content: String): String {
     val preprocessed = preProcess(content)
     val tree = parser.buildMarkdownTreeFromString(preprocessed)
     return HtmlGenerator(preprocessed, tree, flavour).generateHtml()
@@ -120,6 +128,13 @@ private fun generateMarkdownHtml(content: String): String {
 
 // ---- Main composable ----
 
+/**
+ * Markdown HTML compatibility renderer.
+ *
+ * VCP rich HTML in assistant messages is split by MessageTextBlocks and rendered through
+ * RichHtmlCompiler/RichHtmlRenderer. Keep new rich-bubble capabilities in that pipeline so
+ * Markdown, VCP rich HTML, and full WebView preview remain separate rendering paths.
+ */
 @Composable
 fun MarkdownNew(
     content: String,
@@ -144,7 +159,9 @@ fun MarkdownNew(
     }
 
     val document = remember(html) {
-        runCatching { Jsoup.parse(html) }.getOrElse { Jsoup.parse("") }
+        markdownDocumentCache.getOrPut(renderTextCacheKey(html)) {
+            runCatching { Jsoup.parse(html) }.getOrElse { Jsoup.parse("") }
+        }
     }
 
     ProvideTextStyle(style) {
@@ -155,6 +172,9 @@ fun MarkdownNew(
         }
     }
 }
+
+private val markdownHtmlCache = RenderLruCache<String, String>(maxEntries = 128)
+private val markdownDocumentCache = RenderLruCache<String, org.jsoup.nodes.Document>(maxEntries = 128)
 
 // ---- Node dispatching ----
 
@@ -1235,7 +1255,6 @@ private fun parseFontSize(
             with(density) { it.toSp() }
         }
 
-        normalized.endsWith("em") -> normalized.removeSuffix("em").trim().toFloatOrNull()?.em
         normalized.endsWith("rem") -> normalized.removeSuffix("rem").trim().toFloatOrNull()?.let {
             if (baseFontSize.isSpecified && baseFontSize.type == TextUnitType.Sp) {
                 (baseFontSize.value * it).sp
@@ -1243,6 +1262,7 @@ private fun parseFontSize(
                 16.sp * it
             }
         }
+        normalized.endsWith("em") -> normalized.removeSuffix("em").trim().toFloatOrNull()?.em
 
         normalized.endsWith("%") -> normalized.removeSuffix("%").trim().toFloatOrNull()?.let {
             scaleBase(it / 100f)
@@ -1268,7 +1288,6 @@ private fun parseSpacing(
             with(density) { it.toSp() }
         }
 
-        normalized.endsWith("em") -> normalized.removeSuffix("em").trim().toFloatOrNull()?.em
         normalized.endsWith("rem") -> normalized.removeSuffix("rem").trim().toFloatOrNull()?.let {
             if (baseFontSize.isSpecified && baseFontSize.type == TextUnitType.Sp) {
                 (baseFontSize.value * it).sp
@@ -1276,6 +1295,7 @@ private fun parseSpacing(
                 16.sp * it
             }
         }
+        normalized.endsWith("em") -> normalized.removeSuffix("em").trim().toFloatOrNull()?.em
 
         normalized.endsWith("%") -> normalized.removeSuffix("%").trim().toFloatOrNull()?.let {
             if (!baseFontSize.isSpecified) return@let null

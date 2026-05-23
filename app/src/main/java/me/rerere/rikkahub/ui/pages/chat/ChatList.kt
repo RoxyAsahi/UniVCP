@@ -286,7 +286,8 @@ private fun ChatListNormal(
                 delay(1500)
                 isRecentScroll = false
             } else {
-                delay(1500)
+                delay(180)
+                delay(1320)
                 isRecentScroll = false
             }
         }
@@ -304,6 +305,7 @@ private fun ChatListNormal(
             itemsIndexed(
                 items = conversation.messageNodes,
                 key = { index, item -> item.id },
+                contentType = { _, item -> item.currentMessage.role.name },
             ) { index, node ->
                 Column {
                     ListSelectableItem(
@@ -642,6 +644,7 @@ private fun ChatListPreview(
             itemsIndexed(
                 items = filteredMessages,
                 key = { index, item -> item.second.id },
+                contentType = { _, item -> item.second.currentMessage.role.name },
             ) { _, (originalIndex, node) ->
                 val message = node.currentMessage
                 val isUser = message.role == me.rerere.ai.core.MessageRole.USER

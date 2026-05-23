@@ -10,7 +10,9 @@
   let currentPayload = null;
   let resizeObserver = null;
   let renderSeq = 0;
+  let lastReportedHeight = 0;
   const previewCleanups = new Map();
+  const loadedScripts = new Map();
 
   function report(type, payload) {
     try {
@@ -43,6 +45,8 @@
       bodyRect ? bodyRect.height : 0,
       80
     )) + 2;
+    if (Math.abs(height - lastReportedHeight) < 4) return;
+    lastReportedHeight = height;
     report('height', height);
   }
 
@@ -95,6 +99,20 @@
     const textarea = document.createElement('textarea');
     textarea.innerHTML = String(text || '');
     return textarea.value;
+  }
+
+  function loadScriptOnce(src, globalName) {
+    if (globalName && window[globalName]) return Promise.resolve();
+    if (loadedScripts.has(src)) return loadedScripts.get(src);
+    const promise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = src;
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error(`Failed to load ${src}`));
+      document.head.appendChild(script);
+    });
+    loadedScripts.set(src, promise);
+    return promise;
   }
 
   function sanitize(html) {
@@ -552,6 +570,9 @@ ${bridgeScript(frameId)}
 
   async function renderMermaidBlocks() {
     const mermaidBlocks = Array.from(root.querySelectorAll('code.language-mermaid, code.language-flowchart, code.language-graph'));
+    if (mermaidBlocks.length > 0) {
+      await loadScriptOnce('vendor/mermaid.min.js', 'mermaid');
+    }
     mermaidBlocks.forEach((codeNode, index) => {
       const pre = codeNode.closest('pre');
       const div = document.createElement('div');
@@ -579,6 +600,11 @@ ${bridgeScript(frameId)}
   }
 
   async function enhanceContent() {
+    if (!window.renderMathInElement && /\$[^$\n]+\$|\\\(|\\\[|\$\$/.test(root.textContent || '')) {
+      await loadScriptOnce('vendor/katex.min.js', 'katex');
+      await loadScriptOnce('vendor/auto-render.min.js', 'renderMathInElement');
+    }
+
     if (window.renderMathInElement) {
       try {
         renderMathInElement(root, {
@@ -597,9 +623,16 @@ ${bridgeScript(frameId)}
 
     await renderMermaidBlocks();
 
+    const highlightTargets = Array.from(root.querySelectorAll('pre code')).filter((node) => {
+      if (node.closest('.uvcp-protocol-block')) return false;
+      return /\blanguage-[A-Za-z0-9_-]+\b/.test(node.className || '');
+    });
+    if (highlightTargets.length > 0 && !window.hljs) {
+      await loadScriptOnce('vendor/highlight.min.js', 'hljs');
+    }
+
     if (window.hljs) {
-      root.querySelectorAll('pre code').forEach((node) => {
-        if (node.closest('.uvcp-protocol-block')) return;
+      highlightTargets.forEach((node) => {
         try { hljs.highlightElement(node); } catch (_error) {}
       });
     }
@@ -611,6 +644,7 @@ ${bridgeScript(frameId)}
   async function renderPayload(payload) {
     const seq = ++renderSeq;
     currentPayload = payload;
+    lastReportedHeight = 0;
     try {
       report('status', payload.isStreaming ? 'streaming' : 'rendering');
       applyTheme(payload.theme);

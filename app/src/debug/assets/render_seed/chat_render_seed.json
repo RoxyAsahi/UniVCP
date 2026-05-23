@@ -1,0 +1,426 @@
+{
+  "version": 1,
+  "assistants": [
+    {
+      "id": "7b28895b-f6d8-418f-a4f0-14bf8095de08",
+      "name": "Render Seed Nova",
+      "systemPrompt": "You are a rendering test assistant. Produce compact but feature-rich answers that exercise Markdown, math, code, tables, tool cards, and attachment layout."
+    },
+    {
+      "id": "73e74544-cc75-43e2-bc4a-5fa695a410d0",
+      "name": "Render Seed Tutor",
+      "systemPrompt": "You are a patient study tutor. Explain formulas step by step and keep mathematical notation visible."
+    }
+  ],
+  "conversations": [
+    {
+      "id": "f23e6bda-8d9a-4296-a292-0f982acebb54",
+      "assistantSeedId": "7b28895b-f6d8-418f-a4f0-14bf8095de08",
+      "title": "Seed: Markdown, table, code, mermaid",
+      "createdAt": 1778703000000,
+      "updatedAt": 1778703180000,
+      "suggestions": [
+        "继续补一个更长的表格",
+        "把流程图换成时序图",
+        "测试深色模式"
+      ],
+      "messages": [
+        {
+          "id": "b401a624-69b8-44b9-9283-ad927fba208f",
+          "nodeId": "e2e0ef45-054f-405c-bcce-50620ab63a2f",
+          "role": "user",
+          "createdAt": 1778703000000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "给我一条能测试聊天页面渲染的综合消息：要有标题、列表、表格、代码块、Mermaid，以及中英混排。"
+            }
+          ]
+        },
+        {
+          "id": "9d0ccb6a-b0dd-43b4-8f23-d985d188afec",
+          "nodeId": "6a65072a-5dae-4178-a1a5-be33c75cbcea",
+          "role": "assistant",
+          "createdAt": 1778703060000,
+          "updatedAt": 1778703180000,
+          "parts": [
+            {
+              "type": "reasoning",
+              "text": "I will include multiple block-level elements and inline emphasis so spacing, typography, and folding behavior are all exercised.",
+              "createdAt": 1778703060000,
+              "finishedAt": 1778703065000
+            },
+            {
+              "type": "text",
+              "text": "# Render Kitchen Sink\n\n这条消息用于测试聊天气泡的复杂排版。It mixes Chinese and English, inline `code`, **bold**, *italic*, and a deliberately long token: `SuperLongIdentifierWithoutBreaks_ABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789`.\n\n## Checklist\n\n- Markdown heading hierarchy\n- Ordered and unordered lists\n- Table alignment and wrapping\n- Kotlin code highlighting\n- Mermaid preview block\n\n| Case | Expected rendering | Risk |\n| --- | --- | --- |\n| Long text | Wraps without clipping | horizontal overflow |\n| `inline code` | Keeps baseline aligned | excessive height |\n| Mixed CJK/Latin | Natural line breaks | awkward spacing |\n\n```kotlin\nfun renderSeed(items: List<String>): String {\n    return items.joinToString(separator = \"\\n\") { item ->\n        \"- $item\"\n    }\n}\n```\n\n```mermaid\nflowchart TD\n  A[User asks for sync] --> B{Firebase configured?}\n  B -- yes --> C[Push and listen]\n  B -- no --> D[Show setup state]\n  C --> E[Render imported messages]\n```\n\n最后再给一个引用块：\n\n> Good seed data should be small, representative, and repeatable."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "17631b86-ee7a-4664-85b4-c4b9c477df5d",
+      "assistantSeedId": "73e74544-cc75-43e2-bc4a-5fa695a410d0",
+      "title": "Seed: Math formulas and dense study answer",
+      "createdAt": 1778703300000,
+      "updatedAt": 1778703480000,
+      "suggestions": [
+        "再生成一个更长的公式推导",
+        "检查 LaTeX 行内渲染",
+        "测试表格横向滚动"
+      ],
+      "messages": [
+        {
+          "id": "c3bdd148-cba7-43a1-8d2a-98033351117a",
+          "nodeId": "90534867-d761-49f8-a789-502c909f43ef",
+          "role": "user",
+          "createdAt": 1778703300000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "做一段期末备考风格的数学讲解，包含行内公式、块级公式、表格和步骤。"
+            }
+          ]
+        },
+        {
+          "id": "7e73f932-e9bd-478b-ad44-1e35db56d36e",
+          "nodeId": "6341e9a7-c291-4271-b538-71bb6b50da0a",
+          "role": "assistant",
+          "createdAt": 1778703360000,
+          "updatedAt": 1778703480000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "我们测试一个联合分布题。设随机变量满足 $0 < x < 4$ 且 $0 < y < 1 - x/4$，密度为 $f(x,y)=cy$。\n\n归一化条件：\n\n$$\n\\int_0^4 \\int_0^{1-x/4} c y\\,dy\\,dx = 1\n$$\n\n先对 $y$ 积分：\n\n$$\n\\int_0^{1-x/4} c y\\,dy = \\frac{c}{2}\\left(1-\\frac{x}{4}\\right)^2\n$$\n\n再对 $x$ 积分：\n\n$$\n\\frac{c}{2}\\int_0^4\\left(1-\\frac{x}{4}\\right)^2 dx = \\frac{2c}{3}=1\n$$\n\n所以 $c=\\frac{3}{2}$。\n\n| Quantity | Expression | Value |\n| --- | --- | --- |\n| $c$ | $2c/3=1$ | $1.5$ |\n| $f_X(x)$ | $0.75(1-x/4)^2$ | $0<x<4$ |\n| $E[X]$ | $\\int_0^4 x f_X(x)dx$ | $1$ |\n\n注意这个 seed 主要用来测试公式 baseline、块级公式上下间距、表格和正文之间的节奏。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "e50521c7-e898-4800-ba4b-d07e62314119",
+      "assistantSeedId": "7b28895b-f6d8-418f-a4f0-14bf8095de08",
+      "title": "Seed: VCP HTML visual block",
+      "createdAt": 1778703600000,
+      "updatedAt": 1778703720000,
+      "messages": [
+        {
+          "id": "1ac4d57c-5ab0-4a1f-9202-f0ff7bf71e8f",
+          "nodeId": "91b6d532-ab3b-43d4-bf68-c2a9622450ff",
+          "role": "user",
+          "createdAt": 1778703600000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "模拟一段 VCP 风格的 HTML 可视化输出，用来测 WebView/Markdown 混合渲染。"
+            }
+          ]
+        },
+        {
+          "id": "32ab770a-a694-447e-acfb-48e9735dbf2b",
+          "nodeId": "a8f984d5-d3c8-4141-a7c3-a539fbb176a5",
+          "role": "assistant",
+          "createdAt": 1778703660000,
+          "updatedAt": 1778703720000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "下面是一段脱敏的 VCP-style HTML 块。它故意包含内联样式、网格、边框、中文、英文和较长内容。\n\n<div id=\"vcp-root\" style=\"background:#101827;color:#e5e7eb;padding:20px;border-radius:14px;border:1px solid #334155;font-family:system-ui,Segoe UI,sans-serif;\">\n  <h2 style=\"margin-top:0;color:#67e8f9;\">Chat Sync Status Matrix</h2>\n  <p style=\"opacity:.86;line-height:1.6;\">This card is seed data for renderer testing. It is not generated from private chat content.</p>\n  <div style=\"display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;\">\n    <div style=\"background:rgba(255,255,255,.06);padding:12px;border-left:4px solid #22c55e;border-radius:8px;\"><strong>Firebase</strong><br/>RTDB stream active</div>\n    <div style=\"background:rgba(255,255,255,.06);padding:12px;border-left:4px solid #38bdf8;border-radius:8px;\"><strong>VCPChat</strong><br/>history watcher</div>\n    <div style=\"background:rgba(255,255,255,.06);padding:12px;border-left:4px solid #f59e0b;border-radius:8px;\"><strong>UniVCP</strong><br/>Room import</div>\n  </div>\n</div>\n\n普通 Markdown 内容应该继续在 HTML 块之后正常排版。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "1b246ece-b3cd-4d16-bfae-0dc5e0bf991f",
+      "assistantSeedId": "7b28895b-f6d8-418f-a4f0-14bf8095de08",
+      "title": "Seed: Tool cards, attachments, and long thread",
+      "createdAt": 1778703900000,
+      "updatedAt": 1778704380000,
+      "suggestions": [
+        "打开附件预览",
+        "检查工具调用折叠",
+        "滚动到底部"
+      ],
+      "messages": [
+        {
+          "id": "f08a5bff-a69b-43e4-958f-e97bfd89b3a6",
+          "nodeId": "c3afec0c-9afd-4c2f-afd6-a7276501b0aa",
+          "role": "user",
+          "createdAt": 1778703900000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "这条会话用来测工具调用、附件、长线程和消息间距。"
+            },
+            {
+              "type": "image",
+              "url": "https://placehold.co/640x360/png?text=UniVCP+Seed+Image"
+            },
+            {
+              "type": "document",
+              "url": "https://example.com/render-seed.pdf",
+              "fileName": "render-seed.pdf",
+              "mime": "application/pdf"
+            }
+          ]
+        },
+        {
+          "id": "c5c751c9-87cd-4b93-936c-f61bf40b4c73",
+          "nodeId": "ee4eb02b-f1b6-47c6-bb05-2a96d7135da0",
+          "role": "assistant",
+          "createdAt": 1778703960000,
+          "updatedAt": 1778704020000,
+          "parts": [
+            {
+              "type": "tool",
+              "toolCallId": "seed-tool-001",
+              "toolName": "inspect_render_payload",
+              "input": "{\"targets\":[\"markdown\",\"image\",\"document\",\"tool\"],\"mode\":\"seed\"}",
+              "approvalState": "auto",
+              "output": [
+                {
+                  "type": "text",
+                  "text": "{\"ok\":true,\"blocks\":4,\"notes\":\"Synthetic seed payload only.\"}"
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": "我已经检查了这条 seed：\n\n1. 第一条用户消息有文本、图片和文档附件。\n2. 这条助手消息包含已执行工具调用和 JSON 输出。\n3. 后续会继续追加几轮短消息，用来测试列表滚动和底部定位。"
+            }
+          ]
+        },
+        {
+          "id": "2f0a5ab3-07a3-4821-b466-cdc4173a9c4c",
+          "nodeId": "dbf3cc61-6557-4b79-9472-cefcae156d06",
+          "role": "user",
+          "createdAt": 1778704080000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "追加一轮短问答，看看连续消息之间的间距。"
+            }
+          ]
+        },
+        {
+          "id": "c9539b9a-f37c-424f-b4bb-782369e905bf",
+          "nodeId": "1b0e9f3d-58e0-4776-915f-b28325cf5b8b",
+          "role": "assistant",
+          "createdAt": 1778704140000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "短答：这一轮用于观察普通文本气泡、头像、时间戳和模型名的堆叠效果。"
+            }
+          ]
+        },
+        {
+          "id": "0e2c5390-2ec8-4f29-8500-3ed75f2d9bef",
+          "nodeId": "e2b6ba7e-9a70-41e5-a74b-f3c633683552",
+          "role": "user",
+          "createdAt": 1778704200000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "再来一个很长的自然段，测试换行和选择文本时的稳定性。"
+            }
+          ]
+        },
+        {
+          "id": "b5db3b80-0338-4e83-a627-f642954feaf3",
+          "nodeId": "cb400648-ef1e-4680-8dde-8c9adf200a98",
+          "role": "assistant",
+          "createdAt": 1778704260000,
+          "updatedAt": 1778704380000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "这是一段较长的测试文本：当聊天页面宽度变化、键盘弹出、抽屉打开或者字体比例调整时，这段内容应该自然换行，不遮挡后续内容，也不让气泡宽度失控。The same paragraph also includes English words, punctuation, and URLs like https://example.com/render-seed to test link wrapping."
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "c745d079-8d79-4015-a6ca-3d3e5d179438",
+      "assistantSeedId": "7b28895b-f6d8-418f-a4f0-14bf8095de08",
+      "title": "Seed: VCP card layout and controls",
+      "createdAt": 1778704500000,
+      "updatedAt": 1778704620000,
+      "suggestions": [
+        "测试按钮行换行",
+        "切换深色模式",
+        "检查图片加载占位"
+      ],
+      "messages": [
+        {
+          "id": "0c76876f-d1b2-447c-a11c-ae25f3d83b2c",
+          "nodeId": "cfa11f62-4011-458f-a66b-90438605895d",
+          "role": "user",
+          "createdAt": 1778704500000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "生成一段 VCPChat 常见的卡片式 HTML：头部、主体、标签、按钮、图片和动画样式都要有。"
+            }
+          ]
+        },
+        {
+          "id": "5235b565-2933-4eff-b72f-54844ac3a000",
+          "nodeId": "cc0eff47-6fe5-4030-b974-51fa779e5fc0",
+          "role": "assistant",
+          "createdAt": 1778704560000,
+          "updatedAt": 1778704620000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "下面是脱敏合成的 VCP 卡片片段，主要覆盖 class、button、img、inline style 和 `<style>`。\n\n<style>\n  .vcp-card{background:#0f172a;color:#e2e8f0;border:1px solid #334155;border-radius:12px;box-shadow:0 12px 30px rgba(15,23,42,.28);overflow:hidden;}\n  .vcp-card-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid rgba(148,163,184,.24);}\n  .vcp-card-body{padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;}\n  .vcp-card-footer{padding:12px 16px;border-top:1px solid rgba(148,163,184,.2);font-size:12px;opacity:.8;}\n  .vcp-feature-card{background:rgba(255,255,255,.06);border-radius:8px;padding:12px;border-left:4px solid #22d3ee;}\n  .vcp-param-tag,.vcp-command-tag{display:inline-flex;align-items:center;border-radius:999px;padding:2px 8px;margin:2px;background:rgba(125,211,252,.14);color:#bae6fd;font-size:12px;}\n  .action-btn{border:0;border-radius:8px;padding:8px 10px;background:#22c55e;color:white;font-weight:700;cursor:pointer;transition:transform .18s ease,filter .18s ease;}\n  .action-btn:hover{transform:translateY(-1px);filter:brightness(1.08);}\n  .status-badge{animation:seedPulse 1.6s infinite ease-in-out;color:#86efac;}\n  @keyframes seedPulse{0%,100%{opacity:.55}50%{opacity:1}}\n</style>\n<div id='vcp-root' class='vcp-card' style='max-width:720px;font-family:system-ui,Segoe UI,sans-serif;'>\n  <div class='vcp-card-header'>\n    <strong>ChatSyncBridge Diagnostics</strong>\n    <span class='status-badge'>LIVE</span>\n  </div>\n  <div class='vcp-card-body'>\n    <section class='vcp-feature-card'><b>Realtime</b><p style='line-height:1.55;margin-bottom:0;'>RTDB listener receives imported VCPChat messages.</p></section>\n    <section class='vcp-feature-card'><b>Ownership</b><p style='line-height:1.55;margin-bottom:0;'>Users bring their own Firebase project and rules.</p></section>\n    <section class='vcp-feature-card'><b>Tags</b><br/><span class='vcp-param-tag'>projectId</span><span class='vcp-param-tag'>deviceId</span><span class='vcp-command-tag'>sync_now</span></section>\n    <section class='vcp-feature-card'><img src='https://placehold.co/320x120/png?text=VCP+HTML+Seed' alt='seed visual placeholder' style='width:100%;height:auto;border-radius:6px;'/></section>\n  </div>\n  <div class='vcp-card-footer'>\n    <button class='action-btn' data-action='sync-now'>Sync now</button>\n    <button class='action-btn' data-action='open-log' style='background:#38bdf8;margin-left:8px;'>Open log</button>\n  </div>\n</div>\n\n渲染检查点：`vcp-card-header`、`action-btn`、`img`、`@keyframes` 和按钮文本都应该稳定显示。"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ef53681c-e5cc-4ad5-a932-50af3b9f51b5",
+      "assistantSeedId": "7b28895b-f6d8-418f-a4f0-14bf8095de08",
+      "title": "Seed: Window and process list HTML",
+      "createdAt": 1778704800000,
+      "updatedAt": 1778704920000,
+      "messages": [
+        {
+          "id": "4b72a53f-26d5-4427-8b67-6dca8326bbba",
+          "nodeId": "d56223c6-5e57-4502-9153-1f173c72347b",
+          "role": "user",
+          "createdAt": 1778704800000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "补一个窗口/进程列表类型的 HTML，真实聊天里经常会有 hwnd、pid、窗口标题和折叠区。"
+            }
+          ]
+        },
+        {
+          "id": "326937b8-6771-46b2-b1e6-ad24873d8786",
+          "nodeId": "ab58ee1d-c01f-45f4-b7e5-b9aa47cd5787",
+          "role": "assistant",
+          "createdAt": 1778704860000,
+          "updatedAt": 1778704920000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "<div id='response-root' style='font-family:Consolas,Segoe UI,sans-serif;background:#111827;color:#e5e7eb;border-radius:10px;padding:14px;border:1px solid #374151;'>\n  <h3 style='margin-top:0;'>Desktop Window Snapshot</h3>\n  <details open>\n    <summary style='cursor:pointer;font-weight:700;'>可用窗口 (3)</summary>\n    <div class='window-item' data-hwnd='0x001A2B' style='display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.12);'>\n      <span class='proc-name' style='font-weight:700;color:#93c5fd;'>UniVCP.exe</span>\n      <span class='pid-badge' style='background:#1d4ed8;padding:2px 6px;border-radius:6px;'>PID 28440</span>\n      <span class='hwnd-tag' style='background:#0f766e;padding:2px 6px;border-radius:6px;'>HWND 0x001A2B</span>\n      <span style='opacity:.8;'>聊天渲染调试窗口</span>\n    </div>\n    <div class='window-item' data-hwnd='0x003C9D' style='display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.12);'>\n      <span class='proc-name' style='font-weight:700;color:#93c5fd;'>VCPChat.exe</span>\n      <span class='pid-badge' style='background:#1d4ed8;padding:2px 6px;border-radius:6px;'>PID 17892</span>\n      <span class='hwnd-tag' style='background:#0f766e;padding:2px 6px;border-radius:6px;'>HWND 0x003C9D</span>\n      <span style='opacity:.8;'>历史记录同步源</span>\n    </div>\n    <div class='window-item' data-hwnd='0x00FF10' style='display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px 0;'>\n      <span class='proc-name' style='font-weight:700;color:#93c5fd;'>Browser.exe</span>\n      <span class='pid-badge' style='background:#1d4ed8;padding:2px 6px;border-radius:6px;'>PID 9012</span>\n      <span class='hwnd-tag' style='background:#0f766e;padding:2px 6px;border-radius:6px;'>HWND 0x00FF10</span>\n      <span style='opacity:.8;'>文档预览</span>\n    </div>\n  </details>\n  <table style='width:100%;border-collapse:collapse;margin-top:12px;font-size:13px;'>\n    <thead><tr><th style='text-align:left;border-bottom:1px solid #475569;padding:6px;'>Process</th><th style='text-align:left;border-bottom:1px solid #475569;padding:6px;'>State</th><th style='text-align:left;border-bottom:1px solid #475569;padding:6px;'>Action</th></tr></thead>\n    <tbody><tr><td style='padding:6px;'>UniVCP.exe</td><td style='padding:6px;'>focused</td><td style='padding:6px;'>capture</td></tr><tr><td style='padding:6px;'>VCPChat.exe</td><td style='padding:6px;'>background</td><td style='padding:6px;'>watch</td></tr></tbody>\n  </table>\n  <pre style='overflow-x:auto;background:#020617;border-radius:8px;padding:10px;'><code>VCPDesktop.CaptureWindow(hwnd='0x001A2B', mode='safe-preview')</code></pre>\n</div>"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "8ad7a06b-bbd7-448c-a4b4-7c95158264d8",
+      "assistantSeedId": "73e74544-cc75-43e2-bc4a-5fa695a410d0",
+      "title": "Seed: Math-heavy HTML answer",
+      "createdAt": 1778705100000,
+      "updatedAt": 1778705220000,
+      "suggestions": [
+        "检查 sub 和 sup",
+        "检查 HTML 表格滚动",
+        "检查公式盒子间距"
+      ],
+      "messages": [
+        {
+          "id": "684b53fa-4a89-468f-be45-48d1fb07dd99",
+          "nodeId": "74a9484a-34f8-4edf-8810-9ba8ae1ceb08",
+          "role": "user",
+          "createdAt": 1778705100000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "加一个用 HTML 写的数学讲解，包含 sub/sup、公式卡片、表格和普通 LaTeX。"
+            }
+          ]
+        },
+        {
+          "id": "80995c1e-8780-46cd-b7f6-9a722c0c0b1c",
+          "nodeId": "e1ff8a73-7188-4756-98c2-b0a938ed040a",
+          "role": "assistant",
+          "createdAt": 1778705160000,
+          "updatedAt": 1778705220000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "这条同时测试 Markdown LaTeX 和 HTML 数学排版。行内公式：$a^2+b^2=c^2$。\n\n<div class='math-block' style='background:#fff7ed;color:#1f2937;border:1px solid #fed7aa;border-radius:10px;padding:16px;font-family:Georgia,serif;'>\n  <style>\n    .formula-box{background:white;border:1px solid #fdba74;border-radius:8px;padding:10px;margin:10px 0;box-shadow:0 2px 8px rgba(251,146,60,.18);}\n    .math-pill{display:inline-block;background:#ffedd5;border-radius:999px;padding:2px 8px;margin:2px;color:#9a3412;font-family:ui-monospace,monospace;}\n  </style>\n  <h3 style='margin-top:0;'>热力学小结</h3>\n  <p>水的化学式是 H<sub>2</sub>O，二氧化碳是 CO<sub>2</sub>，能量关系可写作 E = mc<sup>2</sup>。</p>\n  <div class='formula-box'>dU = T dS - P dV + μ dN</div>\n  <div class='formula-box'>ΔG = ΔH - TΔS</div>\n  <p><span class='math-pill'>T</span><span class='math-pill'>P</span><span class='math-pill'>V</span><span class='math-pill'>S</span></p>\n  <table style='width:100%;border-collapse:collapse;font-size:14px;'>\n    <thead><tr><th style='border-bottom:2px solid #fdba74;text-align:left;padding:6px;'>符号</th><th style='border-bottom:2px solid #fdba74;text-align:left;padding:6px;'>含义</th><th style='border-bottom:2px solid #fdba74;text-align:left;padding:6px;'>单位</th></tr></thead>\n    <tbody><tr><td style='padding:6px;'>T</td><td style='padding:6px;'>Temperature</td><td style='padding:6px;'>K</td></tr><tr><td style='padding:6px;'>P</td><td style='padding:6px;'>Pressure</td><td style='padding:6px;'>Pa</td></tr><tr><td style='padding:6px;'>ΔG</td><td style='padding:6px;'>Gibbs free energy</td><td style='padding:6px;'>J</td></tr></tbody>\n  </table>\n</div>\n\n块级公式仍然需要独立渲染：\n\n$$\n\\Delta G = \\Delta H - T\\Delta S\n$$"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "b87a799f-9f58-4338-a589-4ac5d8497eb2",
+      "assistantSeedId": "7b28895b-f6d8-418f-a4f0-14bf8095de08",
+      "title": "Seed: VCPDesktop widget snippets",
+      "createdAt": 1778705400000,
+      "updatedAt": 1778705520000,
+      "messages": [
+        {
+          "id": "461e2222-363c-490c-8f95-82fdab9edb51",
+          "nodeId": "baa26c39-35d2-4bdf-b048-c0182820464b",
+          "role": "user",
+          "createdAt": 1778705400000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "真实记录里有 VCPDesktop 推送的小组件，补一个网络卡片和时钟卡片，还要带 SVG。"
+            }
+          ]
+        },
+        {
+          "id": "b32ddccd-7dd0-4906-9401-3ed914f46c37",
+          "nodeId": "9f3f2cc9-e403-4d0e-9640-0a6d7ee2c590",
+          "role": "assistant",
+          "createdAt": 1778705460000,
+          "updatedAt": 1778705520000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "VCPDesktop <<<[DESKTOP_PUSH]>>>\n<div id='vcp-net-widget' style='width:220px;min-height:120px;background:rgba(15,23,42,.88);color:#e0f2fe;border:1px solid rgba(125,211,252,.35);border-radius:14px;padding:12px;font-family:Segoe UI,sans-serif;backdrop-filter:blur(8px);box-shadow:0 10px 28px rgba(2,6,23,.35);'>\n  <div style='display:flex;align-items:center;justify-content:space-between;gap:8px;'>\n    <strong>Network</strong><span style='font-size:12px;color:#86efac;'>online</span>\n  </div>\n  <svg width='196' height='48' viewBox='0 0 196 48' role='img' aria-label='network trend' style='margin-top:8px;'>\n    <path d='M2 38 C26 16, 42 18, 62 30 S100 42, 122 18 S166 10, 194 28' fill='none' stroke='#38bdf8' stroke-width='3'/>\n    <circle cx='122' cy='18' r='4' fill='#22c55e'/>\n    <line x1='2' y1='42' x2='194' y2='42' stroke='rgba(255,255,255,.22)'/>\n    <text x='4' y='12' fill='#bae6fd' font-size='10'>42 ms</text>\n  </svg>\n  <div style='display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:12px;'>\n    <span>Up 18.4 MB/s</span><span>Down 92.1 MB/s</span>\n  </div>\n</div>\n\nVCPDesktop <<<[DESKTOP_PUSH]>>>\n<div id='vcp-clock-widget' style='width:220px;background:#f8fafc;color:#0f172a;border:1px solid #cbd5e1;border-radius:14px;padding:12px;font-family:system-ui;'>\n  <div style='font-size:28px;font-weight:800;letter-spacing:0;'>20:26</div>\n  <div style='font-size:12px;color:#475569;'>Asia/Hong_Kong · render seed</div>\n  <button class='action-btn' data-action='pin-clock' style='margin-top:10px;border:0;border-radius:8px;padding:7px 9px;background:#0f766e;color:white;'>Pin</button>\n</div>"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "5cb84cd7-7ff0-420a-9bfa-fe08ea87f888",
+      "assistantSeedId": "7b28895b-f6d8-418f-a4f0-14bf8095de08",
+      "title": "Seed: Mixed HTML safety boundaries",
+      "createdAt": 1778705700000,
+      "updatedAt": 1778705820000,
+      "messages": [
+        {
+          "id": "26eb9326-e28c-48b5-a371-223efd629da6",
+          "nodeId": "0a87612c-5265-422c-be5e-e7d2d64a986a",
+          "role": "user",
+          "createdAt": 1778705700000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "再补一个混合标签边界样例：details、summary、pre/code、列表、kbd、mark，以及不要真的执行 script。"
+            }
+          ]
+        },
+        {
+          "id": "0540e93e-6b58-4295-a205-268e0dbe762f",
+          "nodeId": "817f1478-4640-42db-b954-1edfeaba638f",
+          "role": "assistant",
+          "createdAt": 1778705760000,
+          "updatedAt": 1778705820000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "<details open>\n  <summary><strong>HTML sanitizer boundary sample</strong></summary>\n  <p>这段用于测试真实聊天里常见的 <mark>highlight</mark>、<kbd>Ctrl</kbd> + <kbd>Enter</kbd>、<del>旧状态</del> 和 <ins>新状态</ins>。</p>\n  <ol>\n    <li>列表项包含 <code>inline code</code> 与中文换行。</li>\n    <li>按钮只保留展示属性：<button class='action-btn' data-action='dry-run'>Dry run</button></li>\n    <li>脚本以转义文本放入代码块，不应该被当成可执行脚本。</li>\n  </ol>\n  <pre style='overflow-x:auto;background:#0b1020;color:#dbeafe;border-radius:8px;padding:10px;'><code>&lt;script&gt;\n  console.log('render seed only, do not execute');\n&lt;/script&gt;</code></pre>\n  <hr/>\n  <blockquote style='border-left:4px solid #94a3b8;margin:8px 0;padding-left:10px;'>Renderer should keep layout stable even when HTML-like text appears inside code.</blockquote>\n</details>"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

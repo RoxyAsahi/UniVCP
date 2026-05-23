@@ -12,6 +12,6 @@ The source project declares a segmented dual license with AGPLv3 obligations for
 
 Two copied upstream unit-test classes are excluded from the default `:ai:testDebugUnitTest` task because they use brittle reflection over provider internals that are not part of UniVCP's first research milestone. The copied production code still compiles, and UniVCP should add focused OpenAI-compatible streaming tests as the prototype stabilizes.
 
-## UniStudy Renderer Assets
+## Renderer Assets
 
-Renderer vendor files are copied from the local UniStudy desktop project under `C:\VCP\Eric\edu_chat_project\vendor` for offline prototype rendering.
+Renderer vendor files are copied from the local UniStudy desktop project under `C:\VCP\Eric\edu_chat_project\vendor` for offline prototype rendering. The default safe static rich HTML chat-list path is now Compose-native, but these assets remain used by `BubbleWebView` for dynamic preview, fullscreen inspection, and WebView fallback research.

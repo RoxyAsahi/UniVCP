@@ -30,6 +30,7 @@ val chatSyncFirebaseDatabaseUrl = localProperty("univcp.chatSync.firebaseDatabas
 val chatSyncFirebaseAuthToken = localProperty("univcp.chatSync.firebaseAuthToken")
 val chatSyncRoomId = localProperty("univcp.chatSync.roomId", "default")
 val chatSyncDeviceId = localProperty("univcp.chatSync.deviceId")
+val renderSeedEnabled = localProperty("univcp.renderSeed.enabled", "false").toBooleanStrictOrNull() ?: false
 
 plugins {
     alias(libs.plugins.android.application)
@@ -64,6 +65,7 @@ android {
         buildConfigField("String", "UNIVCP_CHAT_SYNC_FIREBASE_AUTH_TOKEN", "\"\"")
         buildConfigField("String", "UNIVCP_CHAT_SYNC_ROOM_ID", "\"\"")
         buildConfigField("String", "UNIVCP_CHAT_SYNC_DEVICE_ID", "\"\"")
+        buildConfigField("boolean", "UNIVCP_RENDER_SEED_ENABLED", "false")
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
@@ -134,6 +136,7 @@ android {
             buildConfigField("String", "UNIVCP_CHAT_SYNC_FIREBASE_AUTH_TOKEN", chatSyncFirebaseAuthToken.asBuildConfigString())
             buildConfigField("String", "UNIVCP_CHAT_SYNC_ROOM_ID", chatSyncRoomId.asBuildConfigString())
             buildConfigField("String", "UNIVCP_CHAT_SYNC_DEVICE_ID", chatSyncDeviceId.asBuildConfigString())
+            buildConfigField("boolean", "UNIVCP_RENDER_SEED_ENABLED", renderSeedEnabled.toString())
         }
         create("baseline") {
             initWith(getByName("release"))
@@ -163,6 +166,9 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = true
+        }
+        resources {
+            excludes += "META-INF/buildinfo.xml"
         }
     }
     tasks.withType<KotlinCompile>().configureEach {
@@ -212,6 +218,7 @@ dependencies {
     // Compose
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
+    implementation(libs.androidx.compose.foundation.layout)
     implementation(libs.androidx.ui)
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.ui.tooling.preview)
@@ -268,6 +275,9 @@ dependencies {
 
     // pebble (template engine)
     implementation(libs.pebble)
+
+    // CSS parser for the native rich HTML compiler
+    implementation(libs.ph.css)
 
     // coil
     implementation(libs.coil.compose)

@@ -10,6 +10,7 @@ import me.rerere.rikkahub.AppScope
 import me.rerere.rikkahub.data.ai.AILoggingManager
 import me.rerere.rikkahub.data.ai.tools.LocalTools
 import me.rerere.rikkahub.data.event.AppEventBus
+import me.rerere.rikkahub.data.renderseed.RenderSeedImporter
 import me.rerere.rikkahub.data.sync.chat.ChatSyncManager
 import me.rerere.rikkahub.service.ChatService
 import me.rerere.rikkahub.utils.EmojiData
@@ -97,6 +98,15 @@ val appModule = module {
             conversationRepository = get(),
             chatService = get(),
             httpClient = get(),
+            json = get(),
+        )
+    }
+
+    single {
+        RenderSeedImporter(
+            context = get(),
+            settingsStore = get(),
+            conversationRepository = get(),
             json = get(),
         )
     }
