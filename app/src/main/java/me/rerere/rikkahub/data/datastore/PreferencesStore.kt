@@ -572,6 +572,7 @@ data class DisplaySetting(
     val showUpdates: Boolean = true,
     val showMessageJumper: Boolean = true,
     val messageJumperOnLeft: Boolean = false,
+    val enableChatCellPipeline: Boolean = true,
     val fontSizeRatio: Float = 1.0f,
     val enableMessageGenerationHapticEffect: Boolean = false,
     val skipCropImage: Boolean = false,

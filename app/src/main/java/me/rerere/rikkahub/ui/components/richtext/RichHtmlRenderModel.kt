@@ -59,6 +59,10 @@ internal data class RichAnimationStats(
     val transitionCount: Int = 0,
     val dependentVisibilityCount: Int = 0,
     val budgetExceededCount: Int = 0,
+    val playOnceSuppressedCount: Int = 0,
+    val snapshotCandidateCount: Int = 0,
+    val multiKeyframeCount: Int = 0,
+    val unsupportedPropertyCount: Int = 0,
 ) {
     companion object {
         val Empty = RichAnimationStats()
@@ -186,6 +190,7 @@ internal data class ComputedStyle(
     val declaredBackgroundColor: RichCssColor? = null,
     val backgroundImage: RichBackgroundImage? = null,
     val backgroundUrl: String? = null,
+    val backgroundLayers: List<RichBackgroundLayer> = emptyList(),
     val backgroundSize: RichBackgroundSize = RichBackgroundSize.Auto,
     val backgroundPosition: RichBackgroundPosition = RichBackgroundPosition.Center,
     val backgroundRepeat: RichBackgroundRepeat = RichBackgroundRepeat.Repeat,
@@ -198,6 +203,8 @@ internal data class ComputedStyle(
     val transition: RichTransitionStyle = RichTransitionStyle.None,
     val cssFilter: RichCssFilter = RichCssFilter.None,
     val backdropFilter: RichCssFilter = RichCssFilter.None,
+    val clipPath: RichClipPath? = null,
+    val maskImage: RichBackgroundImage? = null,
     val padding: RichSpacing = RichSpacing.Zero,
     val margin: RichSpacing = RichSpacing.Zero,
     val border: RichBorder = RichBorder.None,
@@ -223,6 +230,8 @@ internal data class ComputedStyle(
     val gridColumns: RichGridColumns = RichGridColumns.Auto,
     val order: Int = 0,
     val alignContent: RichAlignContent = RichAlignContent.Start,
+    val gridColumnStart: Int? = null,
+    val gridRowStart: Int? = null,
     val gridColumnSpan: Int = 1,
     val gridRowSpan: Int = 1,
     val zIndex: Float = 0f,
@@ -409,9 +418,16 @@ internal data class RichAnimationStyle(
     val delayMs: Int = 0,
     val iterationCount: Float = 1f,
     val fillModeForwards: Boolean = false,
+    val fillMode: RichAnimationFillMode = RichAnimationFillMode.None,
+    val direction: RichAnimationDirection = RichAnimationDirection.Normal,
+    val easing: RichAnimationEasing = RichAnimationEasing.Ease,
     val hasLayoutProperty: Boolean = false,
     val hasOpacityOrTransform: Boolean = false,
     val nativeAnimation: RichNativeAnimation? = null,
+    val staticOpacity: Float? = null,
+    val declaredAnimationCount: Int = 0,
+    val multiKeyframeCount: Int = 0,
+    val unsupportedPropertyCount: Int = 0,
 ) {
     val isDeclared: Boolean
         get() = names.isNotEmpty()
@@ -434,7 +450,73 @@ internal data class RichNativeAnimation(
     val toTransform: RichTransform = RichTransform.None,
     val durationMs: Int,
     val delayMs: Int,
+    val totalDurationMs: Int = durationMs,
+    val iterationCount: Int = 1,
+    val fillMode: RichAnimationFillMode = RichAnimationFillMode.Forwards,
+    val direction: RichAnimationDirection = RichAnimationDirection.Normal,
+    val easing: RichAnimationEasing = RichAnimationEasing.Ease,
+    val stops: List<RichNativeAnimationStop> = listOf(
+        RichNativeAnimationStop(0f, fromOpacity, fromTransform),
+        RichNativeAnimationStop(1f, toOpacity, toTransform),
+    ),
+) {
+    val signature: String
+        get() = listOf(
+            durationMs,
+            delayMs,
+            totalDurationMs,
+            iterationCount,
+            fillMode.name,
+            direction.name,
+            easing.toSignature(),
+            stops.joinToString(";") { stop ->
+                "${stop.progress}:${stop.opacity}:${stop.transform.translateX.value}:${stop.transform.translateY.value}:${stop.transform.scaleX}:${stop.transform.scaleY}:${stop.transform.rotateZ}"
+            },
+        ).joinToString("|")
+}
+
+internal data class RichNativeAnimationStop(
+    val progress: Float,
+    val opacity: Float? = null,
+    val transform: RichTransform = RichTransform.None,
 )
+
+internal enum class RichAnimationFillMode {
+    None,
+    Forwards,
+    Backwards,
+    Both,
+}
+
+internal enum class RichAnimationDirection {
+    Normal,
+    Reverse,
+}
+
+internal sealed interface RichAnimationEasing {
+    data object Linear : RichAnimationEasing
+    data object Ease : RichAnimationEasing
+    data object EaseIn : RichAnimationEasing
+    data object EaseOut : RichAnimationEasing
+    data object EaseInOut : RichAnimationEasing
+    data class CubicBezier(
+        val x1: Float,
+        val y1: Float,
+        val x2: Float,
+        val y2: Float,
+    ) : RichAnimationEasing
+}
+
+private fun RichAnimationEasing.toSignature(): String {
+    return when (this) {
+        RichAnimationEasing.Linear -> "linear"
+        RichAnimationEasing.Ease -> "ease"
+        RichAnimationEasing.EaseIn -> "ease-in"
+        RichAnimationEasing.EaseOut -> "ease-out"
+        RichAnimationEasing.EaseInOut -> "ease-in-out"
+        is RichAnimationEasing.CubicBezier -> "cubic-bezier($x1,$y1,$x2,$y2)"
+    }
+}
 
 internal data class RichTransitionStyle(
     val properties: List<String> = emptyList(),
@@ -464,6 +546,29 @@ internal data class RichCssFilter(
     companion object {
         val None = RichCssFilter()
     }
+}
+
+internal sealed interface RichClipPath {
+    data class Inset(
+        val top: RichSize = RichSize.DpSize(0.dp),
+        val right: RichSize = RichSize.DpSize(0.dp),
+        val bottom: RichSize = RichSize.DpSize(0.dp),
+        val left: RichSize = RichSize.DpSize(0.dp),
+        val radius: Dp = 0.dp,
+    ) : RichClipPath
+
+    data class Circle(
+        val radius: RichSize = RichSize.Fraction(0.5f),
+        val centerX: RichSize = RichSize.Fraction(0.5f),
+        val centerY: RichSize = RichSize.Fraction(0.5f),
+    ) : RichClipPath
+
+    data class Ellipse(
+        val radiusX: RichSize = RichSize.Fraction(0.5f),
+        val radiusY: RichSize = RichSize.Fraction(0.5f),
+        val centerX: RichSize = RichSize.Fraction(0.5f),
+        val centerY: RichSize = RichSize.Fraction(0.5f),
+    ) : RichClipPath
 }
 
 internal enum class RichBackgroundRepeat {
@@ -661,6 +766,16 @@ internal sealed interface RichBackgroundImage {
         val stops: List<RichColorStop>,
     ) : RichBackgroundImage
 }
+
+internal data class RichBackgroundLayer(
+    val image: RichBackgroundImage? = null,
+    val url: String? = null,
+    val size: RichBackgroundSize = RichBackgroundSize.Auto,
+    val position: RichBackgroundPosition = RichBackgroundPosition.Center,
+    val repeat: RichBackgroundRepeat = RichBackgroundRepeat.Repeat,
+    val origin: RichBackgroundBox = RichBackgroundBox.PaddingBox,
+    val clip: RichBackgroundBox = RichBackgroundBox.BorderBox,
+)
 
 internal data class RichSvgModel(
     val width: Dp,

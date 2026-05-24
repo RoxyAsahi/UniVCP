@@ -29,6 +29,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -65,6 +66,10 @@ import me.rerere.rikkahub.data.files.FilesManager
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.service.ChatError
 import me.rerere.rikkahub.ui.components.ai.ChatInput
+import me.rerere.rikkahub.ui.components.message.ChatRenderCell
+import me.rerere.rikkahub.ui.components.message.buildChatRenderCells
+import me.rerere.rikkahub.ui.components.message.firstCellIndexForMessageIndex
+import me.rerere.rikkahub.ui.components.message.firstCellIndexForNodeId
 import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.ui.context.LocalToaster
 import me.rerere.rikkahub.ui.context.Navigator
@@ -96,6 +101,14 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
     val currentChatModel by vm.currentChatModel.collectAsStateWithLifecycle()
     val enableWebSearch by vm.enableWebSearch.collectAsStateWithLifecycle()
     val errors by vm.errors.collectAsStateWithLifecycle()
+    val loading = loadingJob != null
+    val chatRenderCells = remember(conversation, setting, loading) {
+        buildChatRenderCells(
+            conversation = conversation,
+            settings = setting,
+            loading = loading,
+        )
+    }
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val softwareKeyboardController = LocalSoftwareKeyboardController.current
@@ -161,12 +174,16 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
         }
     }
 
-    LaunchedEffect(nodeId, conversation.messageNodes.size) {
+    LaunchedEffect(nodeId, chatRenderCells, setting.displaySetting.enableChatCellPipeline) {
         if (nodeId != null && conversation.messageNodes.isNotEmpty() && !vm.chatListInitialized) {
-            val index = conversation.messageNodes.indexOfFirst { it.id == nodeId }
-            if (index >= 0) {
-                chatListState.scrollToItem(index)
+            val targetIndex = if (setting.displaySetting.enableChatCellPipeline) {
+                chatRenderCells.firstCellIndexForNodeId(nodeId)
+            } else {
+                conversation.messageNodes.indexOfFirst { it.id == nodeId }
+                    .takeIf { it >= 0 }
+                    ?: 0
             }
+            chatListState.scrollToItem(targetIndex)
             vm.chatListInitialized = true
         }
     }
@@ -186,6 +203,8 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
                 ChatPageContent(
                     inputState = inputState,
                     loadingJob = loadingJob,
+                    loading = loading,
+                    chatRenderCells = chatRenderCells,
                     processingStatus = processingStatus,
                     setting = setting,
                     conversation = conversation,
@@ -218,6 +237,8 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
                 ChatPageContent(
                     inputState = inputState,
                     loadingJob = loadingJob,
+                    loading = loading,
+                    chatRenderCells = chatRenderCells,
                     processingStatus = processingStatus,
                     setting = setting,
                     conversation = conversation,
@@ -244,6 +265,8 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
 private fun ChatPageContent(
     inputState: ChatInputState,
     loadingJob: Job?,
+    loading: Boolean,
+    chatRenderCells: List<ChatRenderCell>,
     processingStatus: String? = null,
     setting: Settings,
     bigScreen: Boolean,
@@ -369,8 +392,9 @@ private fun ChatPageContent(
             ChatList(
                 innerPadding = innerPadding,
                 conversation = conversation,
+                chatRenderCells = chatRenderCells,
                 state = chatListState,
-                loading = loadingJob != null,
+                loading = loading,
                 processingStatus = processingStatus,
                 previewMode = previewMode,
                 settings = setting,
@@ -424,7 +448,12 @@ private fun ChatPageContent(
                 onJumpToMessage = { index ->
                     previewMode = false
                     scope.launch {
-                        chatListState.animateScrollToItem(index)
+                        val targetIndex = if (setting.displaySetting.enableChatCellPipeline) {
+                            chatRenderCells.firstCellIndexForMessageIndex(index)
+                        } else {
+                            index
+                        }
+                        chatListState.animateScrollToItem(targetIndex)
                     }
                 },
                 onToolApproval = { toolCallId, approved, reason ->

@@ -1,24 +1,26 @@
 # UniVCP 富 HTML 聊天渲染开发现状
 
-记录日期：2026-05-23，已同步到最近一轮 Pixel 8 真机调试和质量门禁后的状态。
+记录日期：2026-05-25，已同步到 Compose Cell Feed Pipeline v3.1 与 WebView 静态快照兜底 v1.1 hardening 后的状态。
 
 本文记录当前聊天消息富 HTML 渲染链路的真实状态、能力边界和后续方向。核心目标是不修改 UniVCP/VCPChat 的 prompt 和历史数据格式，同时坚持聊天列表内 Compose 原生渲染优先，避免把安全静态内容退回成 live WebView。
 
-一句话现状：当前架构已经从“能不能渲染”推进到“安全静态 HTML 默认原生渲染，并持续校准浏览器观感”的阶段。近期重点修复了同步编译卡顿、缓存键、root 检测重复、历史消息首帧空白、以及 `rem/font/line-height/grid/button` 等导致气泡高度和字号不保真的问题。
+一句话现状：当前架构已经从“能不能渲染”推进到“大型 IM/feed 式 cell pipeline + 安全静态 HTML 默认原生渲染 + WebView 静态快照兜底复杂保真缺口”的阶段。近期重点修复了同步编译卡顿、缓存键、root 检测重复、历史消息首帧空白、`rem/font/line-height/grid/button` 等保真问题，完成聊天列表 cell 化，并新增了不常驻 live WebView 的 snapshot route。
 
-当前开发阶段：IR 编译器与 Compose renderer 已落地，架构硬化与高保真校准 v1 已完成一轮，静态 CSS 覆盖 Phase 1/2 v2 已进入维护补洞，Phase 3 布局增强 v3 已迁移到官方 Compose FlexBox，且 CSS Flexbox 语义映射已进入补全阶段；Phase 4 表格高保真 v2/v3 已开始落地。当前主线进入“fidelity-driven quality gate”：用真实 VCP 高频样例、visual hints 和 JVM model tests 约束后续开发，而不是回到 live WebView。
+当前开发阶段：IR 编译器与 Compose renderer 已落地，架构硬化与高保真校准 v1 已完成一轮，静态 CSS 覆盖 Phase 1/2 v2 已进入维护补洞，Phase 3 布局增强 v3 已迁移到官方 Compose FlexBox，Phase 4 表格高保真 v2/v3 已开始落地；WebView Snapshot v1.1 已作为复杂安全静态内容的兜底路径接入并完成首轮性能硬化；Compose Cell Feed Pipeline v3.1 已把聊天列表切换到稳定 cell、viewport-aware admission、near-viewport prewarm、prepared draw cache，并补上已缓存 prewarm 消噪、编译等待态稳定高度占位、首 native 呈现 recent-scroll idle gate、Lazy measure 失败非 0 高度兜底和 render model key 修正。当前主线进入“fidelity-driven quality gate + device benchmark closure”：用真实 VCP 高频样例、visual hints、snapshot policy、JVM/Android tests 和 Macrobenchmark 约束后续开发，而不是回到 live WebView。
 
 ## 当前方向
 
-当前路线是“切块 + 分类 + 原生编译渲染 + 动态预览兜底”：
+当前路线是“切块 + 分类 + 原生编译渲染 + 静态快照兜底 + 动态预览兜底”：
 
 - 普通文本和 Markdown 继续走 Compose `MarkdownBlock`。
 - VCP 富 HTML 先由 `MessageTextBlocks` 切成独立块，再由 `RichHtmlClassification` 分类。
+- 聊天列表不再以“一个消息一个巨大 Lazy item”为主路径，而是由 `ChatRenderCell` flatten 成 `Avatar/UserBubble/Markdown/RichHtml/Protocol/Thinking/Tool/Attachment/Translation/Annotation/Actions/BottomSpacer` 等稳定 cell，LazyColumn 使用 `stableKey + contentType` 回收。
 - 静态/交互型富 HTML 进入 Compose 原生管线：`RichHtmlCompiler -> RichHtmlRenderModel -> RichHtmlRenderer`。
+- 复杂但安全的静态 HTML 在原生路径明显不适合时进入 WebView 离屏 snapshot，聊天列表显示静态 bitmap，点击打开动态预览。
 - 真动态 HTML 不在聊天列表常驻执行，显示稳定预览，并通过“打开动态预览”进入 `WebViewPage`。
 - streaming 中未闭合的富 HTML root 只显示固定占位，等闭合后再编译完整块，避免半截 HTML 反复解析和测高。
 
-这个方向保留 UniVCP 富内容能力，但把聊天列表里的 WebView 数量压到最低；WebView 现在是动态/全屏/调试兜底，不是安全静态 HTML 的默认渲染路径。
+这个方向保留 UniVCP 富内容能力，但把聊天列表里的 WebView 数量压到最低；WebView 现在是离屏静态快照、动态/全屏/调试兜底，不是安全静态 HTML 的默认 live 渲染路径。
 
 ## 渲染架构
 
@@ -28,21 +30,28 @@
 assistant text
   -> MessageTextBlocks
   -> RichHtmlClassification / RichHtmlSafety
-  -> RichHtmlCompiler.compile(html)
-  -> RichHtmlRenderModel
-  -> RichHtmlRenderer
-  -> Compose UI
+  -> RichHtmlSnapshotPolicy
+  -> RichHtmlCompiler.compile(html) -> RichHtmlRenderModel -> RichHtmlRenderer -> Compose UI
+  -> BubbleSnapshotRenderer -> Bitmap snapshot -> Compose Image
+  -> DynamicRichHtmlPreviewBlock -> WebViewPage
 ```
 
 关键原则：
 
 - `RichHtmlBubbleBlock` 只保留兼容入口，负责按当前气泡宽度异步获取 `RichHtmlRenderModel` 并调用 renderer。
 - `RichHtmlCompiler` 在专属 bounded dispatcher 上完成 Jsoup 解析、CSS 级联、选择器匹配、样式继承、文本拍平、block 建模，当前并发限制为 `Dispatchers.Default.limitedParallelism(2)`。
+- `RichHtmlRenderScheduler` 现在接收可见/近视口 cell range、滚动方向、fast-scroll 判定、cell risk 和首渲染状态；视口内允许 native 首渲染，近视口只做 compile prewarm，远处保持轻量摘要/占位。
 - `RichHtmlRenderer` 只消费纯 Kotlin render model，不读取 Jsoup `Element`，不解析 style 字符串，不使用 `outerHtml()` 作为渲染 key。
 - 行内文本在编译阶段合并为 `AnnotatedString`，避免把 `<span>/<b>/<i>` 逐个映射成多个 `Text`。
 - 编译结果由 LRU cache 缓存，历史消息回到视口时优先用 `getCached()` 复用模型，避免再次显示“正在准备富内容...”。
+- Snapshot 结果由 app 侧内存 LRU 缓存，key 绑定 HTML digest、宽度、density、fontScale、主题和 renderer version；首版不做磁盘持久化，v1.1 增加 in-flight join 观测和近视口启动。
 - Compose 原生渲染的目标是“安全静态 VCP 卡片高保真近似”，不是完整浏览器引擎；复杂 JS、运行时动画和完整 CSS layout 继续由动态预览/WebView 兜底。
 - 富 HTML async compile 有超时、协程取消、in-flight 去重和成功后写缓存；取消或失败的编译不会污染模型缓存。
+- async compile 的 in-flight 任务带 waiters 计数；远离视口或离开 composition 后最后一个 waiter 释放会取消未完成 compile，避免快滚时后台继续堆积无用 Jsoup/CSS 编译。
+- SVG path、Paint、dash effect、gradient shader 等 prepared draw command 已从 renderer draw 热路径前移到 `RichSvgPreparedDrawCache`；compiler 产出 SVG model 后会安全 warm cache，Compose 绘制阶段只消费 prepared command。
+- Snapshot 渲染使用 `bubble-renderer` 离屏 WebView 单队列和进程内保留 session，shell 预热后复用；禁外部导航和网络加载，超时/尺寸/像素预算失败后回退动态预览。
+- Cell pipeline v3.1 中，near-viewport prewarm 会先查 persistent compile cache；已缓存模型不再重新启动预热 job，也不会占用 `MaxPrewarmTargets` 窗口。native compile 等待态和轻量态共享 `digest + width + fontScale + contentType` 高度缓存/估算高度，减少快滚和首帧准备期间的跳高。已被 admission 接纳的首渲染在短暂 fast-scroll 状态切换中保持 `already-admitted`，避免同一 digest 在可见区内反复取消/重启 compile。compile 完成不再立刻切到 native：未首渲染过的富块必须等 Lazy scroll 和 recent-scroll 窗口都结束后才呈现 native，防止 `layout state is not idle before measure starts` 这类 Lazy placement/remeasure re-entry。`rememberRichHtmlRenderModel` 的 state key 已纳入 `html`，避免同 contentType cell 复用时短暂展示上一富块 model；原生测量异常兜底使用缓存/估算高度，不再向 LazyList 返回 0 高度。
+- `baseline` profileable 变体显式启用 render seed 导入，避免 Macrobenchmark/Baseline Profile 只测到空聊天页；release 默认仍关闭 seed，debug 仍由 `local.properties` 控制。
 
 ## 渲染路径职责边界
 
@@ -50,7 +59,8 @@ assistant text
 
 - 普通 Markdown：`MarkdownBlock` / `MarkdownNew`，负责 Markdown、普通 HTML 兼容片段和既有 LaTeX 路径。
 - VCP 富 HTML：`MessageTextBlocks -> RichHtmlClassification -> RichHtmlCompiler -> RichHtmlRenderer`，这是聊天列表富气泡的默认路径。
-- WebView：只用于动态预览、全屏检查、debug renderer server，以及未来可能的静态快照兜底；不作为安全静态 HTML 的聊天列表默认渲染器。
+- WebView snapshot：只接管复杂但安全的静态保真缺口，例如 `backdrop-filter`、mask、复杂 clip-path/mix-blend-mode、复杂 SVG 或原生非致命失败；输出静态图片，不做按钮 hit-test。
+- WebView 动态预览：用于真动态内容、全屏检查和 debug renderer server；不作为安全静态 HTML 的聊天列表默认 live 渲染器。
 
 `SimpleHtmlBlock` 和 `MarkdownNew` 仍保留兼容职责，但不再承载新的 VCP 富 HTML 能力。后续新增表格、公式、CSS 样式、按钮等富气泡能力，优先进入 `RichHtmlCompiler/RichHtmlRenderer`。
 
@@ -61,9 +71,15 @@ assistant text
 - `app/src/main/java/me/rerere/rikkahub/ui/components/message/MessageTextBlocks.kt`
   - 负责把 assistant 文本按原始顺序切成 Markdown、VCP HTML、协议日志块。
 - `app/src/main/java/me/rerere/rikkahub/ui/components/message/ChatMessage.kt`
-  - 负责按块选择渲染器。
+  - 保留旧聚合渲染入口，作为 `enableChatCellPipeline=false` 的 runtime fallback 和部分预览场景兼容。
+- `app/src/main/java/me/rerere/rikkahub/ui/components/message/ChatRenderCell.kt`
+  - 聊天列表 cell model 与 builder，负责从 conversation flatten 出稳定 key/contentType/messageId/blockIndex/height class/risk。
+- `app/src/main/java/me/rerere/rikkahub/ui/components/message/ChatRenderCellRenderer.kt`
+  - cell renderer，按 messageId 聚合业务行为，按连续 assistant cells 维持分组气泡背景。
 - `app/src/main/java/me/rerere/rikkahub/ui/components/message/RichHtmlClassification.kt`
   - 负责判断 `NativeStatic`、`InteractiveStatic`、`ComplexDynamic`。
+- `app/src/main/java/me/rerere/rikkahub/ui/components/message/RichHtmlSnapshotPolicy.kt`
+  - 负责按 classification、unsupported reason、visual hints 和 native failure 决定 native/snapshot/dynamic preview。
 - `app/src/main/java/me/rerere/rikkahub/ui/components/message/RichHtmlSafety.kt`
   - 负责白名单、安全 URL、节点/深度/表格/SVG 预算。
 - `app/src/main/java/me/rerere/rikkahub/ui/components/message/RichHtmlRootDetector.kt`
@@ -71,7 +87,13 @@ assistant text
 - `app/src/main/java/me/rerere/rikkahub/ui/components/message/StreamRenderArbiter.kt`
   - 负责流式文本发布节流和富 HTML 闭合边界判断。
 - `app/src/main/java/me/rerere/rikkahub/ui/components/richtext/RichHtmlBubbleBlock.kt`
-  - Compose 兼容入口，异步请求 render model。
+  - Compose 兼容入口，异步请求 render model，并在 native fallback 前路由 snapshot。
+- `app/src/main/java/me/rerere/rikkahub/ui/components/richtext/RichHtmlRenderScheduler.kt`
+  - viewport-aware rich render scheduler、height cache、circuit breaker、near-viewport prewarm 队列和 native 首渲染 admission。
+- `app/src/main/java/me/rerere/rikkahub/ui/components/richtext/RichHtmlSnapshotBlock.kt`
+  - 聊天列表静态快照 UI：占位、缓存命中、离屏渲染、图片展示和点击打开动态预览。
+- `app/src/main/java/me/rerere/rikkahub/ui/components/richtext/RichHtmlSnapshotCache.kt`
+  - Snapshot 内存 LRU 和 in-flight 去重。
 - `app/src/main/java/me/rerere/rikkahub/ui/components/richtext/RichHtmlCompiler.kt`
   - 原生富 HTML 编译器。
 - `app/src/main/java/me/rerere/rikkahub/ui/components/richtext/RichHtmlRenderModel.kt`
@@ -80,8 +102,12 @@ assistant text
   - Compose renderer，只消费 render IR。
 - `app/src/main/java/me/rerere/rikkahub/ui/components/richtext/RichSvgCompiler.kt`
   - SVG 静态子集编译器。
+- `app/src/main/java/me/rerere/rikkahub/ui/components/richtext/RichSvgPreparedDrawCache.kt`
+  - SVG prepared draw cache，缓存 path/paint/shader/dash effect 等绘制资源。
 - `bubble-renderer/src/main/java/com/univcp/bubble/BubbleWebView.kt`
   - 保留给动态预览、全屏预览和少量 WebView 场景。
+- `bubble-renderer/src/main/java/com/univcp/bubble/BubbleSnapshotRenderer.kt`
+  - 离屏 WebView 快照渲染器，复用 renderer shell、DOMPurify、主题变量和测高逻辑。
 
 ## 已支持的切块形态
 
@@ -124,6 +150,10 @@ assistant text
 - 缓存层统一：Markdown parse/html/document、MessageTextBlocks、RichHtmlSafety、RichHtmlClassification、RichHtmlCompiler 等内存 LRU 都使用同一个 cache helper，并暴露 hit/miss/eviction 统计。
 - 首帧复用：`RichHtmlBubbleBlock` 初始 state 会先查 `RichHtmlCompiler.getCached()`，历史气泡回到视口时能直接复用模型。
 - 编译并发收敛：async compile 走 bounded dispatcher + in-flight dedupe，避免切换聊天记录时同一批历史气泡重复启动大量 Jsoup/CSS 编译。
+- Snapshot 兜底首片：`RichHtmlSnapshotPolicy` 默认启用，`NativeStatic + WebViewFallback`、安全 unsupported、关键 visual hints 和原生非致命渲染失败会优先尝试 WebView 离屏快照；`InteractiveStatic` 继续原生优先以保留按钮输入，`ComplexDynamic` 继续动态预览。
+- Snapshot 安全边界：`BubbleSnapshotRenderer` 复用 `bubble-renderer` shell 和 DOMPurify，WebView 设置禁外部导航、禁网络加载、禁 file URL 跨域访问，单队列串行渲染并限制 timeout、最大高度和像素预算。
+- Snapshot 缓存：`RichHtmlSnapshotCache` 首版只做内存 LRU，默认 24 entries 或 48MB，key 绑定 HTML digest、宽度、density、fontScale、主题 hash 和 renderer version，且同 key in-flight 渲染会去重。
+- Snapshot v1.1 hardening：`BubbleSnapshotRenderer` 改为保留离屏 WebView session，`RichHtmlSnapshotBlock` 只给可见/近视口条目启动 snapshot；telemetry 记录 cache hit/miss、in-flight join、queue wait、render time、session reuse 和高度 delta warning。
 
 ## 最近已完成的保真校准
 
@@ -144,8 +174,9 @@ assistant text
 - Phase 3 v2 首片：`grid-column: 1 / 3` 这类简单线号会解析为 span，`grid-row: span N` 会转为最小高度近似。
 - Phase 4 v2 首片：支持 `caption-side: top/bottom`，collapse 表格边框减半近似以减少双线感，基础 rowspan 会参与单元格占位与跨行高度约束。
 - Phase 3 v3 首片：非 wrap Row flex 会在父宽度已知且子项有 `flex-basis/width` 时按 `flex-shrink * basis` 做静态压缩；wrapping FlowRow 的 `align-content: stretch` 会给子项稳定最小高度，减少挤压塌陷。
-- Phase 3 v3 FlexBox spike：显式接入 `androidx.compose.foundation:foundation-layout`，`display:flex` 迁移到官方 Compose `FlexBox`，直接映射 direction/wrap/justify-content/align-items/align-content/gap/order/grow/shrink/basis/align-self；`flex` shorthand 已支持常见 grow/shrink/basis 解析，子项 width/max-width/basis 会按 FlexBox 主轴约束策略进入测量；grid 仍保留现有 FlowRow/多列近似。
+- Phase 3 v3 FlexBox spike：显式接入 `androidx.compose.foundation:foundation-layout`，`display:flex` 迁移到官方 Compose `FlexBox`，直接映射 direction/wrap/justify-content/align-items/align-content/gap/order/grow/shrink/basis/align-self；`flex` shorthand 已支持常见 grow/shrink/basis 解析，子项 width/max-width/basis 会按 FlexBox 主轴约束策略进入测量。
 - Phase 3 v3 FlexBox 语义补全：`row-reverse/column-reverse`、`wrap-reverse`、`flex-flow`、双值 `gap`、`row-gap/column-gap`、`justify-content:space-evenly`、`align-items/align-self:baseline` 已映射到官方 Compose FlexBox；`align-self:auto` 保持默认自动行为；`align-content:space-evenly` 因当前 Compose FlexBox API 无对应值，稳定降级到 `SpaceAround`。
+- Phase 3 v4 Grid 首片：`display:grid` 从 `FlowRow` 近似迁移到项目内非 Lazy `Layout`，会全量测量子项，按列数/gap 分配轨道，支持 auto placement、`grid-column/grid-row` 的显式起始线、`span N`、二维 span 占位和 row span 自然高度回推。暂不引入 GridPad；GridPad 需要有限宽高，更适合预定义棋盘，不完全匹配聊天气泡的内容自然撑高语义。
 - CSS painting v3：`background-clip:text` + gradient 背景不再只是安全降级，文本块会用 Compose `SpanStyle(brush=...)` 渲染渐变文字；URL 背景裁文字、复杂 text fill 仍暂不实现。
 - Phase 4 v3 首片：`thead` 多行、`tfoot` 和 body section 类型会进入 `SpannedDataTable`；header/footer 行有默认背景差异，rowspan 高度不足时会把高度缺口分摊到跨越的多行。
 - SVG v2.5 首片：SVG paint 扩展到 `radialGradient` shader；元素/stop 的 `opacity/fill-opacity/stroke-opacity` 会进入颜色 alpha；`g` 上的 fill/stroke/stroke-width 可被子图元继承；stroke linecap/linejoin/dasharray、text-anchor 和基础 font-weight 会进入 renderer。
@@ -155,8 +186,8 @@ assistant text
 - CSS color v3.1：颜色解析新增 `hsl()/hsla()`，覆盖 AI 生成卡片中常见的 hue/saturation/lightness 写法；hex/rgb/rgba/named colors 仍保持原有支持。
 - Color Fidelity v4 首片：颜色解析抽出 `RichColorUtils`，新增 `RichCssColor` 语义，区分未声明、`transparent`、`currentColor` 和无法解析的颜色函数；CSS color parser 支持完整 named colors、modern `rgb(... / alpha)`、百分比 RGB、modern `hsl(... / alpha)`；renderer 新增 `RichRenderColorDefaults` 和 `RichColorResolver`，由 MaterialTheme 补缺省色，并用 AndroidX `ColorUtils.calculateContrast()` 对低对比纯色文本做最小可读性修正。
 - Animation Static v1：CSS `animation/transition/@keyframes` 不再作为聊天列表原生渲染的一票否决条件；compiler 会记录 `CssAnimation/CssTransition/CssKeyframes/CssInfiniteAnimation/CssLayoutAnimation/CssInteractivePseudoClass/AnimationDependentVisibility` visual hints，并把安全动画默认静态化显示。`:hover/:active/:focus` 规则只记录 hint，不作为普通静态样式套到元素上；`opacity:0 + animation-fill-mode:forwards` 的有限 opacity/transform 动画会被保护为可见静态态，避免内容空白。
-- Native Animated v1 首片：有限 `@keyframes` 入场动画如果只包含 `opacity` 和 `transform: translate/scale/rotate`，且 `animation-fill-mode: forwards/both`、非 infinite、无布局属性、无中间关键帧、duration <= 1200ms、delay <= 1500ms，会被编译成 `RichNativeAnimation` 并由 Compose 播放一次；无限 pulse、hover transition、布局动画和复杂多段 keyframes 仍静态化并保留 hint。
-- Animation Budget v2 首片：`RichHtmlRenderModel` 新增内部 `animationStats`，统计 animated/native/staticized/infinite/layout/transition/dependent visibility/budget exceeded；每个富 HTML 气泡默认最多保留 3 个原生播放动画，超出部分静态化并记录 `AnimationBudgetExceeded` hint。fidelity report 会输出策略和计数，不包含正文。
+- Animation v3：有限 `@keyframes` 入场动画如果只包含 `opacity` 和 `transform: translate/scale/rotate`，且非 infinite、无布局属性、duration <= 1200ms、delay <= 1500ms，会被编译成 `RichNativeAnimation` 并由 Compose 播放一次；支持 `animation-timing-function` 的 `linear/ease/ease-in/ease-out/ease-in-out/cubic-bezier(...)`、`animation-direction: normal/reverse`、`animation-fill-mode: none/forwards/backwards/both`、有限整数 `animation-iteration-count` 和多 keyframe opacity/transform stops。多个 animation 只取第一个安全动画原生播放，其余进入 stats/hint。
+- Animation Budget v3：`RichHtmlRenderModel` 的内部 `animationStats` 统计 animated/native/staticized/infinite/layout/transition/dependent visibility/budget exceeded/play-once suppressed/snapshot candidate/multi-keyframe/unsupported property；每个富 HTML 气泡默认最多保留 3 个原生播放动画，超出部分静态化并记录 `AnimationBudgetExceeded` hint。layout/filter/color/尺寸类动画、复杂 dependent visibility 和超预算动画会进入 snapshot candidate；fidelity report 会输出策略和计数，不包含正文。
 - CSS 驱动按钮：`RichButtonBlock` 不再使用 Material Button 默认字号、内边距和最小高度覆盖作者 CSS，而是通过 `StyledContainer + Text + clickable` 渲染。
 - 盒模型边界：renderer 不再给 root 容器偷偷加默认圆角或默认间距；margin 作为外层 spacing 应用，padding 只来自 UA/作者 CSS。
 - 空视觉装饰盒保留：空的 `div/span` 如果带有 position、尺寸、背景、边框、阴影、透明度、filter 或 transform，会保留为 `RichContainerBlock`；这类节点常用于背景光斑、badge、圆点、分隔装饰，不再因为没有正文而被拍平成空文本丢失。
@@ -190,14 +221,14 @@ assistant text
 - 尺寸：`width`、`height`、`min-width`、`max-width`、`min-height`、`max-height`，支持 px/rem/em/dp、百分比和嵌套长度函数的静态换算。
 - 布局：`display:block/inline/inline-block/flex/grid/none`。
 - Flex：`flex-direction`、`row-reverse/column-reverse`、`flex-wrap/wrap-reverse`、`flex-flow`、`align-items`、`align-self`、`align-content`、`justify-content`、双轴 `gap/row-gap/column-gap`、`order`、`flex-grow/shrink/basis` 和常见 `flex` shorthand；renderer 已接入官方 Compose `FlexBox`，普通流 children 的 order/grow/shrink/basis/align-self 由 FlexBox 参与测量，子项 width/max-width 约束会保留。
-- Grid：固定列、`fr`、`repeat(n, ...)`、`repeat(auto-fit,minmax(...))` 的 FlowRow/多列近似；子项宽度以父容器 `grid-template-columns` 为准，支持 `grid-column: span N` 和简单 `grid-column: start / end` 的宽度倍数近似，`grid-row: span N` 会提升最小高度。
+- Grid：固定列、`fr`、`repeat(n, ...)`、`repeat(auto-fit,minmax(...))` 的非 Lazy Compose `Layout`；子项宽度以父容器 `grid-template-columns` 为准，支持 `grid-column/grid-row: span N`、`start / end`、`start / span N` 和 longhand `grid-column-start/end`、`grid-row-start/end` 的安全静态子集。renderer 会自动找空格子并回推 row span 的自然行高。
 - 定位：`relative/absolute/fixed/sticky` 编译进 model；renderer 将 absolute/fixed/sticky 子节点叠到同一容器 overlay 层，按 left/top/right/bottom + transform 做安全静态近似。
 - 变换：`translate`、`scale`、`rotate`、`skew` 编译进 model；renderer 对 translate/scale/rotate 做静态近似。
 - Overflow：`hidden` 裁切，`scroll/auto` 降级为滚动容器。
 - 阴影：多层 `box-shadow` 编译进 model；renderer 按 offset、blur、spread、color 绘制非 inset 静态近似。
 - 透明度：`opacity`。
 - CSS filter：`filter/backdrop-filter` 支持解析 `blur()/brightness()/opacity()/grayscale()` 到内部 model；renderer 当前将 `filter: opacity(...)` 合并到现有 alpha，并用低成本颜色矩阵近似渲染 `brightness()/grayscale()`；`blur()` 和 backdrop blur 继续作为结构化静态缺口由 visual hint 统计。
-- CSS animation/transition：`animation`、`animation-*`、`transition`、`transition-*` 和 `@keyframes` 会进入内部动画摘要；有限、非 infinite、只操作 `opacity` 与 `transform: translate/scale/rotate`、带 forwards/both 的简单 from/to 入场动画会用 Compose 原生动画播放一次并停在最终态；transition 状态机、hover/focus 动画、中间关键帧、布局属性动画、filter/color 动画和无限动画不播放，只静态化并记录复杂度 hint。
+- CSS animation/transition：`animation`、`animation-*`、`transition`、`transition-*` 和 `@keyframes` 会进入内部动画摘要；有限、非 infinite、只操作 `opacity` 与 `transform: translate/scale/rotate` 的入场动画会用 Compose 原生动画播放一次并停在确定静态态；支持多 keyframe stops、reverse、fill-mode、有限 iteration 和常见 easing。transition 状态机、hover/focus 动画、布局属性动画、filter/color 动画和无限动画不播放，只静态化并记录复杂度 hint；复杂动画会进入 snapshot candidate。
 - 颜色默认与对比度：未声明文本色由 renderer 从当前 `MaterialTheme.colorScheme` 补齐；作者明确声明的颜色、背景、渐变、边框和阴影默认不重写；仅当纯色文本和有效纯色背景对比度明显不足时，renderer 会向黑/白中对比更高的一侧做最小混合修正。渐变/图片背景不做误判强修正。
 - 列表：`list-style-type`、`list-style-position` 和安全 `list-style-image` 会进入 model；`ol start/reversed/type` 会影响 marker；安全图片 marker 会以小图近似渲染，失败回退文本 marker；嵌套列表按深度增加缩进。
 - 伪元素：`::before/::after` 的静态纯文本 `content`，支持字符串拼接、多个 `attr(...)`、`\00xx` unicode escape，以及列表内简单 `counter()/counters()` 静态编号。
@@ -214,7 +245,7 @@ assistant text
 - `background-position` 已支持常见两值/四值偏移，并会基于 `background-origin` 的近似绘制区域定位，但偏移仍基于静态 dp，不实现浏览器对 containing block 的完整重排算法。
 - `background-clip:text` 已支持 gradient 文字 Brush；但 URL 背景裁文字、复杂 `-webkit-text-fill-color` 组合和多层背景裁文字仍降级。
 - `filter/backdrop-filter` 已有安全函数解析，`filter: opacity()/brightness()/grayscale()` 已有渲染闭环；`blur()` 与 backdrop blur 暂不做实时像素滤镜，继续作为结构化 visual hint 排期。
-- CSS animation 当前是 Native Animated v1 + Animation Budget v2 首片：简单 finite opacity/transform from/to 入场动画已可原生播放一次，且每气泡有原生动画数量预算；滚动中禁播、离屏禁播、snapshot fallback 策略和更完整 easing/keyframe 插值仍是后续阶段。
+- CSS animation 当前是 Animation v3：finite opacity/transform 动画已支持常见 easing、reverse、fill-mode、有限 iteration 和多 keyframe stops，并由 Compose 原生播放一次；每气泡有原生动画数量预算，超预算或 layout/filter/color/复杂 visibility 动画会进入 snapshot candidate。仍不实现 CSS transition 状态机、hover/focus runtime、无限动画 runtime 和浏览器完整 animation composition。
 - `currentColor` 已用于普通文本色继承、背景色和边框/阴影的静态解析；但渐变 stop、SVG 外的复杂 paint server 和 `color-mix()/lab()/lch()/oklch()` 仍不做完整颜色空间计算，当前只记录 unsupported color hint。
 - 对比度兜底只处理纯色背景下的文本色；不会对渐变、背景图、透明叠层或 backdrop-filter 做浏览器级有效背景采样，也不会自动重绘作者品牌配色。
 - `z-index` 的完整 browser stacking context。
@@ -250,9 +281,10 @@ assistant text
 | 常见 HTML 结构 | Supported | `div/span/p/section/article/header/footer/ul/ol/li/table/img/button/details/svg` 等安全静态标签。 |
 | CSS 选择器与级联 | Supported | tag/class/id、后代/子/兄弟选择器、属性选择器、部分伪类、inline style、变量和基础 `@media`。 |
 | 基础视觉样式 | Supported | typography、spacing、color、background、border、radius、shadow、gradient、opacity、overflow、z-index、object-fit 的静态近似。 |
-| Flex/Grid | Partial+ | flex 已迁到官方 Compose FlexBox，方向、反向方向、换行、反向换行、双轴 gap、order、grow/shrink/basis、baseline、align-self 等 CSS 语义基本接满；grid 仍降级到 FlowRow/多列，mobile `auto-fit/minmax` 有宽度估算，但不保证浏览器像素级布局。 |
+| Flex/Grid | Partial+ | flex 已迁到官方 Compose FlexBox，方向、反向方向、换行、反向换行、双轴 gap、order、grow/shrink/basis、baseline、align-self 等 CSS 语义基本接满；grid 已迁到项目内非 Lazy Layout，支持固定/auto-fit 列、显式线号、二维 span、auto placement 和自然行高回推，但仍不是完整浏览器 Grid。 |
 | 定位与层叠 | Partial | absolute/fixed/sticky 走同容器 overlay 静态近似，不实现完整 stacking context。 |
 | SVG | Partial | path/rect/circle/ellipse/line/polyline/polygon/text、基础 transform、linear/radial gradient、opacity、dash stroke 和 text-anchor；复杂 defs/filter/mask/clipPath/use/symbol 降级。 |
+| WebView 静态快照 | Supported v1 | 复杂但安全的静态内容可离屏生成 bitmap；默认内存 LRU、禁网络、禁外部导航，点击整张图进入动态预览。 |
 | 动态 HTML | Unsupported/Fallback | JS、canvas、iframe、video/audio、WebGL、Mermaid runtime 等进入动态预览/WebView。 |
 | 浏览器交互态 | Static/Ignored | form controls、hover/active/focus、CSS 动画运行时、mask/clip-path 不在聊天列表执行；hover/focus 规则只记录 hint；filter/backdrop-filter 的安全函数会记录，`filter: opacity(...)` 可低成本生效。 |
 
@@ -260,7 +292,7 @@ assistant text
 
 - 优先覆盖真实 VCP 高频 HTML/CSS：卡片、工具按钮、状态徽章、网格信息块、表格、公式、图片、基础 SVG。
 - 原生路径追求静态视觉一致、滚动稳定和低崩溃率；遇到完整浏览器能力需求时不强行模拟。
-- 动态/超复杂内容保留 WebView 预览或未来快照兜底，但不恢复为聊天列表里的大量 live WebView。
+- 动态/超复杂内容保留 WebView 预览；复杂但安全静态内容可用离屏 snapshot 兜底，但不恢复为聊天列表里的大量 live WebView。
 - 高保真优先级是先修浏览器 baseline：UA 默认样式、字体继承、`rem/em/%`、line-height、margin/padding、按钮盒模型、当前宽度下的 grid/flex 估算。
 
 按钮策略：
@@ -301,7 +333,7 @@ assistant text
 - `mermaid.`
 - `javascript:` URL
 
-动画策略当前处于 Native Animated v1 + Budget v2 首片：简单动画默认原生静态化，finite `opacity/transform` forwards/both from/to 入场动画可由 Compose 原生播放一次并停在最终态；每气泡默认最多播放 3 个原生动画，超预算会静态化并记录 hint；infinite、layout property 动画、交互伪类和复杂 keyframes 会进入 visual hints。后续继续做滚动/离屏禁播和 snapshot fallback，不在当前聊天列表持续跑 CSS 动画。
+动画策略当前处于 Animation v3：简单动画默认原生静态化，finite `opacity/transform` 动画可由 Compose 原生播放一次，并支持常见 easing、reverse、fill-mode、有限 iteration 和多 keyframe stops；每气泡默认最多播放 3 个原生动画，超预算会静态化并记录 hint；infinite、layout/filter/color 动画、交互伪类和复杂 dependent visibility 会进入 visual hints 或 snapshot candidate。不在当前聊天列表持续跑 CSS 动画。
 
 事件属性策略：
 
@@ -342,9 +374,11 @@ assistant text
 
 - `RichHtmlSafety`、`RichHtmlClassification`、`RichHtmlCompiler` 和 renderer 兜底会记录 debug-only fallback reason 聚合计数，不记录聊天正文。
 - Compose 原生 renderer 出现非致命异常时会降级到稳定占位或动态预览入口，不让聊天页整体崩溃。
+- Snapshot route 会记录 debug-only `snapshot start/success/failure`、宽高、耗时、queueWait、cacheHit、joinedInFlight、heightDelta warning 和 reason；日志只包含 digest id，不记录 HTML 正文、按钮文本或完整 CSS。
+- Macrobenchmark/Baseline Profile 的 target app 使用 profileable `baseline` 变体时会自动导入 `render_seed/chat_render_seed.json`，保证富 HTML、长 Markdown、SVG、表格和 snapshot mix journey 有稳定样本。
 - `ph-css` 已开始用于普通 CSS declaration list 解析；遇到 CSS 变量、自定义属性或解析失败时回退项目内置 parser，保留现有 selector matcher 和 computed style。
 - Android packaging 已排除 `META-INF/buildinfo.xml`，避免 ph-css 传递依赖在 debug 打包时资源冲突。
-- 真机日志里当前重点看 `RichHtmlRender`：`compile start/success/failure`、`route=native/route=fallback`、`widthDp`、渲染尺寸。日志不打印正文，只打印 digest id。
+- 真机日志里当前重点看 `RichHtmlRender`：`compile start/success/failure`、`route=native/route=fallback/route=snapshot`、`widthDp/widthPx`、渲染尺寸、snapshot queue/render 耗时、cache 命中和高度 warning。日志不打印正文，只打印 digest id。
 
 ## 真实数据覆盖情况
 
@@ -383,6 +417,7 @@ app/src/debug/assets/render_seed/chat_render_seed.json
 - `<style>`、class 规则、`@keyframes`、按钮、图片、`details/summary`。
 - `pre/code`、`svg/path/rect/circle/ellipse/line/polyline/polygon/text`、`sub/sup`、HTML 表格。
 - VCPDesktop/window/process list 类样式。
+- WebView snapshot 候选：`backdrop-filter`、`mask-image`、`clip-path`、`mix-blend-mode` 这类安全静态但浏览器特效明显的卡片，以及 Snapshot v1.1 的小字体/固定高度/cache 观测样本。
 - 转义的 `<script>` 文本，验证代码块内 HTML 不被误执行。
 
 ## 已验证命令
@@ -390,22 +425,23 @@ app/src/debug/assets/render_seed/chat_render_seed.json
 当前这轮已通过：
 
 ```powershell
-.\gradlew.bat :app:testDebugUnitTest --tests "me.rerere.rikkahub.ui.components.message.RichHtmlHardeningTest" --tests "me.rerere.rikkahub.ui.components.message.MessageTextBlocksTest" --console=plain
-.\gradlew.bat :app:testDebugUnitTest --tests "me.rerere.rikkahub.ui.components.message.StreamRenderArbiterTest" --tests "me.rerere.rikkahub.data.renderseed.RenderSeedFixtureTest" --console=plain
-.\gradlew.bat --no-daemon --max-workers=1 --console=plain "-Dkotlin.compiler.execution.strategy=in-process" :app:testDebugUnitTest --tests "me.rerere.rikkahub.ui.components.message.RichHtmlQualityGateTest"
-.\gradlew.bat --no-daemon --max-workers=1 --console=plain "-Dkotlin.compiler.execution.strategy=in-process" :app:testDebugUnitTest --tests "me.rerere.rikkahub.ui.components.richtext.RichHtmlFlexRendererMappingTest"
-.\gradlew.bat :app:assembleDebug --console=plain
+.\gradlew.bat --no-daemon --max-workers=1 --console=plain "-Dkotlin.compiler.execution.strategy=in-process" :bubble-renderer:compileDebugKotlin :app:compileDebugKotlin :app:compileDebugUnitTestKotlin
+.\gradlew.bat --no-daemon --max-workers=1 --console=plain "-Dkotlin.compiler.execution.strategy=in-process" :app:testDebugUnitTest --tests "me.rerere.rikkahub.ui.components.message.MessageTextBlocksTest" --tests "me.rerere.rikkahub.ui.components.message.StreamRenderArbiterTest" --tests "me.rerere.rikkahub.data.renderseed.RenderSeedFixtureTest" --tests "me.rerere.rikkahub.ui.components.message.RichHtmlHardeningTest" --tests "me.rerere.rikkahub.ui.components.message.RichHtmlFidelityReportTest" --tests "me.rerere.rikkahub.ui.components.message.RichHtmlQualityGateTest" --tests "me.rerere.rikkahub.ui.components.message.RichHtmlSnapshotPolicyTest" --tests "me.rerere.rikkahub.ui.components.richtext.RichHtmlSnapshotCacheTest"
+.\gradlew.bat --no-daemon --max-workers=1 --console=plain "-Dkotlin.compiler.execution.strategy=in-process" :app:compileDebugAndroidTestKotlin
+.\gradlew.bat --no-daemon --max-workers=1 --console=plain "-Dkotlin.compiler.execution.strategy=in-process" :app:connectedDebugAndroidTest "-Pandroid.testInstrumentationRunnerArguments.class=me.rerere.rikkahub.ui.components.richtext.RichHtmlSnapshotRendererInstrumentedTest"
+.\gradlew.bat --no-daemon --max-workers=1 --console=plain "-Dkotlin.compiler.execution.strategy=in-process" :app:connectedDebugAndroidTest "-Pandroid.testInstrumentationRunnerArguments.class=me.rerere.rikkahub.ui.components.richtext.RichHtmlBubbleBlockComposeTest"
+.\gradlew.bat --no-daemon --max-workers=1 --console=plain "-Dkotlin.compiler.execution.strategy=in-process" :app:assembleDebug
 ```
 
-最近一次 Pixel 8 smoke：
+最近一次 Pixel 8/SM-S937B connected 回归：
 
 ```powershell
-& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" -s 192.168.6.121:46127 install -r "C:\VCP\Eric\UniVCP\app\build\outputs\apk\debug\app-arm64-v8a-debug.apk"
-& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" -s 192.168.6.121:46127 shell monkey -p com.univcp.android.debug -c android.intent.category.LAUNCHER 1
-& "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe" -s 192.168.6.121:46127 logcat -d -v time | Select-String -Pattern "FATAL EXCEPTION|RichHtmlRender|route=native|route=fallback|compile failure"
+$env:ANDROID_SERIAL='192.168.6.121:40011'
+.\gradlew.bat --no-daemon --max-workers=1 --console=plain "-Dkotlin.compiler.execution.strategy=in-process" :app:connectedDebugAndroidTest "-Pandroid.testInstrumentationRunnerArguments.class=me.rerere.rikkahub.ui.components.richtext.RichHtmlSnapshotRendererInstrumentedTest"
+.\gradlew.bat --no-daemon --max-workers=1 --console=plain "-Dkotlin.compiler.execution.strategy=in-process" :app:connectedDebugAndroidTest "-Pandroid.testInstrumentationRunnerArguments.class=me.rerere.rikkahub.ui.components.richtext.RichHtmlBubbleBlockComposeTest"
 ```
 
-本次 smoke 结果：未看到启动 `FATAL EXCEPTION`；多条富 HTML 气泡显示 `route=native`，包含较长视觉卡片；部分样本按 `widthDp=352.0` 和横屏/宽布局 `widthDp=800.0` 分别重新编译。
+本次 connected 结果：`RichHtmlSnapshotRendererInstrumentedTest` 2 个测试通过，`RichHtmlBubbleBlockComposeTest` 4 个测试通过，覆盖静态快照生成、像素预算失败、snapshot image 展示、点击打开预览、原生按钮交互和长列表滚动。
 
 建议回归时继续运行：
 
@@ -427,9 +463,12 @@ app/src/debug/assets/render_seed/chat_render_seed.json
 - `@font-face` 首版只识别并降级到系统字体族。
 - 字体 metrics 仍由 Android/Compose 决定，无法做到浏览器像素级一致；当前目标是解决明显字号、行高和盒模型偏差。
 - `position:absolute/fixed/sticky` 是安全静态近似，复杂 overlay 和 z-index stacking context 不保证浏览器级重叠效果。
-- CSS Grid 是多列近似，不保证像素级浏览器 layout。
+- CSS Grid 已支持聊天气泡高频静态子集，但仍不实现完整浏览器 grid auto-flow dense、命名线、负线号、`grid-template-areas`、复杂 track sizing 和完整 stacking context。
 - 复杂 SVG 的 `use`、`symbol`、`clipPath`、`mask`、filter 等仍可能降级。
 - 宽表格和复杂网格是稳定显示优先，不追求像素级浏览器还原。
+- Snapshot 是整张静态图片，不支持内部按钮 hit-test；有 `data-send/data-input/input(...)` 的交互型卡片仍优先走原生路径，原生失败时才 snapshot 或动态预览。
+- Snapshot 首版禁网络加载，远程图片或外部纹理可能不会出现在聊天列表静态图里；需要完整动态效果时点击进入 WebViewPage。
+- Snapshot 首版只做内存 LRU，不写磁盘；切换宽度、density、fontScale、深浅色或主题后会重新生成。
 - 当前 `com.helger:ph-css` 只用于声明解析硬化，现有 selector matcher 仍由项目内置实现负责。
 - `background-size/position/repeat` 的完整浏览器语义、多背景层、`list-style-image` 的浏览器级 marker box、复杂 counter 伪元素和表格布局细化仍是后续优先补齐项。
 - 原生渲染异常时会降级动态预览，用户可进 `WebViewPage` 查看完整动态内容。
@@ -438,15 +477,15 @@ app/src/debug/assets/render_seed/chat_render_seed.json
 
 优先级从高到低：
 
-1. CSS Painting v3.2：支持 `clip-path: inset()/circle()/ellipse()` 的安全静态子集，先用于圆形头像、光斑裁剪和胶囊装饰；复杂 path/polygon 继续 hint。
-2. Color Fidelity v4.1：补 `color-mix()` 的 sRGB 静态近似，只支持 safe 两色混合和百分比；`lab/lch/oklch` 继续 hint。
-3. Animation Runtime v2.1：在现有 opacity/translate/scale/rotate from/to 播放基础上增加滚动中禁播、离屏禁播和“历史消息默认不重播”的运行时门控；继续拒绝 infinite、布局属性、中间关键帧、filter/color 动画。
-4. Animation Snapshot v2.2：当动画超预算且静态化会明显丢失关键视觉时，记录 snapshot candidate/fallback reason；复杂动态内容仍进动态预览，不常驻 live WebView。
-5. CSS Painting v3.3：多背景层从“第一层渲染 + 其余 hint”推进到最多两层安全静态绘制，覆盖图案纹理叠 gradient 的高频卡片。
-6. CSS Painting v3.4：继续评估 `filter: blur()` 的低成本近似，只允许小半径/低频装饰层；`backdrop-filter` 仍优先保持 hint，避免聊天列表实时模糊开销。
-7. CSS Painting v3.5：`mix-blend-mode`、mask、复杂 clip-path 保持 visual hint，并通过 render seed report 统计真实频率，频率不足则不进入主线实现。
+1. Snapshot policy v1.2：基于 v1.1 telemetry 校准 `AnimationBudgetExceeded`、复杂 SVG、mask/clip/filter 的 snapshot 阈值，避免交互型卡片过早丢失按钮。
+2. CSS Painting v3.2：`clip-path: inset()/circle()/ellipse()` 已进入原生安全子集，圆形头像、光斑裁剪和胶囊装饰优先原生显示；复杂 path/polygon 继续只记录 hint，原生失败后再 snapshot。
+3. Color Fidelity v4.1：补 `color-mix()` 的 sRGB 静态近似，只支持 safe 两色混合和百分比；`lab/lch/oklch` 继续 hint。
+4. Animation Runtime v3.1：在现有 opacity/translate/scale/rotate 多 keyframe 播放基础上继续完善滚动中禁播、离屏禁播和历史消息重组默认最终态的运行时门控；继续拒绝 infinite、布局属性、filter/color 动画和完整 CSS transition 状态机。
+5. Snapshot v1.2：增加 debug-only route report，把 height warning、cache miss 峰值和 failure reason bucket 输出到 QA 页面或开发菜单。
+6. CSS Painting v3.3：多背景层已从“第一层渲染 + 其余 hint”推进到“主 gradient + 一个安全 URL/data tile/pattern”原生静态绘制，按 CSS 层顺序覆盖图案纹理叠 gradient 的高频卡片；更复杂层数继续只记录 hint。
+7. CSS Painting v3.4：`mask-image: linear-gradient()/radial-gradient()` 已作为 alpha mask 原生近似；`filter: blur()` 只允许小半径安全近似；`backdrop-filter` 默认用半透明背景、描边、阴影和亮度覆盖近似，不做聊天列表实时背景采样。
 8. SVG Paint v3：补 `gradientUnits/gradientTransform/spreadMethod`、安全 `clipPath` 子集和 marker 箭头，用于流程图、坐标轴和图标。
-9. 质量闭环：真机视觉回归继续对比背景、色彩、滤镜、渐变文字、阴影、CSS animation 静态化和 SVG；debug-only report 只输出 hint/耗时/样例 id，不输出正文。
+9. 质量闭环：真机视觉回归继续对比 native/snapshot/dynamic preview 的背景、色彩、滤镜、渐变文字、阴影、CSS animation 静态化和 SVG；debug-only report 只输出 hint/耗时/样例 id，不输出正文。
 10. 继续扩大 ph-css 使用范围，但保持 selector matcher 可控，避免一次性替换成浏览器级 CSS 引擎。
 
 ## 少造轮子路线

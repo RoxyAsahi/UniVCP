@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.ui.pages.chat
 
+import android.os.SystemClock
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Tick01
 import me.rerere.hugeicons.stroke.ArrowDown01
@@ -36,6 +37,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListItemInfo
 import androidx.compose.foundation.lazy.LazyListState
@@ -53,7 +55,9 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.surfaceColorAtElevation
+import androidx.compose.material3.Checkbox
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -96,12 +100,21 @@ import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.MessageNode
 import me.rerere.rikkahub.service.ChatError
 import me.rerere.rikkahub.ui.components.message.ChatMessage
+import me.rerere.rikkahub.ui.components.message.ChatRenderCell
+import me.rerere.rikkahub.ui.components.message.ChatRenderCellItem
+import me.rerere.rikkahub.ui.components.message.RichHtmlRenderTelemetry
+import me.rerere.rikkahub.ui.components.message.messageMetaOrNull
+import me.rerere.rikkahub.ui.components.richtext.LocalRichRenderScrollState
+import me.rerere.rikkahub.ui.components.richtext.RichHtmlPrewarmTarget
+import me.rerere.rikkahub.ui.components.richtext.RichHtmlRenderScheduler
+import me.rerere.rikkahub.ui.components.richtext.RichRenderScrollDirection
+import me.rerere.rikkahub.ui.components.richtext.RichRenderScrollState
 import me.rerere.rikkahub.ui.components.ui.ErrorCardsDisplay
-import me.rerere.rikkahub.ui.components.ui.ListSelectableItem
 import me.rerere.rikkahub.ui.components.ui.RabbitLoadingIndicator
 import me.rerere.rikkahub.ui.components.ui.Tooltip
 import me.rerere.rikkahub.ui.hooks.ImeLazyListAutoScroller
 import me.rerere.rikkahub.utils.plus
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlin.uuid.Uuid
 
@@ -110,9 +123,10 @@ private const val LoadingIndicatorKey = "LoadingIndicator"
 private const val ScrollBottomKey = "ScrollBottomKey"
 
 @Composable
-fun ChatList(
+internal fun ChatList(
     innerPadding: PaddingValues,
     conversation: Conversation,
+    chatRenderCells: List<ChatRenderCell>,
     state: LazyListState,
     loading: Boolean,
     processingStatus: String? = null,
@@ -156,6 +170,7 @@ fun ChatList(
             ChatListNormal(
                 innerPadding = innerPadding,
                 conversation = conversation,
+                chatRenderCells = chatRenderCells,
                 state = state,
                 loading = loading,
                 processingStatus = processingStatus,
@@ -186,6 +201,7 @@ fun ChatList(
 private fun ChatListNormal(
     innerPadding: PaddingValues,
     conversation: Conversation,
+    chatRenderCells: List<ChatRenderCell>,
     state: LazyListState,
     loading: Boolean,
     processingStatus: String? = null,
@@ -211,9 +227,11 @@ private fun ChatListNormal(
     val scope = rememberCoroutineScope()
     val loadingState by rememberUpdatedState(loading)
     var isRecentScroll by remember { mutableStateOf(false) }
-    val conversationUpdated by rememberUpdatedState(conversation)
     val density = LocalDensity.current
     val activity = LocalContext.current as? me.rerere.rikkahub.RouteActivity
+    val renderCells = remember(chatRenderCells) {
+        chatRenderCells.filterNot { it is ChatRenderCell.BottomSpacerCell }
+    }
 
     DisposableEffect(Unit) {
         val listener: (Boolean) -> Boolean = { isVolumeUp ->
@@ -271,7 +289,7 @@ private fun ChatListNormal(
                     // println("is bottom = ${visibleItemsInfo.isAtBottom()}, scroll = ${state.isScrollInProgress}, can_scroll = ${state.canScrollForward}, loading = $loading")
                     if (!state.isScrollInProgress && loadingState) {
                         if (visibleItemsInfo.isAtBottom()) {
-                            state.requestScrollToItem(conversationUpdated.messageNodes.lastIndex + 10)
+                            state.requestScrollToItem((state.layoutInfo.totalItemsCount - 1).coerceAtLeast(0))
                             // Log.i(TAG, "ChatList: scroll to ${conversationUpdated.messageNodes.lastIndex}")
                         }
                     }
@@ -292,105 +310,244 @@ private fun ChatListNormal(
             }
         }
 
-        LazyColumn(
-            state = state,
-            contentPadding = PaddingValues(16.dp) + PaddingValues(bottom = 32.dp + innerPadding.calculateBottomPadding()),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            modifier = Modifier
-                .fillMaxSize()
-                .hazeSource(state = hazeState)
-                .padding(top = innerPadding.calculateTopPadding()),
-        ) {
-            itemsIndexed(
-                items = conversation.messageNodes,
-                key = { index, item -> item.id },
-                contentType = { _, item -> item.currentMessage.role.name },
-            ) { index, node ->
-                Column {
-                    ListSelectableItem(
-                        key = node.id,
-                        onSelectChange = {
-                            if (!selectedItems.contains(node.id)) {
-                                selectedItems.add(node.id)
-                            } else {
-                                selectedItems.remove(node.id)
-                            }
-                        },
-                        selectedKeys = selectedItems,
-                        enabled = selecting,
-                    ) {
-                        ChatMessage(
-                            node = node,
-                            model = node.currentMessage.modelId?.let { settings.findModelById(it) },
-                            assistant = settings.getAssistantById(conversation.assistantId),
-                            loading = loading && index == conversation.messageNodes.lastIndex,
-                            onRegenerate = {
-                                onRegenerate(node.currentMessage)
-                            },
-                            onEdit = {
-                                onEdit(node.currentMessage)
-                            },
-                            onFork = {
-                                onForkMessage(node.currentMessage)
-                            },
-                            onDelete = {
-                                onDelete(node.currentMessage)
-                            },
-                            onShare = {
-                                selecting = true  // 使用 CoroutineScope 延迟状态更新
-                                selectedItems.clear()
-                                selectedItems.addAll(conversation.messageNodes.map { it.id }
-                                    .subList(0, conversation.messageNodes.indexOf(node) + 1))
-                            },
-                            onUpdate = {
-                                onUpdateMessage(it)
-                            },
-                            isFavorite = node.isFavorite,
-                            onToggleFavorite = {
-                                onToggleFavorite?.invoke(node)
-                            },
-                            onTranslate = onTranslate,
-                            onClearTranslation = onClearTranslation,
-                            onToolApproval = onToolApproval,
-                            onToolAnswer = onToolAnswer,
-                            onBubbleInput = onBubbleInput,
-                            lastMessage = index == conversation.messageNodes.lastIndex,
-                        )
-                    }
+        var richRenderScrollState by remember { mutableStateOf(RichRenderScrollState()) }
+        LaunchedEffect(state, renderCells.size, isRecentScroll) {
+            var previousFirstVisible = state.firstVisibleItemIndex
+            var previousFirstVisibleOffset = state.firstVisibleItemScrollOffset
+            var previousSampleAtMs = SystemClock.elapsedRealtime()
+            snapshotFlow {
+                val visible = state.layoutInfo.visibleItemsInfo
+                    .map { it.index }
+                    .filter { it in renderCells.indices }
+                val firstVisible = visible.minOrNull() ?: -1
+                val lastVisible = visible.maxOrNull() ?: -1
+                val currentFirstVisible = state.firstVisibleItemIndex
+                val currentFirstVisibleOffset = state.firstVisibleItemScrollOffset
+                val nowMs = SystemClock.elapsedRealtime()
+                val elapsedMs = (nowMs - previousSampleAtMs).coerceAtLeast(1L)
+                val direction = when {
+                    currentFirstVisible > previousFirstVisible ||
+                        (currentFirstVisible == previousFirstVisible &&
+                            currentFirstVisibleOffset > previousFirstVisibleOffset) -> RichRenderScrollDirection.Down
+                    currentFirstVisible < previousFirstVisible ||
+                        (currentFirstVisible == previousFirstVisible &&
+                            currentFirstVisibleOffset < previousFirstVisibleOffset) -> RichRenderScrollDirection.Up
+                    else -> RichRenderScrollDirection.Idle
                 }
+                val fastScrolling = state.isScrollInProgress && (
+                    abs(currentFirstVisible - previousFirstVisible) >= 3 ||
+                        (abs(currentFirstVisibleOffset - previousFirstVisibleOffset) * 1000f / elapsedMs) > 2_600f
+                    )
+                previousFirstVisible = currentFirstVisible
+                previousFirstVisibleOffset = currentFirstVisibleOffset
+                previousSampleAtMs = nowMs
+                val prewarmBehind = when (direction) {
+                    RichRenderScrollDirection.Down -> 3
+                    RichRenderScrollDirection.Up -> 10
+                    RichRenderScrollDirection.Idle -> 6
+                }
+                val prewarmAhead = when (direction) {
+                    RichRenderScrollDirection.Down -> 10
+                    RichRenderScrollDirection.Up -> 3
+                    RichRenderScrollDirection.Idle -> 6
+                }
+                val nearStart = (firstVisible - prewarmBehind).coerceAtLeast(0)
+                val nearEnd = (lastVisible + prewarmAhead).coerceAtMost((renderCells.size - 1).coerceAtLeast(0))
+                val viewportWidthDp = with(density) {
+                    state.layoutInfo.viewportSize.width.toDp().value
+                }.takeIf { it > 0f } ?: 360f
+                RichRenderScrollState(
+                    scrolling = isRecentScroll || state.isScrollInProgress,
+                    scrollInProgress = state.isScrollInProgress,
+                    fastScrolling = fastScrolling,
+                    visibleCellRange = if (firstVisible >= 0 && lastVisible >= firstVisible) {
+                        firstVisible..lastVisible
+                    } else {
+                        0..-1
+                    },
+                    nearViewportRange = if (firstVisible >= 0 && lastVisible >= firstVisible) {
+                        nearStart..nearEnd
+                    } else {
+                        0..-1
+                    },
+                    scrollDirection = direction,
+                    viewportWidthDp = viewportWidthDp,
+                )
+            }.collect {
+                richRenderScrollState = it
             }
+        }
 
-            if (loading) {
-                item(LoadingIndicatorKey) {
-                    Row(
-                        modifier = Modifier.padding(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        RabbitLoadingIndicator(
-                            modifier = Modifier.size(28.dp)
-                        )
-                        AnimatedVisibility(
-                            visible = processingStatus != null,
+        LaunchedEffect(renderCells, richRenderScrollState.visibleCellRange) {
+            RichHtmlRenderTelemetry.recordCellPipeline(
+                totalCells = renderCells.size,
+                visibleCellRange = richRenderScrollState.visibleCellRange,
+                richCells = renderCells.count { it is ChatRenderCell.RichHtmlCell },
+                highRiskCells = renderCells.count { it.renderRisk.score >= 50 },
+            )
+        }
+
+        LaunchedEffect(renderCells, richRenderScrollState, settings.displaySetting.enableChatCellPipeline) {
+            val targets = if (settings.displaySetting.enableChatCellPipeline) {
+                buildRichHtmlPrewarmTargets(renderCells, richRenderScrollState)
+            } else {
+                emptyList()
+            }
+            RichHtmlRenderScheduler.updatePrewarmTargets(targets)
+        }
+        DisposableEffect(Unit) {
+            onDispose {
+                RichHtmlRenderScheduler.updatePrewarmTargets(emptyList())
+            }
+        }
+
+        CompositionLocalProvider(
+            LocalRichRenderScrollState provides richRenderScrollState
+        ) {
+            LazyColumn(
+                state = state,
+                contentPadding = PaddingValues(16.dp) + PaddingValues(bottom = 32.dp + innerPadding.calculateBottomPadding()),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Top,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .hazeSource(state = hazeState)
+                    .padding(top = innerPadding.calculateTopPadding()),
+            ) {
+                if (settings.displaySetting.enableChatCellPipeline) {
+                    itemsIndexed(
+                        items = renderCells,
+                        key = { _, item -> item.stableKey },
+                        contentType = { _, item -> item.contentType },
+                    ) { cellIndex, cell ->
+                        SelectableChatCellFrame(
+                            cell = cell,
+                            selecting = selecting,
+                            selectedItems = selectedItems,
+                            onSelectionChange = { nodeId ->
+                                if (!selectedItems.contains(nodeId)) {
+                                    selectedItems.add(nodeId)
+                                } else {
+                                    selectedItems.remove(nodeId)
+                                }
+                            }
                         ) {
-                            Text(
-                                text = processingStatus ?: "",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            ChatRenderCellItem(
+                                cell = cell,
+                                cellIndex = cellIndex,
+                                onRegenerate = onRegenerate,
+                                onEdit = onEdit,
+                                onForkMessage = onForkMessage,
+                                onDelete = onDelete,
+                                onShare = { meta ->
+                                    selecting = true
+                                    selectedItems.clear()
+                                    selectedItems.addAll(
+                                        conversation.messageNodes
+                                            .take(meta.messageIndex + 1)
+                                            .map { it.id }
+                                    )
+                                },
+                                onUpdateMessage = onUpdateMessage,
+                                onTranslate = onTranslate,
+                                onClearTranslation = onClearTranslation,
+                                onToolApproval = onToolApproval,
+                                onToolAnswer = onToolAnswer,
+                                onToggleFavorite = onToggleFavorite,
+                                onBubbleInput = onBubbleInput,
+                            )
+                        }
+                    }
+                } else {
+                    itemsIndexed(
+                        items = conversation.messageNodes,
+                        key = { _, node -> node.id },
+                        contentType = { _, node -> node.currentMessage.role.name },
+                    ) { messageIndex, node ->
+                        SelectableMessageFrame(
+                            node = node,
+                            selecting = selecting,
+                            selectedItems = selectedItems,
+                            onSelectionChange = { nodeId ->
+                                if (!selectedItems.contains(nodeId)) {
+                                    selectedItems.add(nodeId)
+                                } else {
+                                    selectedItems.remove(nodeId)
+                                }
+                            },
+                        ) {
+                            val message = node.currentMessage
+                            ChatMessage(
+                                node = node,
+                                modifier = Modifier.padding(top = if (messageIndex == 0) 0.dp else 12.dp),
+                                loading = loading && messageIndex == conversation.messageNodes.lastIndex,
+                                model = message.modelId?.let { settings.findModelById(it) },
+                                assistant = settings.getAssistantById(conversation.assistantId),
+                                lastMessage = messageIndex == conversation.messageNodes.lastIndex,
+                                onFork = { onForkMessage(message) },
+                                onRegenerate = { onRegenerate(message) },
+                                onEdit = { onEdit(message) },
+                                onShare = {
+                                    selecting = true
+                                    selectedItems.clear()
+                                    selectedItems.addAll(
+                                        conversation.messageNodes
+                                            .take(messageIndex + 1)
+                                            .map { it.id }
+                                    )
+                                },
+                                onDelete = { onDelete(message) },
+                                onUpdate = onUpdateMessage,
+                                isFavorite = node.isFavorite,
+                                onToggleFavorite = { onToggleFavorite?.invoke(node) },
+                                onTranslate = onTranslate,
+                                onClearTranslation = onClearTranslation,
+                                onToolApproval = onToolApproval,
+                                onToolAnswer = onToolAnswer,
+                                onBubbleInput = onBubbleInput,
                             )
                         }
                     }
                 }
-            }
 
-            // 为了能正确滚动到这
-            item(ScrollBottomKey) {
-                Spacer(
-                    Modifier
-                        .fillMaxWidth()
-                        .height(5.dp)
-                )
+                if (loading) {
+                    item(LoadingIndicatorKey) {
+                        Row(
+                            modifier = Modifier.padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            RabbitLoadingIndicator(
+                                modifier = Modifier.size(28.dp)
+                            )
+                            AnimatedVisibility(
+                                visible = processingStatus != null,
+                            ) {
+                                Text(
+                                    text = processingStatus ?: "",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // 为了能正确滚动到这
+                item(ScrollBottomKey) {
+                    ChatRenderCellItem(
+                        cell = ChatRenderCell.BottomSpacerCell,
+                        cellIndex = renderCells.size,
+                        onRegenerate = onRegenerate,
+                        onEdit = onEdit,
+                        onForkMessage = onForkMessage,
+                        onDelete = onDelete,
+                        onShare = {},
+                        onUpdateMessage = onUpdateMessage,
+                        onTranslate = onTranslate,
+                        onClearTranslation = onClearTranslation,
+                    )
+                }
             }
         }
 
@@ -571,6 +728,111 @@ private fun buildHighlightedText(
         // 添加剩余文本
         if (startIndex < text.length) {
             append(text.substring(startIndex))
+        }
+    }
+}
+
+private fun buildRichHtmlPrewarmTargets(
+    renderCells: List<ChatRenderCell>,
+    scrollState: RichRenderScrollState,
+): List<RichHtmlPrewarmTarget> {
+    if (scrollState.fastScrolling || scrollState.nearViewportRange.isEmptyRange()) return emptyList()
+    val visibleRange = scrollState.visibleCellRange
+    val orderedIndexes = scrollState.nearViewportRange
+        .asSequence()
+        .filter { it in renderCells.indices }
+        .filterNot { visibleRange.isNotEmptyRange() && it in visibleRange }
+        .toList()
+        .let { indexes ->
+            when (scrollState.scrollDirection) {
+                RichRenderScrollDirection.Down -> indexes.sorted()
+                RichRenderScrollDirection.Up -> indexes.sortedDescending()
+                RichRenderScrollDirection.Idle -> indexes.sortedBy { distanceToRange(it, visibleRange) }
+            }
+        }
+    return orderedIndexes.mapNotNull { index ->
+        val cell = renderCells[index] as? ChatRenderCell.RichHtmlCell ?: return@mapNotNull null
+        if (cell.block.partial) return@mapNotNull null
+        RichHtmlPrewarmTarget(
+            html = cell.block.html,
+            cellIndex = index,
+            viewportWidthDp = scrollState.viewportWidthDp,
+            risk = cell.renderRisk,
+            contentType = cell.contentType.name,
+        )
+    }
+}
+
+private fun distanceToRange(index: Int, range: IntRange): Int {
+    if (range.isEmptyRange()) return 0
+    return when {
+        index < range.first -> range.first - index
+        index > range.last -> index - range.last
+        else -> 0
+    }
+}
+
+private fun IntRange.isEmptyRange(): Boolean = first > last
+
+private fun IntRange.isNotEmptyRange(): Boolean = first <= last
+
+@Composable
+private fun SelectableChatCellFrame(
+    cell: ChatRenderCell,
+    selecting: Boolean,
+    selectedItems: List<Uuid>,
+    onSelectionChange: (Uuid) -> Unit,
+    content: @Composable () -> Unit,
+) {
+    val meta = cell.messageMetaOrNull()
+    if (!selecting || meta == null) {
+        content()
+        return
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        if (cell is ChatRenderCell.AvatarCell) {
+            Checkbox(
+                checked = meta.node.id in selectedItems,
+                onCheckedChange = { onSelectionChange(meta.node.id) },
+            )
+        } else {
+            Spacer(modifier = Modifier.width(48.dp))
+        }
+        Box(modifier = Modifier.weight(1f)) {
+            content()
+        }
+    }
+}
+
+@Composable
+private fun SelectableMessageFrame(
+    node: MessageNode,
+    selecting: Boolean,
+    selectedItems: List<Uuid>,
+    onSelectionChange: (Uuid) -> Unit,
+    content: @Composable () -> Unit,
+) {
+    if (!selecting) {
+        content()
+        return
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Checkbox(
+            checked = node.id in selectedItems,
+            onCheckedChange = { onSelectionChange(node.id) },
+        )
+        Box(modifier = Modifier.weight(1f)) {
+            content()
         }
     }
 }

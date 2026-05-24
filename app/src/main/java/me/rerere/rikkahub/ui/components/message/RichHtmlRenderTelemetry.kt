@@ -2,12 +2,14 @@ package me.rerere.rikkahub.ui.components.message
 
 import android.util.Log
 import me.rerere.rikkahub.BuildConfig
+import kotlin.math.abs
 
 internal enum class RichHtmlFallbackStage {
     Safety,
     Classification,
     Compile,
     Render,
+    Snapshot,
 }
 
 internal data class RichHtmlFallbackKey(
@@ -20,6 +22,8 @@ internal object RichHtmlRenderTelemetry {
     private val lock = Any()
     private val fallbackCounters = linkedMapOf<RichHtmlFallbackKey, Int>()
     private val paritySamples = ArrayDeque<RichHtmlParitySample>()
+    private val snapshotSamples = ArrayDeque<RichHtmlSnapshotTelemetrySample>()
+    private val compileQueueSamples = ArrayDeque<RichHtmlCompileQueueSample>()
 
     fun recordFallback(stage: RichHtmlFallbackStage, reason: String) {
         if (!BuildConfig.DEBUG) return
@@ -98,11 +102,45 @@ internal object RichHtmlRenderTelemetry {
     fun resetForTest() = synchronized(lock) {
         fallbackCounters.clear()
         paritySamples.clear()
+        snapshotSamples.clear()
+        compileQueueSamples.clear()
     }
 
     fun recordCompileStart(id: String, viewportWidthDp: Float, length: Int) {
         if (!BuildConfig.DEBUG) return
         safeLog { Log.d(TAG, "compile start id=$id widthDp=$viewportWidthDp length=$length") }
+    }
+
+    fun recordCompileQueueWait(
+        id: String,
+        viewportWidthDp: Float,
+        queueWaitMs: Long,
+        joinedInFlight: Boolean,
+        cacheMode: String,
+    ) {
+        if (!BuildConfig.DEBUG) return
+        safeLog {
+            Log.d(
+                TAG,
+                "compile queue id=$id widthDp=$viewportWidthDp queueWaitMs=$queueWaitMs " +
+                    "joinedInFlight=$joinedInFlight cacheMode=$cacheMode",
+            )
+        }
+        synchronized(lock) {
+            compileQueueSamples.addLast(
+                RichHtmlCompileQueueSample(
+                    id = id,
+                    viewportWidthDp = viewportWidthDp,
+                    queueWaitMs = queueWaitMs,
+                    joinedInFlight = joinedInFlight,
+                    cacheMode = cacheMode,
+                    stage = "compile",
+                    outcome = null,
+                    cellIndex = null,
+                )
+            )
+            trimCompileQueueSamples()
+        }
     }
 
     fun recordCompileFailure(id: String, viewportWidthDp: Float, throwable: Throwable) {
@@ -116,6 +154,254 @@ internal object RichHtmlRenderTelemetry {
         }
     }
 
+    fun recordSnapshotStart(
+        id: String,
+        widthPx: Int,
+        reason: String,
+        joinedInFlight: Boolean = false,
+    ) {
+        if (!BuildConfig.DEBUG) return
+        safeLog {
+            Log.d(
+                TAG,
+                "snapshot start id=$id widthPx=$widthPx reason=$reason joinedInFlight=$joinedInFlight",
+            )
+        }
+        synchronized(lock) {
+            addSnapshotSample(
+                RichHtmlSnapshotTelemetrySample(
+                    id = id,
+                    outcome = RichHtmlSnapshotOutcome.Start,
+                    widthPx = widthPx,
+                    heightPx = null,
+                    reason = reason,
+                    cacheHit = false,
+                    joinedInFlight = joinedInFlight,
+                    queueWaitMs = 0L,
+                    renderTimeMs = null,
+                    nativeEstimateHeightPx = null,
+                    heightDeltaPct = null,
+                    heightWarning = false,
+                )
+            )
+        }
+    }
+
+    fun recordSnapshotSuccess(
+        id: String,
+        widthPx: Int,
+        heightPx: Int,
+        renderTimeMs: Long,
+        cacheHit: Boolean,
+        reason: String,
+        queueWaitMs: Long = 0L,
+        joinedInFlight: Boolean = false,
+        nativeEstimateHeightPx: Int? = null,
+        heightWarningThresholdPct: Float = 20f,
+    ) {
+        if (!BuildConfig.DEBUG) return
+        val heightDeltaPct = nativeEstimateHeightPx
+            ?.takeIf { it > 0 }
+            ?.let { estimate -> abs(heightPx - estimate) * 100f / estimate }
+        val heightWarning = heightDeltaPct != null && heightDeltaPct > heightWarningThresholdPct
+        safeLog {
+            Log.d(
+                TAG,
+                "snapshot success id=$id size=${widthPx}x$heightPx timeMs=$renderTimeMs " +
+                    "queueWaitMs=$queueWaitMs cacheHit=$cacheHit joinedInFlight=$joinedInFlight " +
+                    "heightDeltaPct=${heightDeltaPct?.let { "%.1f".format(it) }.orEmpty()} " +
+                    "heightWarning=$heightWarning reason=$reason",
+            )
+        }
+        synchronized(lock) {
+            addSnapshotSample(
+                RichHtmlSnapshotTelemetrySample(
+                    id = id,
+                    outcome = RichHtmlSnapshotOutcome.Success,
+                    widthPx = widthPx,
+                    heightPx = heightPx,
+                    reason = reason,
+                    cacheHit = cacheHit,
+                    joinedInFlight = joinedInFlight,
+                    queueWaitMs = queueWaitMs,
+                    renderTimeMs = renderTimeMs,
+                    nativeEstimateHeightPx = nativeEstimateHeightPx,
+                    heightDeltaPct = heightDeltaPct,
+                    heightWarning = heightWarning,
+                )
+            )
+            addParitySample(
+                RichHtmlParitySample(
+                    id = id,
+                    route = "snapshot",
+                    viewportWidthDp = 0f,
+                    renderWidthPx = widthPx,
+                    renderHeightPx = heightPx,
+                    compileTimeMs = renderTimeMs,
+                    unsupported = reason,
+                )
+            )
+        }
+    }
+
+    fun recordSnapshotFailure(
+        id: String,
+        widthPx: Int,
+        reason: String,
+        message: String?,
+        queueWaitMs: Long = 0L,
+    ) {
+        if (!BuildConfig.DEBUG) return
+        safeLog {
+            Log.w(
+                TAG,
+                "snapshot failure id=$id widthPx=$widthPx queueWaitMs=$queueWaitMs reason=$reason message=${message.orEmpty()}",
+            )
+        }
+        synchronized(lock) {
+            addSnapshotSample(
+                RichHtmlSnapshotTelemetrySample(
+                    id = id,
+                    outcome = RichHtmlSnapshotOutcome.Failure,
+                    widthPx = widthPx,
+                    heightPx = null,
+                    reason = reason,
+                    cacheHit = false,
+                    joinedInFlight = false,
+                    queueWaitMs = queueWaitMs,
+                    renderTimeMs = null,
+                    nativeEstimateHeightPx = null,
+                    heightDeltaPct = null,
+                    heightWarning = false,
+                )
+            )
+        }
+        recordFallback(RichHtmlFallbackStage.Snapshot, reason)
+    }
+
+    fun recordCellPipeline(
+        totalCells: Int,
+        visibleCellRange: IntRange,
+        richCells: Int,
+        highRiskCells: Int,
+    ) {
+        if (!BuildConfig.DEBUG) return
+        safeLog {
+            Log.d(
+                TAG,
+                "cell pipeline total=$totalCells visible=${visibleCellRange.first}..${visibleCellRange.last} " +
+                    "rich=$richCells highRisk=$highRiskCells",
+            )
+        }
+    }
+
+    fun recordNativeAdmission(
+        id: String,
+        allowed: Boolean,
+        reason: String,
+        cellIndex: Int?,
+        riskScore: Int?,
+        visibleCellRange: IntRange,
+        fastScrolling: Boolean,
+    ) {
+        if (!BuildConfig.DEBUG) return
+        safeLog {
+            Log.d(
+                TAG,
+                "native admission id=$id allowed=$allowed reason=$reason cell=$cellIndex " +
+                    "risk=${riskScore ?: -1} visible=${visibleCellRange.first}..${visibleCellRange.last} " +
+                    "fast=$fastScrolling",
+            )
+        }
+    }
+
+    fun recordHeightCache(
+        id: String,
+        contentType: String,
+        hit: Boolean,
+        heightPx: Int?,
+    ) {
+        if (!BuildConfig.DEBUG) return
+        safeLog {
+            Log.d(
+                TAG,
+                "height cache id=$id contentType=$contentType hit=$hit heightPx=${heightPx ?: -1}",
+            )
+        }
+    }
+
+    fun recordPrewarm(
+        id: String,
+        cellIndex: Int,
+        viewportWidthDp: Float,
+        queueWaitMs: Long = 0L,
+        stage: String,
+        outcome: String? = null,
+    ) {
+        if (!BuildConfig.DEBUG) return
+        safeLog {
+            Log.d(
+                TAG,
+                "prewarm id=$id cell=$cellIndex widthDp=$viewportWidthDp " +
+                    "queueWaitMs=$queueWaitMs stage=$stage outcome=${outcome.orEmpty()}",
+            )
+        }
+        synchronized(lock) {
+            compileQueueSamples.addLast(
+                RichHtmlCompileQueueSample(
+                    id = id,
+                    viewportWidthDp = viewportWidthDp,
+                    queueWaitMs = queueWaitMs,
+                    joinedInFlight = false,
+                    cacheMode = "Persistent",
+                    stage = stage,
+                    outcome = outcome,
+                    cellIndex = cellIndex,
+                )
+            )
+            trimCompileQueueSamples()
+        }
+    }
+
+    fun compileQueueSnapshot(): List<RichHtmlCompileQueueSample> = synchronized(lock) {
+        compileQueueSamples.toList()
+    }
+
+    fun snapshotTelemetrySnapshot(): List<RichHtmlSnapshotTelemetrySample> = synchronized(lock) {
+        snapshotSamples.toList()
+    }
+
+    fun snapshotSummary(): RichHtmlSnapshotSummary = synchronized(lock) {
+        val failureReasons = linkedMapOf<String, Int>()
+        snapshotSamples
+            .filter { it.outcome == RichHtmlSnapshotOutcome.Failure }
+            .forEach { sample ->
+                failureReasons[sample.reason] = (failureReasons[sample.reason] ?: 0) + 1
+            }
+        RichHtmlSnapshotSummary(
+            cacheHits = snapshotSamples.count { it.outcome == RichHtmlSnapshotOutcome.Success && it.cacheHit },
+            cacheMisses = snapshotSamples.count { it.outcome == RichHtmlSnapshotOutcome.Start },
+            joinedInFlight = snapshotSamples.count { it.outcome == RichHtmlSnapshotOutcome.Start && it.joinedInFlight },
+            successes = snapshotSamples.count { it.outcome == RichHtmlSnapshotOutcome.Success },
+            failures = snapshotSamples.count { it.outcome == RichHtmlSnapshotOutcome.Failure },
+            warnings = snapshotSamples.count { it.heightWarning },
+            maxQueueWaitMs = snapshotSamples.maxOfOrNull { it.queueWaitMs } ?: 0L,
+            maxRenderTimeMs = snapshotSamples.mapNotNull { it.renderTimeMs }.maxOrNull() ?: 0L,
+            failureReasons = failureReasons,
+        )
+    }
+
+    fun snapshotDebugSummary(): String {
+        if (!BuildConfig.DEBUG) return ""
+        val summary = snapshotSummary()
+        return "snapshot summary " +
+            "success=${summary.successes} failure=${summary.failures} " +
+            "cacheHit=${summary.cacheHits} cacheMiss=${summary.cacheMisses} " +
+            "joinedInFlight=${summary.joinedInFlight} warnings=${summary.warnings} " +
+            "maxQueueWaitMs=${summary.maxQueueWaitMs} maxRenderTimeMs=${summary.maxRenderTimeMs} " +
+            "failureReasons=${summary.failureReasons}"
+    }
+
     private inline fun safeLog(block: () -> Unit) {
         runCatching(block)
     }
@@ -124,6 +410,19 @@ internal object RichHtmlRenderTelemetry {
         paritySamples.addLast(sample)
         while (paritySamples.size > 48) {
             paritySamples.removeFirst()
+        }
+    }
+
+    private fun addSnapshotSample(sample: RichHtmlSnapshotTelemetrySample) {
+        snapshotSamples.addLast(sample)
+        while (snapshotSamples.size > 96) {
+            snapshotSamples.removeFirst()
+        }
+    }
+
+    private fun trimCompileQueueSamples() {
+        while (compileQueueSamples.size > 96) {
+            compileQueueSamples.removeFirst()
         }
     }
 }
@@ -136,4 +435,48 @@ internal data class RichHtmlParitySample(
     val renderHeightPx: Int?,
     val compileTimeMs: Long?,
     val unsupported: String?,
+)
+
+internal enum class RichHtmlSnapshotOutcome {
+    Start,
+    Success,
+    Failure,
+}
+
+internal data class RichHtmlSnapshotTelemetrySample(
+    val id: String,
+    val outcome: RichHtmlSnapshotOutcome,
+    val widthPx: Int,
+    val heightPx: Int?,
+    val reason: String,
+    val cacheHit: Boolean,
+    val joinedInFlight: Boolean,
+    val queueWaitMs: Long,
+    val renderTimeMs: Long?,
+    val nativeEstimateHeightPx: Int?,
+    val heightDeltaPct: Float?,
+    val heightWarning: Boolean,
+)
+
+internal data class RichHtmlSnapshotSummary(
+    val cacheHits: Int,
+    val cacheMisses: Int,
+    val joinedInFlight: Int,
+    val successes: Int,
+    val failures: Int,
+    val warnings: Int,
+    val maxQueueWaitMs: Long,
+    val maxRenderTimeMs: Long,
+    val failureReasons: Map<String, Int>,
+)
+
+internal data class RichHtmlCompileQueueSample(
+    val id: String,
+    val viewportWidthDp: Float,
+    val queueWaitMs: Long,
+    val joinedInFlight: Boolean,
+    val cacheMode: String,
+    val stage: String,
+    val outcome: String?,
+    val cellIndex: Int?,
 )

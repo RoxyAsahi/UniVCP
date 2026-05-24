@@ -20,6 +20,7 @@ internal data class RichHtmlAnalysis(
     val kind: RichHtmlRenderKind,
     val previewText: String,
     val nativeConfidence: NativeConfidence,
+    val htmlLength: Int = 0,
 )
 
 internal fun analyzeRichHtml(html: String): RichHtmlAnalysis {
@@ -48,6 +49,7 @@ private fun analyzeRichHtmlUncached(html: String): RichHtmlAnalysis {
             kind = RichHtmlRenderKind.ComplexDynamic,
             previewText = previewText,
             nativeConfidence = NativeConfidence.DynamicPreview,
+            htmlLength = html.length,
         )
     }
 
@@ -61,6 +63,7 @@ private fun analyzeRichHtmlUncached(html: String): RichHtmlAnalysis {
         kind = kind,
         previewText = previewText,
         nativeConfidence = estimateNativeConfidence(html, kind),
+        htmlLength = html.length,
     )
 }
 

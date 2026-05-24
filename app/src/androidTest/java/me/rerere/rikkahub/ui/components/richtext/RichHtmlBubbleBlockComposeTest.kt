@@ -7,16 +7,18 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.ComposeContentTestRule
-import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithTag
@@ -26,6 +28,7 @@ import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -82,6 +85,56 @@ class RichHtmlBubbleBlockComposeTest {
     }
 
     @Test
+    fun snapshotCandidateRendersStaticImageAndOpensPreview() {
+        var openedPreview = false
+
+        composeRule.setContent {
+            MaterialTheme {
+                RichHtmlBubbleBlock(
+                    html = SnapshotCandidateHtml,
+                    modifier = Modifier.padding(12.dp),
+                    onOpenPreview = { openedPreview = true },
+                    renderFallback = {
+                        Text("动态预览兜底")
+                    },
+                )
+            }
+        }
+
+        composeRule.waitUntilNodeWithTagExists("rich-html-snapshot-image")
+        composeRule.onNodeWithTag("rich-html-snapshot-image").assertIsDisplayed().performClick()
+        composeRule.runOnIdle {
+            assertEquals(true, openedPreview)
+        }
+    }
+
+    @Test
+    fun nativeGridHonorsExplicitPlacementInBubble() {
+        composeRule.setContent {
+            MaterialTheme {
+                RichHtmlBubbleBlock(
+                    html = ExplicitGridHtml,
+                    modifier = Modifier
+                        .width(320.dp)
+                        .padding(12.dp),
+                )
+            }
+        }
+
+        composeRule.waitUntilTextExists("Grid A")
+        composeRule.waitUntilTextExists("Grid B")
+        composeRule.waitUntilTextExists("Grid C")
+
+        val first = composeRule.onNodeWithText("Grid A").getUnclippedBoundsInRoot()
+        val placed = composeRule.onNodeWithText("Grid B").getUnclippedBoundsInRoot()
+        val secondRow = composeRule.onNodeWithText("Grid C").getUnclippedBoundsInRoot()
+
+        assertTrue("explicit column 2 item should render to the right of column 1", placed.left > first.left)
+        assertTrue("explicit row 2 item should render below row 1", secondRow.top > first.top)
+        assertTrue("row 2 column 1 item should stay left of the column 2 span", secondRow.left < placed.left)
+    }
+
+    @Test
     fun lazyColumnScrollsToOffscreenRichHtmlBubble() {
         var sentInput: String? = null
 
@@ -123,6 +176,14 @@ class RichHtmlBubbleBlockComposeTest {
         waitUntil(timeoutMillis = 10_000) {
             runCatching {
                 onNodeWithText(text).assertExists()
+            }.isSuccess
+        }
+    }
+
+    private fun ComposeContentTestRule.waitUntilNodeWithTagExists(tag: String) {
+        waitUntil(timeoutMillis = 12_000) {
+            runCatching {
+                onNodeWithTag(tag).assertExists()
             }.isSuccess
         }
     }
@@ -170,5 +231,20 @@ private val ScrollTargetHtml = """
       <h2>滚动目标卡片</h2>
       <p>这个富 HTML 气泡位于长列表深处，用来验证自动滚动和延迟编译。</p>
       <button data-send="滚动目标">提交滚动动作</button>
+    </div>
+""".trimIndent()
+
+private val SnapshotCandidateHtml = """
+    <div id="response-root" style="padding:18px;border-radius:18px;background:rgba(255,255,255,.75);backdrop-filter:blur(12px);border:1px solid rgba(255,255,255,.4);color:#111827;">
+      <h2 style="margin:0;">Snapshot 候选卡片</h2>
+      <p style="margin-bottom:0;">这个卡片包含 backdrop-filter，聊天列表应显示 WebView 静态快照。</p>
+    </div>
+""".trimIndent()
+
+private val ExplicitGridHtml = """
+    <div id="vcp-root" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;color:#111827;font-size:14px;">
+      <div style="grid-column:1;grid-row:1;background:#dbeafe;padding:6px;">Grid A</div>
+      <div style="grid-column:2 / span 3;grid-row:1 / span 2;min-height:56px;background:#dcfce7;padding:6px;">Grid B</div>
+      <div style="grid-column:1;grid-row:2;background:#fee2e2;padding:6px;">Grid C</div>
     </div>
 """.trimIndent()

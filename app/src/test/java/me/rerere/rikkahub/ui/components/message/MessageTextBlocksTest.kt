@@ -22,6 +22,9 @@ import me.rerere.rikkahub.ui.components.richtext.RichBackgroundImage
 import me.rerere.rikkahub.ui.components.richtext.RichBackgroundBox
 import me.rerere.rikkahub.ui.components.richtext.RichAlign
 import me.rerere.rikkahub.ui.components.richtext.RichAlignContent
+import me.rerere.rikkahub.ui.components.richtext.RichAnimationDirection
+import me.rerere.rikkahub.ui.components.richtext.RichAnimationEasing
+import me.rerere.rikkahub.ui.components.richtext.RichAnimationFillMode
 import me.rerere.rikkahub.ui.components.richtext.RichAnimationStrategy
 import me.rerere.rikkahub.ui.components.richtext.RichBorderStyle
 import me.rerere.rikkahub.ui.components.richtext.RichBorderCollapse
@@ -69,6 +72,18 @@ class MessageTextBlocksTest {
         )
 
         assertEquals(listOf(MessageTextBlock.Markdown("你好\n\n**今天继续学 EV**")), blocks)
+    }
+
+    @Test
+    fun `long markdown is split into stable render cells`() {
+        val paragraph = "这是一个很长的段落，用来模拟助手一次性输出大量正文。\n\n"
+        val text = paragraph.repeat(140)
+
+        val blocks = parseMessageTextBlocks(text, streaming = false)
+
+        assertTrue(blocks.size > 1)
+        assertTrue(blocks.all { it is MessageTextBlock.Markdown })
+        assertEquals(text, blocks.joinToString(separator = "") { (it as MessageTextBlock.Markdown).text })
     }
 
     @Test
@@ -257,6 +272,30 @@ class MessageTextBlocksTest {
         assertNotEquals(firstKey, stableMessageTextBlockKey("message-1", 0, second))
         assertNotEquals(firstKey, stableMessageTextBlockKey("message-1", 0, html))
         assertTrue(stableMessageTextBlockKey("message-1", 0, html).contains(":html:"))
+    }
+
+    @Test
+    fun `streaming partial rich html keeps stable block key across increments`() {
+        val first = MessageTextBlock.VcpHtml(
+            html = "<div id=\"vcp-root\"><h2>title",
+            partial = true,
+            executable = false,
+            previewHtml = "<div id=\"vcp-root\"><h2>title</h2></div>",
+        )
+        val second = first.copy(
+            html = "<div id=\"vcp-root\"><h2>title</h2><p>body",
+            previewHtml = "<div id=\"vcp-root\"><h2>title</h2><p>body</p></div>",
+        )
+        val final = MessageTextBlock.VcpHtml(
+            html = "<div id=\"vcp-root\"><h2>title</h2><p>body</p></div>",
+            partial = false,
+            executable = false,
+        )
+
+        val firstKey = stableMessageTextBlockKey("message-1", 0, first)
+
+        assertEquals(firstKey, stableMessageTextBlockKey("message-1", 0, second))
+        assertNotEquals(firstKey, stableMessageTextBlockKey("message-1", 0, final))
     }
 
     @Test
@@ -789,7 +828,7 @@ class MessageTextBlocksTest {
     }
 
     @Test
-    fun `finite transform keyframes become native animation while complex keyframes stay static`() {
+    fun `finite transform and multi keyframes become native animation`() {
         val html = """
             <div id="vcp-root">
               <style>
@@ -809,7 +848,78 @@ class MessageTextBlocksTest {
         assertEquals(900, pop.style.animation.nativeAnimation?.durationMs)
         assertEquals(0.96f, pop.style.animation.nativeAnimation?.fromTransform?.scaleX ?: -1f, 0.001f)
         assertEquals(-2f, pop.style.animation.nativeAnimation?.fromTransform?.rotateZ ?: 0f, 0.001f)
-        assertEquals(null, mid.style.animation.nativeAnimation)
+        assertEquals(3, mid.style.animation.nativeAnimation?.stops?.size)
+        assertEquals(1, mid.style.animation.multiKeyframeCount)
+        assertEquals(1, mid.style.animation.nativeAnimation?.iterationCount)
+    }
+
+    @Test
+    fun `animation direction fill mode easing and finite iteration compile to native animation`() {
+        val html = """
+            <div id="vcp-root">
+              <style>
+                @keyframes slide { from { opacity:.2; transform:translateX(10px); } to { opacity:1; transform:translateX(0); } }
+              </style>
+              <div style="animation:slide .4s cubic-bezier(.2,.8,.2,1) 0s 2 reverse both;">Slide</div>
+              <div style="animation:slide .4s linear none;">NoFill</div>
+            </div>
+        """.trimIndent()
+
+        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
+        val textBlocks = flattenRichBlocks(root).filterIsInstance<RichTextBlock>()
+        val slide = textBlocks.single { it.content.text == "Slide" }
+        val noFill = textBlocks.single { it.content.text == "NoFill" }
+
+        assertEquals(RichAnimationDirection.Reverse, slide.style.animation.direction)
+        assertEquals(RichAnimationFillMode.Both, slide.style.animation.fillMode)
+        assertTrue(slide.style.animation.easing is RichAnimationEasing.CubicBezier)
+        assertEquals(2, slide.style.animation.nativeAnimation?.iterationCount)
+        assertEquals(800, slide.style.animation.nativeAnimation?.totalDurationMs)
+        assertEquals(0.dp, slide.style.animation.nativeAnimation?.fromTransform?.translateX)
+        assertEquals(10.dp, slide.style.animation.nativeAnimation?.toTransform?.translateX)
+        assertEquals(RichAnimationFillMode.None, noFill.style.animation.fillMode)
+        assertEquals(RichAnimationEasing.Linear, noFill.style.animation.easing)
+        assertEquals(RichTransform.None, noFill.style.animation.nativeAnimation?.toTransform)
+    }
+
+    @Test
+    fun `infinite opacity pulse staticizes to most visible state without native playback`() {
+        val html = """
+            <div id="vcp-root">
+              <style>@keyframes pulse { 0% { opacity:.35; } 50% { opacity:1; } 100% { opacity:.55; } }</style>
+              <span style="opacity:.4; animation:pulse 1s infinite ease-in-out;">LIVE</span>
+            </div>
+        """.trimIndent()
+
+        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
+        val live = flattenRichBlocks(root).filterIsInstance<RichTextBlock>().single()
+
+        assertEquals(null, live.style.animation.nativeAnimation)
+        assertEquals(1f, live.style.opacity, 0.001f)
+        assertEquals(1f, live.style.animation.staticOpacity ?: -1f, 0.001f)
+    }
+
+    @Test
+    fun `multiple animations keep first native candidate and count unsupported extras`() {
+        val html = """
+            <div id="vcp-root">
+              <style>
+                @keyframes fade { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+                @keyframes grow { from { width:10px; } to { width:20px; } }
+              </style>
+              <div style="animation:fade .4s ease-out forwards, grow .4s ease-out forwards;">Combo</div>
+            </div>
+        """.trimIndent()
+
+        val model = RichHtmlCompiler.compile(html)
+        val combo = flattenRichBlocks(model.blocks.single()).filterIsInstance<RichTextBlock>().single()
+
+        assertEquals(2, combo.style.animation.declaredAnimationCount)
+        assertEquals(400, combo.style.animation.nativeAnimation?.durationMs)
+        assertEquals(2, combo.style.animation.unsupportedPropertyCount)
+        assertEquals(1, model.animationStats.nativeAnimatedCount)
+        assertEquals(2, model.animationStats.unsupportedPropertyCount)
+        assertEquals(1, model.animationStats.snapshotCandidateCount)
     }
 
     @Test
@@ -1311,8 +1421,28 @@ class MessageTextBlocksTest {
         assertEquals(1f, narrow.style.flexShrink, 0.01f)
         assertEquals(RichAlignContent.Stretch, wrap.style.alignContent)
         assertEquals(RichGridColumns.Count(4), grid.style.gridColumns)
+        assertEquals(2, gridSpan.style.gridColumnStart)
+        assertEquals(1, gridSpan.style.gridRowStart)
         assertEquals(3, gridSpan.style.gridColumnSpan)
         assertEquals(2, gridSpan.style.gridRowSpan)
+    }
+
+    @Test
+    fun `native compiler preserves explicit grid longhand placement`() {
+        val html = """
+            <div id="vcp-root" style="display:grid;grid-template-columns:repeat(4,1fr);">
+              <span style="grid-column-start:2;grid-column-end:span 2;grid-row-start:3;grid-row-end:5;">Placed</span>
+            </div>
+        """.trimIndent()
+
+        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
+        val placed = root.children.filterIsInstance<RichTextBlock>().single()
+
+        assertEquals(RichDisplay.Grid, root.style.display)
+        assertEquals(2, placed.style.gridColumnStart)
+        assertEquals(3, placed.style.gridRowStart)
+        assertEquals(2, placed.style.gridColumnSpan)
+        assertEquals(2, placed.style.gridRowSpan)
     }
 
     @Test

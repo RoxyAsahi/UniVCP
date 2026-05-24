@@ -5,7 +5,12 @@ import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
 import android.graphics.RectF
-import android.graphics.Shader
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.Easing
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
@@ -29,7 +34,6 @@ import androidx.compose.foundation.layout.FlexBoxScope
 import androidx.compose.foundation.layout.FlexDirection
 import androidx.compose.foundation.layout.FlexJustifyContent
 import androidx.compose.foundation.layout.FlexWrap
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxSize
@@ -65,10 +69,13 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -77,11 +84,16 @@ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.MeasureScope
+import androidx.compose.ui.layout.Placeable
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -100,7 +112,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.takeOrElse
 import androidx.compose.ui.zIndex
-import androidx.core.graphics.PathParser
 import coil3.compose.AsyncImage
 import coil3.compose.rememberAsyncImagePainter
 import me.rerere.rikkahub.ui.components.table.DataTableCellStyle
@@ -113,6 +124,9 @@ import kotlin.math.sin
 
 private val LocalRichRenderColorDefaults = staticCompositionLocalOf { RichRenderColorDefaults.Fallback }
 private val LocalRichEffectiveBackground = staticCompositionLocalOf<Color?> { null }
+private val LocalRichAnimationHostId = staticCompositionLocalOf { "rich-html" }
+private val LocalRichNativeAnimationsEnabled = staticCompositionLocalOf { true }
+private val MAX_SAFE_CSS_BLUR_RADIUS = 12.dp
 
 @OptIn(ExperimentalLayoutApi::class, ExperimentalFlexBoxApi::class)
 @Composable
@@ -120,12 +134,16 @@ internal fun RichHtmlRenderer(
     model: RichHtmlRenderModel,
     modifier: Modifier = Modifier,
     onSendInput: (String) -> Unit = {},
+    nativeAnimationsEnabled: Boolean = true,
+    animationHostId: String = model.id,
 ) {
     val defaults = MaterialTheme.colorScheme.toRichRenderColorDefaults().harmonized()
     CompositionLocalProvider(
         LocalRichRenderColorDefaults provides defaults,
         LocalRichEffectiveBackground provides defaults.surface,
         LocalContentColor provides defaults.text,
+        LocalRichNativeAnimationsEnabled provides nativeAnimationsEnabled,
+        LocalRichAnimationHostId provides animationHostId,
     ) {
         Column(
             modifier = modifier
@@ -174,7 +192,7 @@ private fun RichContainerBlockView(
     onSendInput: (String) -> Unit,
     root: Boolean,
 ) {
-    StyledContainer(block.style, modifier = modifier, root = root) {
+    StyledContainer(block.style, modifier = modifier, root = root, animationKey = block.blockId) {
         ProvideTextStyle(LocalTextStyle.current.merge(block.style.toTextStyle(LocalContentColor.current))) {
             val positionedChildren = block.children.filter { it.style.isPositionedOverlay() }
                 .sortedBy { it.style.zIndex }
@@ -226,22 +244,7 @@ private fun RichContainerFlowChildren(
             RichFlexBoxChildren(children = children, parentStyle = parentStyle, onSendInput = onSendInput)
         }
         parentStyle.display == RichDisplay.Grid -> {
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(parentStyle.columnGap, parentStyle.toFlowAlignment()),
-                verticalArrangement = parentStyle.toFlowVerticalArrangement(),
-            ) {
-                children.forEach { child ->
-                    RichBlockView(
-                        child,
-                        onSendInput,
-                        Modifier
-                            .then(parentStyle.gridChildModifier(child.style))
-                            .then(child.style.flowFlexItemModifier(parentStyle))
-                            .then(parentStyle.alignContentStretchChildModifier()),
-                    )
-                }
-            }
+            RichGridChildren(children = children, parentStyle = parentStyle, onSendInput = onSendInput)
         }
         else -> {
             Column(
@@ -251,6 +254,99 @@ private fun RichContainerFlowChildren(
                 children.forEach { child ->
                     RichBlockView(child, onSendInput, blockFlowModifier(child.style))
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RichGridChildren(
+    children: List<RichBlock>,
+    parentStyle: ComputedStyle,
+    onSendInput: (String) -> Unit,
+) {
+    Layout(
+        modifier = Modifier.fillMaxWidth(),
+        content = {
+            children.forEach { child ->
+                androidx.compose.runtime.key(child.blockId) {
+                    RichBlockView(
+                        block = child,
+                        onSendInput = onSendInput,
+                        modifier = Modifier
+                            .richGridItemConstraints(child.style, parentStyle)
+                            .zIndex(child.style.zIndex),
+                    )
+                }
+            }
+        },
+    ) { measurables, constraints ->
+        val layoutWidth = constraints.maxWidth.takeIf { it != Constraints.Infinity }
+            ?: constraints.minWidth
+        val columnGapPx = parentStyle.columnGap.roundToPx().coerceAtLeast(0)
+        val rowGapPx = parentStyle.rowGap.roundToPx().coerceAtLeast(0)
+        val columnCount = gridColumnCount(parentStyle, layoutWidth, columnGapPx, children.size)
+        val columnWidths = distributeGridTrackWidths(layoutWidth, columnCount, columnGapPx)
+        val placements = mutableListOf<RichGridMeasuredItem>()
+        val occupied = mutableSetOf<Long>()
+
+        measurables.forEachIndexed { index, measurable ->
+            val style = children[index].style
+            val columnSpan = style.gridColumnSpan.coerceIn(1, columnCount)
+            val rowSpan = style.gridRowSpan.coerceIn(1, 8)
+            val cell = findRichGridCell(
+                occupied = occupied,
+                columnCount = columnCount,
+                rowSpan = rowSpan,
+                columnSpan = columnSpan,
+                columnStart = style.gridColumnStart,
+                rowStart = style.gridRowStart,
+            )
+            markRichGridOccupied(occupied, cell.row, cell.column, rowSpan, columnSpan)
+            val itemWidth = columnWidths.spannedSize(cell.column, columnSpan, columnGapPx)
+            val stretchWidth = parentStyle.alignItems == RichAlign.Stretch || style.alignSelf == RichAlign.Stretch
+            val placeable = measurable.measure(
+                Constraints(
+                    minWidth = if (stretchWidth) itemWidth else 0,
+                    maxWidth = itemWidth,
+                    minHeight = 0,
+                    maxHeight = Constraints.Infinity,
+                )
+            )
+            placements += RichGridMeasuredItem(
+                placeable = placeable,
+                row = cell.row,
+                column = cell.column,
+                rowSpan = rowSpan,
+                columnSpan = columnSpan,
+            )
+        }
+
+        val rowCount = placements.maxOfOrNull { it.row + it.rowSpan } ?: 0
+        val rowHeights = MutableList(rowCount) { 0 }
+        placements.forEach { item ->
+            val contentHeight = (item.placeable.height - rowGapPx * (item.rowSpan - 1)).coerceAtLeast(0)
+            val currentHeight = (item.row until item.row + item.rowSpan).sumOf { rowHeights[it] }
+            if (contentHeight > currentHeight) {
+                var remaining = contentHeight - currentHeight
+                for (row in item.row until item.row + item.rowSpan) {
+                    val delta = remaining / (item.row + item.rowSpan - row)
+                    rowHeights[row] += delta
+                    remaining -= delta
+                }
+            }
+        }
+
+        val contentHeight = rowHeights.sum() + rowGapPx * (rowCount - 1).coerceAtLeast(0)
+        val layoutHeight = contentHeight.constrainDimension(constraints.minHeight, constraints.maxHeight)
+        val columnOffsets = columnWidths.runningOffsets(columnGapPx)
+        val rowOffsets = rowHeights.runningOffsets(rowGapPx)
+        layout(layoutWidth.constrainDimension(constraints.minWidth, constraints.maxWidth), layoutHeight) {
+            placements.forEach { item ->
+                item.placeable.placeRelative(
+                    x = columnOffsets.getOrElse(item.column) { 0 },
+                    y = rowOffsets.getOrElse(item.row) { 0 },
+                )
             }
         }
     }
@@ -294,9 +390,12 @@ private fun RichFlexBoxChildren(
 
 @Composable
 private fun RichTextBlockView(block: RichTextBlock, modifier: Modifier) {
-    StyledContainer(block.style, modifier = modifier, root = false) {
-        val textStyle = LocalTextStyle.current.merge(block.style.toTextStyle(LocalContentColor.current))
-        val text = block.content.withTextClipBrush(block.style)
+    StyledContainer(block.style, modifier = modifier, root = false, animationKey = block.blockId) {
+        val textClipBrush = block.style.textClipBrush()
+        val textStyle = LocalTextStyle.current.merge(
+            block.style.toTextStyle(if (textClipBrush != null) Color.White else LocalContentColor.current)
+        )
+        val text = block.content
         val marker = block.listMarker
         val markerImage = block.style.listStyleImage
         if (marker != null && markerImage != null && block.inlineMath.isEmpty() && text.text.startsWith(marker)) {
@@ -312,6 +411,7 @@ private fun RichTextBlockView(block: RichTextBlock, modifier: Modifier) {
                 )
                 Text(
                     text = text.subSequence(marker.length, text.length),
+                    modifier = Modifier.textClipBrushMask(textClipBrush),
                     style = textStyle,
                     maxLines = if (block.style.whiteSpace == RichWhiteSpace.NoWrap) 1 else Int.MAX_VALUE,
                     overflow = if (block.style.textOverflow == RichTextOverflow.Ellipsis) TextOverflow.Ellipsis else TextOverflow.Clip,
@@ -322,6 +422,7 @@ private fun RichTextBlockView(block: RichTextBlock, modifier: Modifier) {
         val inline = buildInlineMathText(text, block.inlineMath, textStyle)
         Text(
             text = inline.text,
+            modifier = Modifier.textClipBrushMask(textClipBrush),
             inlineContent = inline.inlineContent,
             style = textStyle,
             maxLines = if (block.style.whiteSpace == RichWhiteSpace.NoWrap) 1 else Int.MAX_VALUE,
@@ -366,7 +467,7 @@ private fun RichListImageMarker(
 
 @Composable
 private fun RichImageBlockView(block: RichImageBlock, modifier: Modifier) {
-    StyledContainer(block.style, modifier = modifier, root = false) {
+    StyledContainer(block.style, modifier = modifier, root = false, animationKey = block.blockId) {
         ZoomableAsyncImage(
             model = block.src,
             contentDescription = block.alt,
@@ -380,7 +481,7 @@ private fun RichImageBlockView(block: RichImageBlock, modifier: Modifier) {
 
 @Composable
 private fun RichTableBlockView(block: RichTableBlock, modifier: Modifier) {
-    StyledContainer(block.style, modifier = modifier, root = false) {
+    StyledContainer(block.style, modifier = modifier, root = false, animationKey = block.blockId) {
         val defaults = LocalRichRenderColorDefaults.current
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             val caption: @Composable () -> Unit = {
@@ -441,7 +542,7 @@ private fun RichTableBlockView(block: RichTableBlock, modifier: Modifier) {
 
 @Composable
 private fun TableCellContent(cell: RichTableCell) {
-    StyledContainer(cell.style, root = false) {
+    StyledContainer(cell.style, root = false, animationKey = null) {
         Text(
             text = cell.content,
             style = cell.style.toTextStyle(LocalContentColor.current),
@@ -510,7 +611,10 @@ private fun legacyTableSections(block: RichTableBlock): List<RichTableSection> {
 
 @Composable
 private fun RichSvgBlockView(block: RichSvgBlock, modifier: Modifier) {
-    StyledContainer(block.style, modifier = modifier, root = false) {
+    StyledContainer(block.style, modifier = modifier, root = false, animationKey = block.blockId) {
+        val preparedCommands = remember(block.model) {
+            RichSvgPreparedDrawCache.prepare(block.model)
+        }
         Canvas(
             modifier = Modifier
                 .width(block.model.width)
@@ -523,7 +627,7 @@ private fun RichSvgBlockView(block: RichSvgBlock, modifier: Modifier) {
                 native.save()
                 native.scale(scaleX, scaleY)
                 native.translate(-block.model.viewBox.x, -block.model.viewBox.y)
-                block.model.commands.forEach { command -> command.draw(native) }
+                preparedCommands.forEach { command -> command.draw(native) }
                 native.restore()
             }
         }
@@ -532,7 +636,7 @@ private fun RichSvgBlockView(block: RichSvgBlock, modifier: Modifier) {
 
 @Composable
 private fun RichMathBlockView(block: RichMathBlock, modifier: Modifier) {
-    StyledContainer(block.style, modifier = modifier, root = false) {
+    StyledContainer(block.style, modifier = modifier, root = false, animationKey = block.blockId) {
         if (block.inline) {
             MathInline(latex = block.latex, fontSize = block.style.fontSize)
         } else {
@@ -556,6 +660,7 @@ private fun RichButtonBlockView(
         style = block.style,
         modifier = modifier.testTag("rich-html-button"),
         root = false,
+        animationKey = block.blockId,
         onClick = click.takeIf { block.action.isNotBlank() },
     ) {
         Text(
@@ -573,7 +678,7 @@ private fun RichDetailsBlockView(
     onSendInput: (String) -> Unit,
 ) {
     var expanded by remember(block.blockId) { mutableStateOf(block.open) }
-    StyledContainer(block.style, modifier = modifier, root = false) {
+    StyledContainer(block.style, modifier = modifier, root = false, animationKey = block.blockId) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(
                 modifier = Modifier
@@ -621,6 +726,7 @@ private fun StyledContainer(
     style: ComputedStyle,
     modifier: Modifier = Modifier,
     root: Boolean,
+    animationKey: String?,
     onClick: (() -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
@@ -641,26 +747,32 @@ private fun StyledContainer(
         largeOrBold = style.isLargeOrBoldText(),
     ).copy(alpha = (style.color?.alpha ?: 1f) * effectiveOpacity)
     val paintBoxBackground = style.backgroundClip != RichBackgroundBox.Text
+    val backgroundLayers = style.backgroundLayers.takeIf { paintBoxBackground && it.isNotEmpty() }.orEmpty()
+    val hasLayerBackground = backgroundLayers.isNotEmpty()
     val brush = style.backgroundBrush().takeIf { paintBoxBackground }
     val surfaceBorder = style.surfaceBorderStroke()
     val drawBorder = style.hasCustomDrawBorder()
+    val backdropApproximation = style.backdropFilter.hasSupportedEffect
     var outer = modifier
         .then(style.marginModifier())
         .then(style.baseModifier(root))
     outer = outer.then(style.richShadowModifier(shape))
+    outer = outer.then(style.cssClipPathModifier())
+    outer = outer.then(style.cssMaskModifier())
+    outer = outer.then(style.cssBlurFilterModifier())
     outer = outer.then(style.cssColorFilterModifier())
-    outer = outer.then(style.nativeAnimationModifier())
+    outer = outer.then(style.nativeAnimationModifier(animationKey))
     if (style.overflow == RichOverflow.Hidden) outer = outer.clip(shape)
     if (onClick != null) outer = outer.clickable(onClick = onClick)
     if (style.overflow == RichOverflow.Scroll || style.overflow == RichOverflow.Auto) {
         outer = outer.horizontalScroll(rememberScrollState())
     }
 
-    if (backgroundColor != null || brush != null || surfaceBorder != null || drawBorder || root || (paintBoxBackground && style.backgroundUrl != null)) {
+    if (backgroundColor != null || brush != null || hasLayerBackground || surfaceBorder != null || drawBorder || backdropApproximation || root || (paintBoxBackground && style.backgroundUrl != null)) {
         Surface(
             modifier = outer,
             shape = shape,
-            color = if (brush == null && (style.backgroundUrl == null || !paintBoxBackground)) backgroundColor ?: Color.Transparent else Color.Transparent,
+            color = if (brush == null && !hasLayerBackground && (style.backgroundUrl == null || !paintBoxBackground)) backgroundColor ?: Color.Transparent else Color.Transparent,
             contentColor = contentColor,
             border = surfaceBorder,
         ) {
@@ -670,13 +782,15 @@ private fun StyledContainer(
             ) {
                 Box(
                     Modifier
-                        .then(if (brush != null) style.backgroundBrushModifier(brush, shape) else Modifier)
-                        .then(if (paintBoxBackground && style.backgroundUrl != null && style.backgroundRepeat != RichBackgroundRepeat.NoRepeat) style.repeatedBackgroundModifier() else Modifier)
+                        .then(if (backdropApproximation) style.backdropApproximationModifier(shape, defaults) else Modifier)
+                        .then(if (hasLayerBackground) style.backgroundLayersModifier(backgroundLayers, shape, backgroundColor) else Modifier)
+                        .then(if (!hasLayerBackground && brush != null) style.backgroundBrushModifier(brush, shape) else Modifier)
+                        .then(if (!hasLayerBackground && paintBoxBackground && style.backgroundUrl != null && style.backgroundRepeat != RichBackgroundRepeat.NoRepeat) style.repeatedBackgroundModifier() else Modifier)
                         .then(if (paintBoxBackground && style.backgroundUrl != null) Modifier.background(Color.Transparent, shape) else Modifier)
                         .then(if (drawBorder) style.borderDrawModifier(shape) else Modifier)
                         .padding(style.padding.toPaddingValues(root))
                 ) {
-                    style.backgroundUrl?.takeIf { paintBoxBackground && style.backgroundRepeat == RichBackgroundRepeat.NoRepeat }?.let { url ->
+                    style.backgroundUrl?.takeIf { !hasLayerBackground && paintBoxBackground && style.backgroundRepeat == RichBackgroundRepeat.NoRepeat }?.let { url ->
                         val areaPadding = style.backgroundAreaPadding(style.backgroundOrigin)
                         ZoomableAsyncImage(
                             model = url,
@@ -725,23 +839,104 @@ private fun ComputedStyle.cssColorFilterModifier(): Modifier {
     }
 }
 
+private fun ComputedStyle.cssBlurFilterModifier(): Modifier {
+    val radius = cssFilter.blurRadius
+        ?.takeIf { it > 0.dp && it <= MAX_SAFE_CSS_BLUR_RADIUS }
+        ?: return Modifier
+    return Modifier.blur(radius)
+}
+
+private fun ComputedStyle.cssMaskModifier(): Modifier {
+    val brush = maskImage?.let(::richBackgroundImageBrush) ?: return Modifier
+    return Modifier.drawWithContent {
+        drawContext.canvas.saveLayer(Rect(Offset.Zero, size), androidx.compose.ui.graphics.Paint())
+        drawContent()
+        drawRect(brush = brush, blendMode = BlendMode.DstIn)
+        drawContext.canvas.restore()
+    }
+}
+
+private fun ComputedStyle.cssClipPathModifier(): Modifier {
+    val clip = clipPath ?: return Modifier
+    return Modifier.drawWithContent {
+        val native = drawContext.canvas.nativeCanvas
+        val checkpoint = native.save()
+        when (clip) {
+            is RichClipPath.Inset -> {
+                val left = resolveShapeSizePx(clip.left, size.width)
+                val top = resolveShapeSizePx(clip.top, size.height)
+                val right = size.width - resolveShapeSizePx(clip.right, size.width)
+                val bottom = size.height - resolveShapeSizePx(clip.bottom, size.height)
+                val radius = clip.radius.toPx().coerceAtLeast(0f)
+                val path = android.graphics.Path().apply {
+                    addRoundRect(
+                        RectF(left, top, right.coerceAtLeast(left), bottom.coerceAtLeast(top)),
+                        radius,
+                        radius,
+                        android.graphics.Path.Direction.CW,
+                    )
+                }
+                native.clipPath(path)
+            }
+            is RichClipPath.Circle -> {
+                val centerX = resolveShapeSizePx(clip.centerX, size.width)
+                val centerY = resolveShapeSizePx(clip.centerY, size.height)
+                val radius = resolveShapeSizePx(clip.radius, min(size.width, size.height)).coerceAtLeast(0f)
+                val path = android.graphics.Path().apply {
+                    addOval(
+                        RectF(centerX - radius, centerY - radius, centerX + radius, centerY + radius),
+                        android.graphics.Path.Direction.CW,
+                    )
+                }
+                native.clipPath(path)
+            }
+            is RichClipPath.Ellipse -> {
+                val centerX = resolveShapeSizePx(clip.centerX, size.width)
+                val centerY = resolveShapeSizePx(clip.centerY, size.height)
+                val radiusX = resolveShapeSizePx(clip.radiusX, size.width).coerceAtLeast(0f)
+                val radiusY = resolveShapeSizePx(clip.radiusY, size.height).coerceAtLeast(0f)
+                val path = android.graphics.Path().apply {
+                    addOval(
+                        RectF(centerX - radiusX, centerY - radiusY, centerX + radiusX, centerY + radiusY),
+                        android.graphics.Path.Direction.CW,
+                    )
+                }
+                native.clipPath(path)
+            }
+        }
+        drawContent()
+        native.restoreToCount(checkpoint)
+    }
+}
+
 @Composable
-private fun ComputedStyle.nativeAnimationModifier(): Modifier {
+private fun ComputedStyle.nativeAnimationModifier(animationKey: String?): Modifier {
     val native = animation.nativeAnimation ?: return Modifier
-    var started by remember(native) { mutableStateOf(false) }
-    LaunchedEffect(native) {
-        started = true
+    val enabled = LocalRichNativeAnimationsEnabled.current
+    val hostId = LocalRichAnimationHostId.current
+    val fullKey = remember(hostId, animationKey, native.signature) {
+        animationKey?.let { "$hostId:$it:${native.signature}" }
+    }
+    val shouldPlay = remember(fullKey, enabled) {
+        enabled && fullKey != null && RichHtmlAnimationPlaybackRegistry.markForPlayback(fullKey)
+    }
+    var started by remember(fullKey, shouldPlay) { mutableStateOf(!shouldPlay) }
+    if (shouldPlay) {
+        LaunchedEffect(fullKey) {
+            started = true
+        }
     }
     val progress by animateFloatAsState(
-        targetValue = if (started) 1f else 0f,
-        animationSpec = tween(durationMillis = native.durationMs, delayMillis = native.delayMs),
+        targetValue = if (started) native.iterationCount.toFloat() else 0f,
+        animationSpec = tween(
+            durationMillis = if (shouldPlay) native.totalDurationMs else 0,
+            delayMillis = if (shouldPlay) native.delayMs else 0,
+            easing = native.easing.toComposeEasing(),
+        ),
         label = "rich-html-native-css-animation",
     )
-    val animatedOpacity = lerpCss(
-        native.fromOpacity ?: 1f,
-        native.toOpacity ?: 1f,
-        progress,
-    ).coerceIn(0f, 1f)
+    val normalizedProgress = native.normalizedProgress(progress)
+    val animatedOpacity = native.opacityAt(normalizedProgress).coerceIn(0f, 1f)
     val transform = native.transformAt(progress)
     val density = LocalDensity.current
     return Modifier.graphicsLayer {
@@ -755,15 +950,67 @@ private fun ComputedStyle.nativeAnimationModifier(): Modifier {
 }
 
 private fun RichNativeAnimation.transformAt(progress: Float): RichTransform {
+    val (start, end, fraction) = segmentAt(normalizedProgress(progress))
     return RichTransform(
-        translateX = lerpDp(fromTransform.translateX, toTransform.translateX, progress),
-        translateY = lerpDp(fromTransform.translateY, toTransform.translateY, progress),
-        scaleX = lerpCss(fromTransform.scaleX, toTransform.scaleX, progress),
-        scaleY = lerpCss(fromTransform.scaleY, toTransform.scaleY, progress),
-        rotateZ = lerpCss(fromTransform.rotateZ, toTransform.rotateZ, progress),
-        skewX = lerpCss(fromTransform.skewX, toTransform.skewX, progress),
-        skewY = lerpCss(fromTransform.skewY, toTransform.skewY, progress),
+        translateX = lerpDp(start.transform.translateX, end.transform.translateX, fraction),
+        translateY = lerpDp(start.transform.translateY, end.transform.translateY, fraction),
+        scaleX = lerpCss(start.transform.scaleX, end.transform.scaleX, fraction),
+        scaleY = lerpCss(start.transform.scaleY, end.transform.scaleY, fraction),
+        rotateZ = lerpCss(start.transform.rotateZ, end.transform.rotateZ, fraction),
+        skewX = lerpCss(start.transform.skewX, end.transform.skewX, fraction),
+        skewY = lerpCss(start.transform.skewY, end.transform.skewY, fraction),
     )
+}
+
+private fun RichNativeAnimation.opacityAt(progress: Float): Float {
+    val (start, end, fraction) = segmentAt(progress)
+    return lerpCss(start.opacity ?: 1f, end.opacity ?: 1f, fraction)
+}
+
+private fun RichNativeAnimation.segmentAt(progress: Float): Triple<RichNativeAnimationStop, RichNativeAnimationStop, Float> {
+    val ordered = stops.sortedBy { it.progress }.ifEmpty {
+        listOf(RichNativeAnimationStop(0f, fromOpacity, fromTransform), RichNativeAnimationStop(1f, toOpacity, toTransform))
+    }
+    if (progress <= ordered.first().progress) return Triple(ordered.first(), ordered.first(), 1f)
+    if (progress >= ordered.last().progress) return Triple(ordered.last(), ordered.last(), 1f)
+    val endIndex = ordered.indexOfFirst { it.progress >= progress }.coerceAtLeast(1)
+    val start = ordered[endIndex - 1]
+    val end = ordered[endIndex]
+    val span = (end.progress - start.progress).coerceAtLeast(0.0001f)
+    return Triple(start, end, ((progress - start.progress) / span).coerceIn(0f, 1f))
+}
+
+private fun RichNativeAnimation.normalizedProgress(progress: Float): Float {
+    if (iterationCount <= 1) return progress.coerceIn(0f, 1f)
+    if (progress >= iterationCount.toFloat()) return 1f
+    return (progress % 1f).coerceIn(0f, 1f)
+}
+
+private fun RichAnimationEasing.toComposeEasing(): Easing {
+    return when (this) {
+        RichAnimationEasing.Linear -> LinearEasing
+        RichAnimationEasing.Ease -> FastOutSlowInEasing
+        RichAnimationEasing.EaseIn -> FastOutLinearInEasing
+        RichAnimationEasing.EaseOut -> LinearOutSlowInEasing
+        RichAnimationEasing.EaseInOut -> FastOutSlowInEasing
+        is RichAnimationEasing.CubicBezier -> CubicBezierEasing(x1, y1, x2, y2)
+    }
+}
+
+private object RichHtmlAnimationPlaybackRegistry {
+    private const val MaxEntries = 1024
+    private val played = LinkedHashSet<String>()
+
+    @Synchronized
+    fun markForPlayback(key: String): Boolean {
+        if (played.contains(key)) return false
+        played += key
+        while (played.size > MaxEntries) {
+            val first = played.firstOrNull() ?: break
+            played.remove(first)
+        }
+        return true
+    }
 }
 
 private fun lerpDp(start: Dp, stop: Dp, fraction: Float): Dp {
@@ -800,19 +1047,13 @@ private data class InlineMathText(
     val inlineContent: Map<String, InlineTextContent>,
 )
 
-private fun AnnotatedString.withTextClipBrush(style: ComputedStyle): AnnotatedString {
-    val brush = style.textClipBrush() ?: return this
-    if (isEmpty()) return this
-    return buildAnnotatedString {
-        append(this@withTextClipBrush)
-        addStyle(
-            SpanStyle(
-                brush = brush,
-                alpha = style.effectiveOpacity(),
-            ),
-            start = 0,
-            end = length,
-        )
+private fun Modifier.textClipBrushMask(brush: Brush?): Modifier {
+    if (brush == null) return this
+    return drawWithContent {
+        drawContext.canvas.saveLayer(Rect(Offset.Zero, size), androidx.compose.ui.graphics.Paint())
+        drawContent()
+        drawRect(brush = brush, blendMode = BlendMode.SrcIn)
+        drawContext.canvas.restore()
     }
 }
 
@@ -1075,35 +1316,153 @@ private fun RichSize.toFlexBasis(): FlexBasis? = when (this) {
     RichSize.Auto -> null
 }
 
-private fun ComputedStyle.gridChildModifier(childStyle: ComputedStyle): Modifier {
-    return when (val columns = gridColumns) {
-        is RichGridColumns.Count -> {
-            val span = childStyle.gridColumnSpan.coerceIn(1, columns.count)
-            Modifier
-                .fillMaxWidth((span.toFloat() / columns.count).coerceIn(0.12f, 1f))
-                .then(childStyle.gridRowSpanModifier())
+private data class RichGridCell(
+    val row: Int,
+    val column: Int,
+)
+
+private data class RichGridMeasuredItem(
+    val placeable: Placeable,
+    val row: Int,
+    val column: Int,
+    val rowSpan: Int,
+    val columnSpan: Int,
+)
+
+private fun Modifier.richGridItemConstraints(style: ComputedStyle, parentStyle: ComputedStyle): Modifier {
+    var modifier = this.richWidthConstraints(style)
+    style.height.dpOrNull()?.let { modifier = modifier.height(it) }
+    style.minHeight?.let { modifier = modifier.heightIn(min = it) }
+    style.maxHeight?.let { modifier = modifier.heightIn(max = it) }
+    if (style.alignSelf == RichAlign.Stretch || parentStyle.alignItems == RichAlign.Stretch) {
+        modifier = modifier.fillMaxWidth()
+    }
+    return modifier
+}
+
+private fun MeasureScope.gridColumnCount(
+    style: ComputedStyle,
+    layoutWidth: Int,
+    columnGapPx: Int,
+    childCount: Int,
+): Int {
+    return when (val columns = style.gridColumns) {
+        is RichGridColumns.Count -> columns.count
+        is RichGridColumns.AutoFit -> {
+            val minColumnWidth = columns.minColumnWidth.roundToPx().coerceAtLeast(1)
+            ((layoutWidth + columnGapPx) / (minColumnWidth + columnGapPx).coerceAtLeast(1))
+                .coerceAtLeast(1)
         }
-        is RichGridColumns.AutoFit -> Modifier.widthIn(min = columns.minColumnWidth, max = maxWidth ?: 280.dp).then(childStyle.gridRowSpanModifier())
-        RichGridColumns.Auto -> Modifier.widthIn(min = 96.dp, max = maxWidth ?: 280.dp).then(childStyle.gridRowSpanModifier())
+        RichGridColumns.Auto -> {
+            val minColumnWidth = 96.dp.roundToPx().coerceAtLeast(1)
+            ((layoutWidth + columnGapPx) / (minColumnWidth + columnGapPx).coerceAtLeast(1))
+                .coerceIn(1, childCount.coerceAtLeast(1))
+        }
+    }.coerceIn(1, 8)
+}
+
+private fun distributeGridTrackWidths(layoutWidth: Int, columnCount: Int, columnGapPx: Int): List<Int> {
+    val available = (layoutWidth - columnGapPx * (columnCount - 1)).coerceAtLeast(0)
+    val base = available / columnCount
+    var remainder = available % columnCount
+    return List(columnCount) {
+        base + if (remainder-- > 0) 1 else 0
     }
 }
 
-private fun ComputedStyle.gridRowSpanModifier(): Modifier {
-    return if (gridRowSpan > 1 && minHeight == null && height == RichSize.Auto) {
-        Modifier.heightIn(min = (56.dp * gridRowSpan.toFloat()).coerceAtMost(360.dp))
+private fun List<Int>.spannedSize(start: Int, span: Int, gapPx: Int): Int {
+    return (start until (start + span).coerceAtMost(size)).sumOf { this[it] } +
+        gapPx * (span - 1).coerceAtLeast(0)
+}
+
+private fun List<Int>.runningOffsets(gapPx: Int): List<Int> {
+    var offset = 0
+    return map { size ->
+        val current = offset
+        offset += size + gapPx
+        current
+    }
+}
+
+private fun Int.constrainDimension(min: Int, max: Int): Int {
+    return if (max == Constraints.Infinity) {
+        coerceAtLeast(min)
     } else {
-        Modifier
+        coerceIn(min, max)
     }
 }
 
-private fun ComputedStyle.toFlowVerticalArrangement(): Arrangement.Vertical = when (alignContent) {
-    RichAlignContent.Center -> Arrangement.spacedBy(rowGap, Alignment.CenterVertically)
-    RichAlignContent.End -> Arrangement.spacedBy(rowGap, Alignment.Bottom)
-    RichAlignContent.SpaceBetween -> Arrangement.SpaceBetween
-    RichAlignContent.SpaceAround -> Arrangement.SpaceAround
-    RichAlignContent.SpaceEvenly -> Arrangement.SpaceEvenly
-    RichAlignContent.Stretch,
-    RichAlignContent.Start -> Arrangement.spacedBy(rowGap)
+private fun findRichGridCell(
+    occupied: Set<Long>,
+    columnCount: Int,
+    rowSpan: Int,
+    columnSpan: Int,
+    columnStart: Int?,
+    rowStart: Int?,
+): RichGridCell {
+    val explicitColumn = columnStart?.minus(1)?.coerceIn(0, columnCount - columnSpan)
+    val explicitRow = rowStart?.minus(1)?.coerceAtLeast(0)
+    if (explicitColumn != null && explicitRow != null) {
+        return RichGridCell(explicitRow, explicitColumn)
+    }
+    if (explicitColumn != null) {
+        var row = 0
+        while (true) {
+            if (richGridFits(occupied, row, explicitColumn, rowSpan, columnSpan)) {
+                return RichGridCell(row, explicitColumn)
+            }
+            row += 1
+        }
+    }
+    if (explicitRow != null) {
+        for (column in 0..(columnCount - columnSpan)) {
+            if (richGridFits(occupied, explicitRow, column, rowSpan, columnSpan)) {
+                return RichGridCell(explicitRow, column)
+            }
+        }
+    }
+    var row = 0
+    while (true) {
+        for (column in 0..(columnCount - columnSpan)) {
+            if (richGridFits(occupied, row, column, rowSpan, columnSpan)) {
+                return RichGridCell(row, column)
+            }
+        }
+        row += 1
+    }
+}
+
+private fun richGridFits(
+    occupied: Set<Long>,
+    row: Int,
+    column: Int,
+    rowSpan: Int,
+    columnSpan: Int,
+): Boolean {
+    for (r in row until row + rowSpan) {
+        for (c in column until column + columnSpan) {
+            if (richGridCellKey(r, c) in occupied) return false
+        }
+    }
+    return true
+}
+
+private fun markRichGridOccupied(
+    occupied: MutableSet<Long>,
+    row: Int,
+    column: Int,
+    rowSpan: Int,
+    columnSpan: Int,
+) {
+    for (r in row until row + rowSpan) {
+        for (c in column until column + columnSpan) {
+            occupied += richGridCellKey(r, c)
+        }
+    }
+}
+
+private fun richGridCellKey(row: Int, column: Int): Long {
+    return (row.toLong() shl 32) xor column.toLong()
 }
 
 private fun ComputedStyle.flexShrinkWidths(children: List<RichBlock>, availableWidth: Dp?): Map<String, Dp> {
@@ -1247,6 +1606,83 @@ private fun ComputedStyle.repeatedBackgroundModifier(): Modifier {
     }
 }
 
+@Composable
+private fun ComputedStyle.backgroundLayersModifier(
+    layers: List<RichBackgroundLayer>,
+    shape: RoundedCornerShape,
+    baseColor: Color?,
+): Modifier {
+    if (layers.isEmpty()) return Modifier
+    val safeLayers = layers.take(2)
+    val painters = safeLayers.map { layer -> layer.url?.let { rememberAsyncImagePainter(it) } }
+    val style = this
+    return Modifier
+        .clip(shape)
+        .drawWithContent {
+            baseColor?.let { drawRect(color = it) }
+            safeLayers.indices.reversed().forEach { index ->
+                drawBackgroundLayer(style, safeLayers[index], painters[index])
+            }
+            drawContent()
+        }
+}
+
+private fun DrawScope.drawBackgroundLayer(
+    style: ComputedStyle,
+    layer: RichBackgroundLayer,
+    painter: Painter?,
+) {
+    val paintArea = backgroundAreaRect(style, layer.origin)
+    val clipArea = backgroundAreaRect(style, layer.clip)
+    clipRect(
+        left = clipArea.left,
+        top = clipArea.top,
+        right = clipArea.right,
+        bottom = clipArea.bottom,
+    ) {
+        layer.image?.let { image ->
+            translate(left = paintArea.left, top = paintArea.top) {
+                drawRect(brush = richBackgroundImageBrush(image), size = paintArea.size)
+            }
+        }
+        if (painter != null) {
+            val tileSize = backgroundTileSize(layer.size, layer.repeat, painter.intrinsicSize, paintArea.size)
+            val origin = backgroundTileOrigin(layer.position, containerSize = paintArea.size, tileSize = tileSize)
+            val repeatX = layer.repeat == RichBackgroundRepeat.Repeat ||
+                layer.repeat == RichBackgroundRepeat.RepeatX ||
+                layer.repeat == RichBackgroundRepeat.Round ||
+                layer.repeat == RichBackgroundRepeat.Space
+            val repeatY = layer.repeat == RichBackgroundRepeat.Repeat ||
+                layer.repeat == RichBackgroundRepeat.RepeatY ||
+                layer.repeat == RichBackgroundRepeat.Round ||
+                layer.repeat == RichBackgroundRepeat.Space
+            val xPositions = backgroundTilePositions(
+                origin = origin.x,
+                container = paintArea.width,
+                tile = tileSize.width,
+                repeat = repeatX,
+                spaced = layer.repeat == RichBackgroundRepeat.Space,
+            )
+            val yPositions = backgroundTilePositions(
+                origin = origin.y,
+                container = paintArea.height,
+                tile = tileSize.height,
+                repeat = repeatY,
+                spaced = layer.repeat == RichBackgroundRepeat.Space,
+            )
+            yPositions.forEach { y ->
+                xPositions.forEach { x ->
+                    translate(left = paintArea.left + x, top = paintArea.top + y) {
+                        with(painter) {
+                            draw(size = tileSize, alpha = 1f)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 private const val MAX_BACKGROUND_TILES = 96
 
 private data class BackgroundArea(
@@ -1329,17 +1765,57 @@ private fun ComputedStyle.backgroundBrushModifier(brush: Brush, shape: RoundedCo
     }
 }
 
+private fun ComputedStyle.backdropApproximationModifier(
+    shape: RoundedCornerShape,
+    defaults: RichRenderColorDefaults,
+): Modifier {
+    val tint = backgroundColor ?: defaults.surface.copy(alpha = 0.32f)
+    val brightened = backdropFilter.brightness?.let { factor ->
+        if (factor >= 1f) Color.White.copy(alpha = ((factor - 1f) * 0.10f).coerceIn(0.02f, 0.10f)) else Color.Black.copy(alpha = ((1f - factor) * 0.08f).coerceIn(0.02f, 0.08f))
+    }
+    return Modifier
+        .background(tint.copy(alpha = tint.alpha.coerceAtLeast(0.10f)), shape)
+        .drawBehind {
+            brightened?.let {
+                drawRoundRect(
+                    color = it,
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(
+                        shape.topStart.toPx(size, this),
+                        shape.topStart.toPx(size, this),
+                    ),
+                )
+            }
+            drawRoundRect(
+                color = defaults.outline.copy(alpha = 0.18f),
+                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx()),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(
+                    shape.topStart.toPx(size, this),
+                    shape.topStart.toPx(size, this),
+                ),
+            )
+        }
+}
+
 private fun DrawScope.backgroundTileSize(style: ComputedStyle, intrinsic: Size, containerSize: Size): Size {
+    return backgroundTileSize(style.backgroundSize, style.backgroundRepeat, intrinsic, containerSize)
+}
+
+private fun DrawScope.backgroundTileSize(
+    backgroundSize: RichBackgroundSize,
+    backgroundRepeat: RichBackgroundRepeat,
+    intrinsic: Size,
+    containerSize: Size,
+): Size {
     val fallbackWidth = 96.dp.toPx()
     val fallbackHeight = 96.dp.toPx()
     val sourceWidth = intrinsic.width.takeIf { it.isFinite() && it > 0f } ?: fallbackWidth
     val sourceHeight = intrinsic.height.takeIf { it.isFinite() && it > 0f } ?: fallbackHeight
-    if (style.backgroundRepeat == RichBackgroundRepeat.Round) {
+    if (backgroundRepeat == RichBackgroundRepeat.Round) {
         val columns = max(1, (containerSize.width / sourceWidth).roundToInt())
         val rows = max(1, (containerSize.height / sourceHeight).roundToInt())
         return Size(containerSize.width / columns, containerSize.height / rows)
     }
-    return when (val bgSize = style.backgroundSize) {
+    return when (val bgSize = backgroundSize) {
         RichBackgroundSize.Auto -> Size(sourceWidth, sourceHeight)
         RichBackgroundSize.Contain -> {
             val scale = min(containerSize.width / sourceWidth, containerSize.height / sourceHeight).takeIf { it.isFinite() && it > 0f } ?: 1f
@@ -1391,6 +1867,12 @@ private fun DrawScope.richSizeToPx(size: RichSize, containerPx: Float): Float? =
     is RichSize.DpSize -> size.value.toPx()
     is RichSize.Fraction -> containerPx * size.value
     RichSize.Auto -> null
+}
+
+private fun DrawScope.resolveShapeSizePx(size: RichSize, axisPx: Float): Float = when (size) {
+    is RichSize.DpSize -> size.value.toPx()
+    is RichSize.Fraction -> axisPx * size.value
+    RichSize.Auto -> axisPx
 }
 
 private fun DrawScope.backgroundTileOrigin(
@@ -1571,13 +2053,17 @@ private fun DrawScope.borderPaint(side: RichBorderSide): Paint {
 }
 
 private fun ComputedStyle.backgroundBrush(): Brush? {
-    return when (val image = backgroundImage) {
+    return backgroundImage?.let(::richBackgroundImageBrush)
+}
+
+private fun richBackgroundImageBrush(image: RichBackgroundImage): Brush {
+    return when (image) {
         is RichBackgroundImage.LinearGradient -> {
             val radians = Math.toRadians(image.angleDegrees.toDouble())
             val start = Offset.Zero
             val end = Offset(cos(radians).toFloat() * 1000f, sin(radians).toFloat() * 1000f)
-            image.stops.colorStopPairs()?.let { stops ->
-                Brush.linearGradient(colorStops = stops, start = start, end = end)
+            image.stops.colorStopPairs()?.let { colorStops ->
+                Brush.linearGradient(colorStops = colorStops, start = start, end = end)
             } ?: Brush.linearGradient(colors = image.stops.colors(), start = start, end = end)
         }
         is RichBackgroundImage.RadialGradient -> {
@@ -1588,7 +2074,6 @@ private fun ComputedStyle.backgroundBrush(): Brush? {
             image.stops.colorStopPairs()?.let { Brush.sweepGradient(colorStops = it) }
                 ?: Brush.sweepGradient(image.stops.colors())
         }
-        null -> null
     }
 }
 
@@ -1677,12 +2162,6 @@ private fun ComputedStyle.toHorizontalArrangement(childCount: Int): Arrangement.
     RichJustify.Start -> Arrangement.spacedBy(gap)
 }
 
-private fun ComputedStyle.toFlowAlignment(): Alignment.Horizontal = when (justifyContent) {
-    RichJustify.Center -> Alignment.CenterHorizontally
-    RichJustify.End -> Alignment.End
-    else -> Alignment.Start
-}
-
 private fun ComputedStyle.toColumnAlignment(): Alignment.Horizontal = when (alignItems) {
     RichAlign.Center -> Alignment.CenterHorizontally
     RichAlign.End -> Alignment.End
@@ -1709,152 +2188,4 @@ private fun RichAlign.toColumnAlignment(): Alignment.Horizontal = when (this) {
     RichAlign.Start,
     RichAlign.Stretch,
     RichAlign.Baseline -> Alignment.Start
-}
-
-private fun RichSvgCommand.draw(canvas: android.graphics.Canvas) {
-    canvas.save()
-    transform().let {
-        canvas.translate(it.translateX, it.translateY)
-        canvas.scale(it.scaleX, it.scaleY)
-        canvas.rotate(it.rotateDegrees)
-    }
-    when (this) {
-        is RichSvgCommand.Path -> {
-            val path = runCatching { PathParser.createPathFromPathData(d) }.getOrNull()
-            path?.let {
-                val bounds = RectF()
-                path.computeBounds(bounds, true)
-                fill?.toPaint(Paint.Style.FILL, bounds = bounds)?.let { paint -> canvas.drawPath(path, paint) }
-                stroke?.toPaint(Paint.Style.STROKE, strokeWidth, bounds, strokeLineCap, strokeLineJoin, strokeDashArray)?.let { paint -> canvas.drawPath(path, paint) }
-            }
-        }
-        is RichSvgCommand.Rect -> {
-            val bounds = RectF(x, y, x + width, y + height)
-            fill?.toPaint(Paint.Style.FILL, bounds = bounds)?.let { canvas.drawRoundRect(x, y, x + width, y + height, rx, ry, it) }
-            stroke?.toPaint(Paint.Style.STROKE, strokeWidth, bounds, strokeLineCap, strokeLineJoin, strokeDashArray)?.let { canvas.drawRoundRect(x, y, x + width, y + height, rx, ry, it) }
-        }
-        is RichSvgCommand.Circle -> {
-            val bounds = RectF(cx - r, cy - r, cx + r, cy + r)
-            fill?.toPaint(Paint.Style.FILL, bounds = bounds)?.let { canvas.drawCircle(cx, cy, r, it) }
-            stroke?.toPaint(Paint.Style.STROKE, strokeWidth, bounds, strokeLineCap, strokeLineJoin, strokeDashArray)?.let { canvas.drawCircle(cx, cy, r, it) }
-        }
-        is RichSvgCommand.Ellipse -> {
-            val bounds = RectF(cx - rx, cy - ry, cx + rx, cy + ry)
-            fill?.toPaint(Paint.Style.FILL, bounds = bounds)?.let { canvas.drawOval(cx - rx, cy - ry, cx + rx, cy + ry, it) }
-            stroke?.toPaint(Paint.Style.STROKE, strokeWidth, bounds, strokeLineCap, strokeLineJoin, strokeDashArray)?.let { canvas.drawOval(cx - rx, cy - ry, cx + rx, cy + ry, it) }
-        }
-        is RichSvgCommand.Line -> {
-            val bounds = RectF(min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
-            stroke?.toPaint(Paint.Style.STROKE, strokeWidth, bounds, strokeLineCap, strokeLineJoin, strokeDashArray)?.let { canvas.drawLine(x1, y1, x2, y2, it) }
-        }
-        is RichSvgCommand.Polyline -> {
-            val path = android.graphics.Path()
-            points.firstOrNull()?.let { first ->
-                path.moveTo(first.x, first.y)
-                points.drop(1).forEach { path.lineTo(it.x, it.y) }
-                if (closed) path.close()
-                val bounds = RectF()
-                path.computeBounds(bounds, true)
-                fill?.toPaint(Paint.Style.FILL, bounds = bounds)?.let { canvas.drawPath(path, it) }
-                stroke?.toPaint(Paint.Style.STROKE, strokeWidth, bounds, strokeLineCap, strokeLineJoin, strokeDashArray)?.let { canvas.drawPath(path, it) }
-            }
-        }
-        is RichSvgCommand.Text -> {
-            fill?.toPaint(Paint.Style.FILL, bounds = RectF(x, y - fontSize, x + text.length * fontSize, y))?.let {
-                it.textSize = fontSize
-                it.textAlign = textAnchor.toPaintAlign()
-                it.isFakeBoldText = (fontWeight ?: 400) >= 600
-                canvas.drawText(text, x, y, it)
-            }
-        }
-    }
-    canvas.restore()
-}
-
-private fun RichSvgCommand.transform(): RichSvgTransform = when (this) {
-    is RichSvgCommand.Path -> transform
-    is RichSvgCommand.Rect -> transform
-    is RichSvgCommand.Circle -> transform
-    is RichSvgCommand.Ellipse -> transform
-    is RichSvgCommand.Line -> transform
-    is RichSvgCommand.Polyline -> transform
-    is RichSvgCommand.Text -> transform
-}
-
-private fun RichSvgPaint.toPaint(
-    style: Paint.Style,
-    strokeWidth: Float = 1f,
-    bounds: RectF = RectF(0f, 0f, 100f, 100f),
-    lineCap: RichSvgLineCap = RichSvgLineCap.Round,
-    lineJoin: RichSvgLineJoin = RichSvgLineJoin.Round,
-    dashArray: List<Float> = emptyList(),
-): Paint {
-    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        this.style = style
-        this.strokeWidth = strokeWidth
-        strokeJoin = lineJoin.toPaintJoin()
-        strokeCap = lineCap.toPaintCap()
-        if (dashArray.isNotEmpty()) {
-            pathEffect = DashPathEffect(dashArray.toFloatArray(), 0f)
-        }
-    }
-    when (this) {
-        is RichSvgPaint.Solid -> paint.color = color.toArgb()
-        is RichSvgPaint.LinearGradient -> {
-            val colors = stops.map { it.color.toArgb() }.toIntArray()
-            if (colors.size < 2) {
-                paint.color = stops.firstOrNull()?.color?.toArgb() ?: Color.Black.toArgb()
-            } else {
-                val positions = stops.map { it.offset }.takeIf { offsets -> offsets.all { it != null } }
-                    ?.map { it!!.coerceIn(0f, 1f) }
-                    ?.toFloatArray()
-                paint.shader = android.graphics.LinearGradient(
-                    bounds.left,
-                    bounds.top,
-                    bounds.right.takeIf { it > bounds.left } ?: bounds.left + 1f,
-                    bounds.bottom.takeIf { it > bounds.top } ?: bounds.top + 1f,
-                    colors,
-                    positions,
-                    Shader.TileMode.CLAMP,
-                )
-            }
-        }
-        is RichSvgPaint.RadialGradient -> {
-            val colors = stops.map { it.color.toArgb() }.toIntArray()
-            if (colors.size < 2) {
-                paint.color = stops.firstOrNull()?.color?.toArgb() ?: Color.Black.toArgb()
-            } else {
-                val positions = stops.map { it.offset }.takeIf { offsets -> offsets.all { it != null } }
-                    ?.map { it!!.coerceIn(0f, 1f) }
-                    ?.toFloatArray()
-                paint.shader = android.graphics.RadialGradient(
-                    bounds.centerX(),
-                    bounds.centerY(),
-                    max(bounds.width(), bounds.height()).coerceAtLeast(1f) / 2f,
-                    colors,
-                    positions,
-                    Shader.TileMode.CLAMP,
-                )
-            }
-        }
-    }
-    return paint
-}
-
-private fun RichSvgLineCap.toPaintCap(): Paint.Cap = when (this) {
-    RichSvgLineCap.Butt -> Paint.Cap.BUTT
-    RichSvgLineCap.Round -> Paint.Cap.ROUND
-    RichSvgLineCap.Square -> Paint.Cap.SQUARE
-}
-
-private fun RichSvgLineJoin.toPaintJoin(): Paint.Join = when (this) {
-    RichSvgLineJoin.Miter -> Paint.Join.MITER
-    RichSvgLineJoin.Round -> Paint.Join.ROUND
-    RichSvgLineJoin.Bevel -> Paint.Join.BEVEL
-}
-
-private fun RichSvgTextAnchor.toPaintAlign(): Paint.Align = when (this) {
-    RichSvgTextAnchor.Start -> Paint.Align.LEFT
-    RichSvgTextAnchor.Middle -> Paint.Align.CENTER
-    RichSvgTextAnchor.End -> Paint.Align.RIGHT
 }

@@ -10,7 +10,6 @@ import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
-import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.Box
@@ -32,22 +31,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.delay
-import kotlinx.serialization.encodeToString
-import kotlinx.serialization.json.Json
 import java.util.Collections
 
 private const val TAG = "BubbleWebView"
-private const val RENDERER_BASE_URL = "file:///android_asset/renderer/"
 private const val DEFAULT_HEIGHT_PX = 220
 private const val HEIGHT_UPDATE_THRESHOLD_PX = 6
 private const val FIRST_RENDER_MAX_HEIGHT_UPDATE_MS = 1_500L
 private const val HEIGHT_CACHE_MAX_ENTRIES = 256
 private const val MAX_ESTIMATED_INITIAL_HEIGHT_PX = 720
-
-private val payloadJson = Json {
-    encodeDefaults = true
-    ignoreUnknownKeys = true
-}
 
 private val heightCache: MutableMap<String, Int> = Collections.synchronizedMap(
     object : LinkedHashMap<String, Int>(HEIGHT_CACHE_MAX_ENTRIES, 0.75f, true) {
@@ -160,7 +151,7 @@ fun BubbleWebView(
     var heightPx by remember(payload.id) { mutableIntStateOf(initialHeightPx) }
     var lastRenderedPayloadJson by remember(payload.id) { mutableStateOf<String?>(null) }
     var lastRenderStartedAt by remember(payload.id) { mutableStateOf(0L) }
-    val encodedPayload = remember(payload) { payloadJson.encodeToString(payload) }
+    val encodedPayload = remember(payload) { payload.toRendererJson() }
     val currentOnSendInput = rememberUpdatedState(onSendInput)
     val currentOnStateChanged = rememberUpdatedState(onStateChanged)
     val currentHeightPx = rememberUpdatedState(heightPx)
@@ -215,7 +206,7 @@ fun BubbleWebView(
         if (webView == null || !loaded) return
         if (payload.isStreaming && deferRender && lastRenderedPayloadJson != null) return
         if (lastRenderedPayloadJson == encoded) return
-        val script = "window.UniVCPRenderer && window.UniVCPRenderer.renderPayload($encoded);"
+        val script = bubbleRenderScript(encoded)
         lastRenderStartedAt = System.currentTimeMillis()
         webView.evaluateJavascript(script) { result ->
             if (result != "null") {
@@ -233,7 +224,7 @@ fun BubbleWebView(
     }
 
     val shellHtml = remember {
-        context.assets.open("renderer/renderer-shell.html").bufferedReader().use { it.readText() }
+        context.loadBubbleRendererShellHtml()
     }
     val remoteShellUrl = remember(rendererShellUrl) {
         rendererShellUrl?.takeIf { it.isNotBlank() }
@@ -265,20 +256,7 @@ fun BubbleWebView(
                     )
                     setBackgroundColor(android.graphics.Color.TRANSPARENT)
                     addJavascriptInterface(bridge, "UniVCPAndroid")
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = false
-                    settings.databaseEnabled = false
-                    settings.allowContentAccess = false
-                    settings.allowFileAccess = true
-                    settings.allowFileAccessFromFileURLs = false
-                    settings.allowUniversalAccessFromFileURLs = false
-                    settings.blockNetworkLoads = remoteShellUrl == null
-                    settings.cacheMode = if (remoteShellUrl != null) {
-                        WebSettings.LOAD_NO_CACHE
-                    } else {
-                        WebSettings.LOAD_DEFAULT
-                    }
-                    settings.mediaPlaybackRequiresUserGesture = true
+                    configureBubbleRendererWebView(remoteShellUrl = remoteShellUrl)
                     webChromeClient = object : WebChromeClient() {
                         override fun onProgressChanged(view: WebView?, newProgress: Int) {
                             progress = newProgress / 100f

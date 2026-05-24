@@ -31,7 +31,7 @@ class RenderSeedImporter(
     private val json: Json,
 ) {
     suspend fun seedIfEnabled() {
-        if (!BuildConfig.DEBUG || !BuildConfig.UNIVCP_RENDER_SEED_ENABLED) return
+        if (!BuildConfig.UNIVCP_RENDER_SEED_ENABLED) return
 
         val bundle = runCatching {
             context.assets.open(SEED_ASSET).bufferedReader().use { reader ->

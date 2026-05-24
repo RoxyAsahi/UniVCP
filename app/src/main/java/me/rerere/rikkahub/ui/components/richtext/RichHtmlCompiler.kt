@@ -60,7 +60,7 @@ internal object RichHtmlCompiler {
     private val cache = RenderLruCache<String, RichHtmlRenderModel>(maxEntries = 128)
     private val transientCache = RenderLruCache<String, RichHtmlRenderModel>(maxEntries = 24)
     private val inFlightLock = Any()
-    private val inFlightCompiles = mutableMapOf<String, Deferred<RichHtmlRenderModel>>()
+    private val inFlightCompiles = mutableMapOf<String, InFlightCompile>()
 
     @OptIn(ExperimentalCoroutinesApi::class)
     private val compileDispatcher: CoroutineDispatcher = Dispatchers.Default.limitedParallelism(2)
@@ -100,38 +100,77 @@ internal object RichHtmlCompiler {
         val targetCache = cacheFor(cacheMode)
         targetCache.get(key)?.let { return it }
         val inFlightKey = "${cacheMode.name}:$key"
-        val deferred = synchronized(inFlightLock) {
+        val telemetryId = renderTextCacheKey(html)
+        val requestedAtMs = System.currentTimeMillis()
+        val createdOrJoined = synchronized(inFlightLock) {
             targetCache.get(key)?.let { return it }
-            inFlightCompiles[inFlightKey] ?: compileScope.async {
-            withTimeout(RICH_HTML_COMPILE_TIMEOUT_MS) {
-                val job = currentCoroutineContext()[Job]
-                job?.ensureActive()
-                val startNanos = System.nanoTime()
-                val model = compileUncached(html, options) {
-                    job?.ensureActive()
-                }.also {
-                    RichHtmlRenderTelemetry.recordCompileParity(
-                        id = it.id,
+            inFlightCompiles[inFlightKey]?.let { existing ->
+                existing.waiters += 1
+                existing to true
+            } ?: run {
+                val enqueuedAtMs = System.currentTimeMillis()
+                val deferred = compileScope.async {
+                    RichHtmlRenderTelemetry.recordCompileQueueWait(
+                        id = telemetryId,
                         viewportWidthDp = options.viewportWidthDp,
-                        compileTimeMs = (System.nanoTime() - startNanos) / 1_000_000,
-                        unsupported = it.unsupported.joinToString(",").ifBlank { null },
+                        queueWaitMs = (System.currentTimeMillis() - enqueuedAtMs).coerceAtLeast(0L),
+                        joinedInFlight = false,
+                        cacheMode = cacheMode.name,
                     )
+                    withTimeout(RICH_HTML_COMPILE_TIMEOUT_MS) {
+                        val job = currentCoroutineContext()[Job]
+                        job?.ensureActive()
+                        val startNanos = System.nanoTime()
+                        val model = compileUncached(html, options) {
+                            job?.ensureActive()
+                        }.also {
+                            RichHtmlRenderTelemetry.recordCompileParity(
+                                id = it.id,
+                                viewportWidthDp = options.viewportWidthDp,
+                                compileTimeMs = (System.nanoTime() - startNanos) / 1_000_000,
+                                unsupported = it.unsupported.joinToString(",").ifBlank { null },
+                            )
+                        }
+                        job?.ensureActive()
+                        targetCache.putIfAbsent(key, model)
+                    }
                 }
-                job?.ensureActive()
-                targetCache.putIfAbsent(key, model)
-            }
-            }.also { created ->
+                val created = InFlightCompile(deferred = deferred, waiters = 1)
                 inFlightCompiles[inFlightKey] = created
-                created.invokeOnCompletion {
+                deferred.invokeOnCompletion {
                     synchronized(inFlightLock) {
-                        if (inFlightCompiles[inFlightKey] === created) {
+                        if (inFlightCompiles[inFlightKey] === created && created.waiters <= 0) {
                             inFlightCompiles.remove(inFlightKey)
                         }
                     }
                 }
+                created to false
             }
         }
-        return deferred.await()
+        val flight = createdOrJoined.first
+        val joinedInFlight = createdOrJoined.second
+        if (joinedInFlight) {
+            RichHtmlRenderTelemetry.recordCompileQueueWait(
+                id = telemetryId,
+                viewportWidthDp = options.viewportWidthDp,
+                queueWaitMs = (System.currentTimeMillis() - requestedAtMs).coerceAtLeast(0L),
+                joinedInFlight = true,
+                cacheMode = cacheMode.name,
+            )
+        }
+        return try {
+            flight.deferred.await()
+        } finally {
+            synchronized(inFlightLock) {
+                flight.waiters -= 1
+                if (inFlightCompiles[inFlightKey] === flight && flight.waiters <= 0) {
+                    if (!flight.deferred.isCompleted) {
+                        flight.deferred.cancel()
+                    }
+                    inFlightCompiles.remove(inFlightKey)
+                }
+            }
+        }
     }
 
     fun cacheStats(): RenderLruCacheStats = cache.stats()
@@ -242,6 +281,11 @@ internal enum class RichHtmlCompileCacheMode {
     Transient,
 }
 
+private data class InFlightCompile(
+    val deferred: Deferred<RichHtmlRenderModel>,
+    var waiters: Int,
+)
+
 private data class AnimationBudgetResult(
     val blocks: List<RichBlock>,
     val stats: RichAnimationStats,
@@ -281,6 +325,12 @@ private class AnimationBudgetRun(
         private set
     var budgetExceededCount = 0
         private set
+    var snapshotCandidateCount = 0
+        private set
+    var multiKeyframeCount = 0
+        private set
+    var unsupportedPropertyCount = 0
+        private set
 
     fun visit(block: RichBlock): RichBlock {
         val style = budgetStyle(block.style)
@@ -311,6 +361,13 @@ private class AnimationBudgetRun(
         if (animation.isInfinite) infiniteCount += 1
         if (animation.hasLayoutProperty) layoutAnimationCount += 1
         if (animation.mayHideStaticContent) dependentVisibilityCount += 1
+        multiKeyframeCount += animation.multiKeyframeCount
+        unsupportedPropertyCount += animation.unsupportedPropertyCount
+        if (animation.hasLayoutProperty || animation.unsupportedPropertyCount > 0 ||
+            (animation.mayHideStaticContent && animation.nativeAnimation == null)
+        ) {
+            snapshotCandidateCount += 1
+        }
         if (animation.nativeAnimation == null) {
             staticizedCount += 1
             return style
@@ -321,6 +378,7 @@ private class AnimationBudgetRun(
             return style
         }
         budgetExceededCount += 1
+        snapshotCandidateCount += 1
         staticizedCount += 1
         return style.copy(animation = animation.copy(nativeAnimation = null))
     }
@@ -342,6 +400,9 @@ private class AnimationBudgetRun(
             transitionCount = transitionCount,
             dependentVisibilityCount = dependentVisibilityCount,
             budgetExceededCount = budgetExceededCount,
+            snapshotCandidateCount = snapshotCandidateCount,
+            multiKeyframeCount = multiKeyframeCount,
+            unsupportedPropertyCount = unsupportedPropertyCount,
         )
     }
 }
@@ -389,7 +450,8 @@ private class CompilerRun(
                     style.display != RichDisplay.Flex &&
                     style.display != RichDisplay.Grid &&
                     isInlineOnly(element) &&
-                    element.hasInlineRenderableContent(style)
+                    element.hasInlineRenderableContent(style) &&
+                    !hasInlineChildRequiringOwnBlock(element, style, resolved.variables)
                 ) {
                     compileTextBlock(element, style, blockId, resolved.variables)
                 } else {
@@ -445,7 +507,8 @@ private class CompilerRun(
                         style.display != RichDisplay.Flex &&
                         style.display != RichDisplay.Grid &&
                         !isMathFormulaContainer(node) &&
-                        !childStyle.isPositionedOverlay()
+                        !childStyle.isPositionedOverlay() &&
+                        !childStyle.needsOwnInlineBlock()
                     ) {
                         inlineBuffer.add(node)
                     } else {
@@ -462,6 +525,19 @@ private class CompilerRun(
         }
         flushInline()
         return result
+    }
+
+    private fun hasInlineChildRequiringOwnBlock(
+        element: Element,
+        style: ComputedStyle,
+        variables: Map<String, String>,
+    ): Boolean {
+        return element.children().any { child ->
+            val tag = child.tagName().lowercase()
+            if (!isInlineTag(tag) || isMathFormulaContainer(child)) return@any false
+            val childStyle = resolver.resolve(child, style, variables).style
+            childStyle.needsOwnInlineBlock() || hasInlineChildRequiringOwnBlock(child, childStyle, variables)
+        }
     }
 
     private fun compileTextBlock(
@@ -983,6 +1059,7 @@ private data class RichKeyframesSummary(
     val fromDeclarations: Map<String, String> = emptyMap(),
     val toDeclarations: Map<String, String> = emptyMap(),
     val hasIntermediateFrame: Boolean = false,
+    val frames: List<ParsedKeyframeDeclarations> = emptyList(),
 ) {
     val hasOpacityOrTransform: Boolean
         get() = properties.any { it == "opacity" || it == "transform" }
@@ -1103,7 +1180,11 @@ private fun computeStyle(
 ): ComputedStyle {
     val inherited = parent.inheritedCssStyle()
     val fontShorthand = declarations["font"]?.let { parseCssFontShorthand(it, inherited.fontSize) }
-    val fontSize = declarations["font-size"]?.let { parseCssFontSize(it, inherited.fontSize) }
+    val inheritedFontContext = CssLengthContext(
+        viewportWidth = options.viewportWidthDp.dp,
+        fontSize = inherited.fontSize,
+    )
+    val fontSize = declarations["font-size"]?.let { parseCssFontSize(it, inherited.fontSize, inheritedFontContext) }
         ?: fontShorthand?.fontSize
         ?: inherited.fontSize
     val declaredLineHeight = declarations["line-height"]?.let { parseCssLineHeightValue(it, fontSize) }
@@ -1148,6 +1229,8 @@ private fun computeStyle(
     val declaredOpacity = declarations["opacity"]?.let(::parseCssFloat)?.coerceIn(0f, 1f)
     val opacity = if (declaredOpacity != null && declaredOpacity <= 0.001f && animation.shouldStaticizeVisible()) {
         1f
+    } else if (animation.isInfinite && animation.staticOpacity != null) {
+        maxOf(declaredOpacity ?: inherited.opacity, animation.staticOpacity)
     } else {
         declaredOpacity ?: inherited.opacity
     }
@@ -1155,13 +1238,22 @@ private fun computeStyle(
     val resolvedColor = declarations["color"]?.let { resolveRichCssColor(declaredColor, inherited.color) } ?: inherited.color
     val declaredBackgroundColor = declarations["background-color"]?.let(::parseRichCssColor)
         ?: backgroundShorthand?.declaredColor
-        ?: declarations["background"]?.let(::parseRichCssColor)
     val resolvedBackgroundColor = when {
         declarations.containsKey("background-color") -> resolveRichCssColor(declaredBackgroundColor, resolvedColor)
         backgroundShorthand?.declaredColor != null -> resolveRichCssColor(backgroundShorthand.declaredColor, resolvedColor)
         declarations.containsKey("background") -> resolveRichCssColor(declaredBackgroundColor, resolvedColor)
         else -> inherited.backgroundColor
     }
+    val gridColumnPlacement = parseGridPlacement(
+        shorthand = declarations["grid-column"],
+        start = declarations["grid-column-start"],
+        end = declarations["grid-column-end"],
+    )
+    val gridRowPlacement = parseGridPlacement(
+        shorthand = declarations["grid-row"],
+        start = declarations["grid-row-start"],
+        end = declarations["grid-row-end"],
+    )
     val border = parseBorder(declarations, inherited.border, lengthContext, resolvedColor)
     return inherited.copy(
         display = declarations["display"]?.let(::parseDisplay) ?: inherited.display,
@@ -1179,6 +1271,31 @@ private fun computeStyle(
             ?: backgroundShorthand?.url
             ?: declarations["background"]?.let(::parseBackgroundUrl)
             ?: inherited.backgroundUrl,
+        backgroundLayers = parseSafeBackgroundLayers(
+            imageValue = declarations["background-image"] ?: declarations["background"],
+            sizeValue = declarations["background-size"],
+            positionValue = declarations["background-position"],
+            repeatValue = declarations["background-repeat"],
+            originValue = declarations["background-origin"],
+            clipValue = declarations["background-clip"] ?: declarations["-webkit-background-clip"],
+            context = lengthContext,
+            fallbackSize = declarations["background-size"]?.let { parseBackgroundSize(it, lengthContext) }
+                ?: backgroundShorthand?.size
+                ?: inherited.backgroundSize,
+            fallbackPosition = declarations["background-position"]?.let { parseBackgroundPosition(it, lengthContext) }
+                ?: backgroundShorthand?.position
+                ?: inherited.backgroundPosition,
+            fallbackRepeat = declarations["background-repeat"]?.let(::parseBackgroundRepeat)
+                ?: backgroundShorthand?.repeat
+                ?: inherited.backgroundRepeat,
+            fallbackOrigin = declarations["background-origin"]?.let(::parseBackgroundBox)
+                ?: backgroundShorthand?.origin
+                ?: inherited.backgroundOrigin,
+            fallbackClip = declarations["background-clip"]?.let(::parseBackgroundBox)
+                ?: declarations["-webkit-background-clip"]?.let(::parseBackgroundBox)
+                ?: backgroundShorthand?.clip
+                ?: inherited.backgroundClip,
+        ) ?: inherited.backgroundLayers,
         backgroundSize = declarations["background-size"]?.let { parseBackgroundSize(it, lengthContext) }
             ?: backgroundShorthand?.size
             ?: inherited.backgroundSize,
@@ -1204,6 +1321,11 @@ private fun computeStyle(
         transition = transition,
         cssFilter = declarations["filter"]?.let { parseCssFilter(it, lengthContext) } ?: inherited.cssFilter,
         backdropFilter = declarations["backdrop-filter"]?.let { parseCssFilter(it, lengthContext) } ?: inherited.backdropFilter,
+        clipPath = declarations["clip-path"]?.let { parseClipPath(it, lengthContext) } ?: inherited.clipPath,
+        maskImage = (declarations["mask-image"]
+            ?: declarations["-webkit-mask-image"]
+            ?: declarations["mask"]
+            ?: declarations["-webkit-mask"])?.let(::parseMaskImage) ?: inherited.maskImage,
         padding = parseCssSpacing(declarations, "padding", lengthContext) ?: inherited.padding,
         margin = parseCssSpacing(declarations, "margin", lengthContext) ?: inherited.margin,
         border = border,
@@ -1235,12 +1357,10 @@ private fun computeStyle(
         gridColumns = declarations["grid-template-columns"]?.let { parseGridColumns(it, lengthContext, columnGap) } ?: inherited.gridColumns,
         order = declarations["order"]?.toIntOrNull() ?: inherited.order,
         alignContent = declarations["align-content"]?.let(::parseAlignContent) ?: inherited.alignContent,
-        gridColumnSpan = declarations["grid-column"]?.let(::parseGridSpan)
-            ?: declarations["grid-column-end"]?.let(::parseGridSpan)
-            ?: inherited.gridColumnSpan,
-        gridRowSpan = declarations["grid-row"]?.let(::parseGridSpan)
-            ?: declarations["grid-row-end"]?.let(::parseGridSpan)
-            ?: inherited.gridRowSpan,
+        gridColumnStart = gridColumnPlacement.start,
+        gridRowStart = gridRowPlacement.start,
+        gridColumnSpan = gridColumnPlacement.span,
+        gridRowSpan = gridRowPlacement.span,
         zIndex = declarations["z-index"]?.toFloatOrNull() ?: inherited.zIndex,
         offset = parseOffset(declarations, inherited.offset, lengthContext),
         transform = declarations["transform"]?.let { parseTransform(it, lengthContext) } ?: inherited.transform,
@@ -1403,7 +1523,19 @@ private fun ComputedStyle.hasVisualBox(): Boolean {
         opacity != 1f ||
         cssFilter != RichCssFilter.None ||
         backdropFilter != RichCssFilter.None ||
-        transform != RichTransform.None
+        transform != RichTransform.None ||
+        animation.isDeclared ||
+        transition.isDeclared
+}
+
+private fun ComputedStyle.needsOwnInlineBlock(): Boolean {
+    return position != RichPosition.Static ||
+        opacity != 1f ||
+        cssFilter != RichCssFilter.None ||
+        backdropFilter != RichCssFilter.None ||
+        transform != RichTransform.None ||
+        animation.isDeclared ||
+        transition.isDeclared
 }
 
 private fun isInlineTag(tag: String): Boolean = tag in setOf(
@@ -1587,12 +1719,14 @@ private fun hintsForKeyframes(selector: String, body: String): RichKeyframesSumm
         fromDeclarations = fromDeclarations,
         toDeclarations = toDeclarations,
         hasIntermediateFrame = hasIntermediateFrame,
+        frames = frames.sortedBy { it.progress },
     )
 }
 
 private data class ParsedKeyframeDeclarations(
     val isFrom: Boolean,
     val isTo: Boolean,
+    val progress: Float,
     val declarations: Map<String, String>,
 )
 
@@ -1605,15 +1739,30 @@ private fun parseKeyframeDeclarations(body: String): List<ParsedKeyframeDeclarat
         val selector = body.substring(cursor, start).trim()
         val end = findMatchingBrace(body, start)
         if (end < 0) break
-        val labels = selector.split(",").map { it.trim().lowercase() }
-        frames += ParsedKeyframeDeclarations(
-            isFrom = labels.any { it == "from" || it == "0%" },
-            isTo = labels.any { it == "to" || it == "100%" },
-            declarations = parseCssDeclarations(body.substring(start + 1, end)),
-        )
+        val declarations = parseCssDeclarations(body.substring(start + 1, end))
+        selector.split(",")
+            .map { it.trim().lowercase() }
+            .mapNotNull { label -> parseKeyframeProgress(label)?.let { progress -> label to progress } }
+            .forEach { (label, progress) ->
+                frames += ParsedKeyframeDeclarations(
+                    isFrom = label == "from" || progress <= 0f,
+                    isTo = label == "to" || progress >= 1f,
+                    progress = progress.coerceIn(0f, 1f),
+                    declarations = declarations,
+                )
+            }
         cursor = end + 1
     }
     return frames
+}
+
+private fun parseKeyframeProgress(label: String): Float? {
+    return when {
+        label == "from" -> 0f
+        label == "to" -> 1f
+        label.endsWith("%") -> label.removeSuffix("%").trim().toFloatOrNull()?.div(100f)
+        else -> null
+    }?.coerceIn(0f, 1f)
 }
 
 private fun matchCompoundSelector(element: Element, selector: String): Boolean {
@@ -1890,21 +2039,75 @@ private fun parseTextDecoration(value: String): TextDecoration? = when {
     else -> null
 }
 
-private fun parseGridSpan(value: String): Int? {
+private data class RichGridPlacement(
+    val start: Int? = null,
+    val span: Int = 1,
+)
+
+private fun parseGridPlacement(
+    shorthand: String?,
+    start: String?,
+    end: String?,
+): RichGridPlacement {
+    val shorthandPlacement = shorthand?.let(::parseGridPlacementShorthand)
+    val startLine = start?.let(::parseGridLine)
+    val endLine = end?.let(::parseGridLine)
+    val startSpan = start?.let(::parseGridSpanToken)
+    val endSpan = end?.let(::parseGridSpanToken)
+    val explicitStart = startLine ?: shorthandPlacement?.start
+    val explicitEnd = endLine ?: shorthandPlacement?.end
+    val span = endSpan ?: startSpan ?: shorthandPlacement?.span ?: when {
+        explicitStart != null && explicitEnd != null && explicitEnd > explicitStart -> explicitEnd - explicitStart
+        else -> 1
+    }
+    val inferredStart = explicitStart ?: if (explicitEnd != null && span > 1) explicitEnd - span else null
+    return RichGridPlacement(
+        start = inferredStart?.takeIf { it > 0 }?.coerceAtMost(8),
+        span = span.coerceIn(1, 8),
+    )
+}
+
+private data class ParsedGridPlacement(
+    val start: Int? = null,
+    val end: Int? = null,
+    val span: Int? = null,
+)
+
+private fun parseGridPlacementShorthand(value: String): ParsedGridPlacement {
+    val parts = value.lowercase().split("/").map { it.trim() }.filter { it.isNotBlank() }
+    if (parts.isEmpty()) return ParsedGridPlacement()
+    if (parts.size == 1) {
+        return parseGridSpanToken(parts[0])?.let { ParsedGridPlacement(span = it) }
+            ?: ParsedGridPlacement(start = parseGridLine(parts[0]))
+    }
+    val first = parts[0]
+    val second = parts[1]
+    val firstSpan = parseGridSpanToken(first)
+    val secondSpan = parseGridSpanToken(second)
+    val firstLine = parseGridLine(first)
+    val secondLine = parseGridLine(second)
+    val span = secondSpan ?: firstSpan ?: if (firstLine != null && secondLine != null && secondLine > firstLine) {
+        secondLine - firstLine
+    } else {
+        null
+    }
+    val start = firstLine ?: if (secondLine != null && firstSpan != null) secondLine - firstSpan else null
+    val end = secondLine
+    return ParsedGridPlacement(start = start, end = end, span = span)
+}
+
+private fun parseGridLine(value: String): Int? {
     val normalized = value.trim().lowercase()
-    Regex("""span\s+(\d+)""").find(normalized)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let {
-        return it.coerceIn(1, 8)
-    }
-    val parts = normalized.split("/").map { it.trim() }
-    if (parts.size == 2) {
-        val start = parts[0].toIntOrNull()
-        val end = parts[1].toIntOrNull()
-        if (start != null && end != null && end > start) return (end - start).coerceIn(1, 8)
-        Regex("""span\s+(\d+)""").find(parts[1])?.groupValues?.getOrNull(1)?.toIntOrNull()?.let {
-            return it.coerceIn(1, 8)
-        }
-    }
-    return null
+    if (normalized == "auto" || normalized.startsWith("span")) return null
+    return normalized.toIntOrNull()?.takeIf { it > 0 }
+}
+
+private fun parseGridSpanToken(value: String): Int? {
+    return Regex("""\bspan\s+(\d+)""").find(value.lowercase())
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.toIntOrNull()
+        ?.coerceIn(1, 8)
 }
 
 private fun parseBorderCollapse(value: String): RichBorderCollapse? = when (value.trim().lowercase()) {
@@ -2178,56 +2381,87 @@ private fun parseAnimationStyle(
     if (shorthand?.trim()?.equals("none", ignoreCase = true) == true || nameDeclaration?.trim()?.equals("none", ignoreCase = true) == true) {
         return RichAnimationStyle.None
     }
-    val shorthandTokens = shorthand
-        ?.let { splitCssTopLevel(it, ',').firstOrNull().orEmpty() }
-        ?.let(::splitCssTopLevelWhitespace)
-        .orEmpty()
+    val shorthandParts = shorthand?.let { splitCssTopLevel(it, ',') }.orEmpty()
+    val firstShorthand = shorthandParts.firstOrNull().orEmpty()
+    val shorthandTokens = splitCssTopLevelWhitespace(firstShorthand)
     val explicitNames = nameDeclaration
-        ?.split(",")
+        ?.let { splitCssTopLevel(it, ',') }
         ?.map { it.trim() }
         ?.filter { it.isNotBlank() && !it.equals("none", ignoreCase = true) }
         .orEmpty()
     val names = explicitNames.ifEmpty {
-        shorthandTokens.filter { token -> token.isLikelyAnimationName() }
+        shorthandParts.mapNotNull { part ->
+            splitCssTopLevelWhitespace(part).firstOrNull { token -> token.isLikelyAnimationName() }
+        }.ifEmpty {
+            shorthandTokens.filter { token -> token.isLikelyAnimationName() }
+        }
     }
     val timeTokens = shorthandTokens.mapNotNull(::parseCssTimeMs)
-    val durationMs = declarations["animation-duration"]?.let(::parseCssTimeMs)
+    val durationMs = declarations["animation-duration"]?.let(::firstCssCommaValue)?.let(::parseCssTimeMs)
         ?: timeTokens.getOrNull(0)
         ?: 0
-    val delayMs = declarations["animation-delay"]?.let(::parseCssTimeMs)
+    val delayMs = declarations["animation-delay"]?.let(::firstCssCommaValue)?.let(::parseCssTimeMs)
         ?: timeTokens.getOrNull(1)
         ?: 0
-    val iterationCount = declarations["animation-iteration-count"]?.let(::parseAnimationIterationCount)
+    val iterationCount = declarations["animation-iteration-count"]?.let(::firstCssCommaValue)?.let(::parseAnimationIterationCount)
         ?: shorthandTokens.firstNotNullOfOrNull(::parseAnimationIterationCount)
         ?: 1f
     val fillModeValue = declarations["animation-fill-mode"].orEmpty() + " " + shorthandTokens.joinToString(" ")
-    val fillModeForwards = fillModeValue.contains("forwards", ignoreCase = true) ||
-        fillModeValue.contains("both", ignoreCase = true)
+    val fillMode = declarations["animation-fill-mode"]?.let(::firstCssCommaValue)?.let(::parseAnimationFillMode)
+        ?: shorthandTokens.firstNotNullOfOrNull(::parseAnimationFillMode)
+        ?: RichAnimationFillMode.None
+    val fillModeForwards = fillMode == RichAnimationFillMode.Forwards || fillMode == RichAnimationFillMode.Both ||
+        fillModeValue.contains("forwards", ignoreCase = true) || fillModeValue.contains("both", ignoreCase = true)
+    val direction = declarations["animation-direction"]?.let(::firstCssCommaValue)?.let(::parseAnimationDirection)
+        ?: shorthandTokens.firstNotNullOfOrNull(::parseAnimationDirection)
+        ?: RichAnimationDirection.Normal
+    val easing = declarations["animation-timing-function"]?.let(::firstCssCommaValue)?.let(::parseAnimationEasing)
+        ?: shorthandTokens.firstNotNullOfOrNull(::parseAnimationEasing)
+        ?: RichAnimationEasing.Ease
     val summaries = names.mapNotNull { keyframes[it] }
     val hasOpacityOrTransform = summaries.any { it.hasOpacityOrTransform } ||
         shorthand.orEmpty().contains("opacity", ignoreCase = true) ||
         declarations.values.any { it.contains("transform", ignoreCase = true) }
     val hasLayoutProperty = summaries.any { it.hasLayoutProperty } ||
         declarations["animation-property"]?.let(::containsLayoutAnimationProperty) == true
+    val declaredAnimationCount = maxOf(1, shorthandParts.size, explicitNames.size)
+    val unsupportedPropertyCount = summaries.sumOf { summary ->
+        summary.properties.count { it !in NATIVE_ANIMATION_PROPERTIES }
+    } + (declaredAnimationCount - 1).coerceAtLeast(0)
+    val multiKeyframeCount = summaries.count { it.hasIntermediateFrame }
+    val firstSummary = names.firstNotNullOfOrNull { keyframes[it] }
+    val firstHasLayoutProperty = firstSummary?.hasLayoutProperty == true ||
+        declarations["animation-property"]?.let(::containsLayoutAnimationProperty) == true
     val nativeAnimation = buildNativeAnimation(
-        summaries = summaries,
+        summaries = firstSummary?.let(::listOf).orEmpty(),
         names = names,
         durationMs = durationMs,
         delayMs = delayMs,
         iterationCount = iterationCount,
-        fillModeForwards = fillModeForwards,
-        hasLayoutProperty = hasLayoutProperty,
+        fillMode = fillMode,
+        direction = direction,
+        easing = easing,
+        hasLayoutProperty = firstHasLayoutProperty,
         context = context,
     )
+    val staticOpacity = summaries.firstOrNull()?.staticOpacityForSafeInfinite()
+        ?: if (iterationCount.isInfinite() && summaries.any { it.hasOpacityOrTransform }) 1f else null
     return RichAnimationStyle(
         names = names,
         durationMs = durationMs.coerceIn(0, 10_000),
         delayMs = delayMs.coerceIn(0, 10_000),
         iterationCount = iterationCount,
         fillModeForwards = fillModeForwards,
+        fillMode = fillMode,
+        direction = direction,
+        easing = easing,
         hasLayoutProperty = hasLayoutProperty,
         hasOpacityOrTransform = hasOpacityOrTransform || names.isNotEmpty(),
         nativeAnimation = nativeAnimation,
+        staticOpacity = if (iterationCount.isInfinite()) staticOpacity else null,
+        declaredAnimationCount = declaredAnimationCount,
+        multiKeyframeCount = multiKeyframeCount,
+        unsupportedPropertyCount = unsupportedPropertyCount,
     )
 }
 
@@ -2237,34 +2471,119 @@ private fun buildNativeAnimation(
     durationMs: Int,
     delayMs: Int,
     iterationCount: Float,
-    fillModeForwards: Boolean,
+    fillMode: RichAnimationFillMode,
+    direction: RichAnimationDirection,
+    easing: RichAnimationEasing,
     hasLayoutProperty: Boolean,
     context: CssLengthContext,
 ): RichNativeAnimation? {
-    val summary = summaries.singleOrNull() ?: return null
-    if (names.size != 1) return null
-    if (!fillModeForwards || iterationCount != 1f || hasLayoutProperty || summary.hasIntermediateFrame) return null
+    val summary = summaries.firstOrNull() ?: return null
+    if (names.isEmpty()) return null
+    if (iterationCount.isInfinite() || hasLayoutProperty) return null
     if (durationMs !in 1..MAX_NATIVE_ANIMATION_DURATION_MS) return null
     if (delayMs !in 0..MAX_NATIVE_ANIMATION_DELAY_MS) return null
     if (summary.properties.any { it !in NATIVE_ANIMATION_PROPERTIES }) return null
-    val from = summary.fromDeclarations
-    val to = summary.toDeclarations
-    if (from.isEmpty() || to.isEmpty()) return null
-    val fromOpacity = from["opacity"]?.let(::parseCssFloat)?.coerceIn(0f, 1f)
-    val toOpacity = to["opacity"]?.let(::parseCssFloat)?.coerceIn(0f, 1f)
-    val fromTransform = from["transform"]?.let { parseTransform(it, context) } ?: RichTransform.None
-    val toTransform = to["transform"]?.let { parseTransform(it, context) } ?: RichTransform.None
-    if (fromOpacity == null && toOpacity == null && fromTransform == RichTransform.None && toTransform == RichTransform.None) {
+    val iterationRounds = iterationCount.toInt().takeIf { it >= 1 && it <= MAX_NATIVE_ANIMATION_ITERATIONS } ?: return null
+    if (kotlin.math.abs(iterationCount - iterationRounds.toFloat()) > 0.001f) return null
+    val totalDurationMs = durationMs * iterationRounds
+    if (totalDurationMs > MAX_NATIVE_ANIMATION_TOTAL_MS) return null
+    val keyframeStops = summary.frames
+        .groupBy { it.progress }
+        .map { (progress, frames) ->
+            val declarations = frames.last().declarations
+            RichNativeAnimationStop(
+                progress = progress,
+                opacity = declarations["opacity"]?.let(::parseCssFloat)?.coerceIn(0f, 1f),
+                transform = declarations["transform"]?.let { parseTransform(it, context) } ?: RichTransform.None,
+            )
+        }
+        .sortedBy { it.progress }
+    if (keyframeStops.none { it.progress <= 0f } || keyframeStops.none { it.progress >= 1f }) return null
+    if (keyframeStops.all { it.opacity == null && it.transform == RichTransform.None }) {
         return null
     }
+    val directedStops = when (direction) {
+        RichAnimationDirection.Normal -> keyframeStops
+        RichAnimationDirection.Reverse -> keyframeStops.map { it.copy(progress = 1f - it.progress) }.sortedBy { it.progress }
+    }
+    val fillAwareStops = if (fillMode == RichAnimationFillMode.None || fillMode == RichAnimationFillMode.Backwards) {
+        directedStops.dropLast(1) + RichNativeAnimationStop(1f, opacity = 1f, transform = RichTransform.None)
+    } else {
+        directedStops
+    }
+    val from = fillAwareStops.first()
+    val to = fillAwareStops.last()
     return RichNativeAnimation(
-        fromOpacity = fromOpacity,
-        toOpacity = toOpacity,
-        fromTransform = fromTransform,
-        toTransform = toTransform,
+        fromOpacity = from.opacity,
+        toOpacity = to.opacity,
+        fromTransform = from.transform,
+        toTransform = to.transform,
         durationMs = durationMs,
         delayMs = delayMs,
+        totalDurationMs = totalDurationMs,
+        iterationCount = iterationRounds,
+        fillMode = fillMode,
+        direction = direction,
+        easing = easing,
+        stops = fillAwareStops,
     )
+}
+
+private fun firstCssCommaValue(value: String): String {
+    return splitCssTopLevel(value, ',').firstOrNull()?.trim().orEmpty()
+}
+
+private fun parseAnimationFillMode(value: String): RichAnimationFillMode? {
+    return when (value.trim().lowercase()) {
+        "none" -> RichAnimationFillMode.None
+        "forwards" -> RichAnimationFillMode.Forwards
+        "backwards" -> RichAnimationFillMode.Backwards
+        "both" -> RichAnimationFillMode.Both
+        else -> null
+    }
+}
+
+private fun parseAnimationDirection(value: String): RichAnimationDirection? {
+    return when (value.trim().lowercase()) {
+        "normal" -> RichAnimationDirection.Normal
+        "reverse" -> RichAnimationDirection.Reverse
+        else -> null
+    }
+}
+
+private fun parseAnimationEasing(value: String): RichAnimationEasing? {
+    val normalized = value.trim().lowercase()
+    return when (normalized) {
+        "linear" -> RichAnimationEasing.Linear
+        "ease" -> RichAnimationEasing.Ease
+        "ease-in" -> RichAnimationEasing.EaseIn
+        "ease-out" -> RichAnimationEasing.EaseOut
+        "ease-in-out" -> RichAnimationEasing.EaseInOut
+        else -> {
+            val args = Regex("""cubic-bezier\(([^)]*)\)""", RegexOption.IGNORE_CASE)
+                .find(normalized)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?.let { splitCssTopLevel(it, ',') }
+                ?.mapNotNull { it.trim().toFloatOrNull() }
+            if (args?.size == 4) {
+                RichAnimationEasing.CubicBezier(
+                    x1 = args[0].coerceIn(0f, 1f),
+                    y1 = args[1],
+                    x2 = args[2].coerceIn(0f, 1f),
+                    y2 = args[3],
+                )
+            } else {
+                null
+            }
+        }
+    }
+}
+
+private fun RichKeyframesSummary.staticOpacityForSafeInfinite(): Float? {
+    if (properties.any { it != "opacity" }) return null
+    return frames.mapNotNull { it.declarations["opacity"]?.let(::parseCssFloat)?.coerceIn(0f, 1f) }
+        .maxOrNull()
 }
 
 private fun parseTransitionStyle(declarations: Map<String, String>): RichTransitionStyle? {
@@ -2362,6 +2681,99 @@ private fun parseCssFilter(value: String, context: CssLengthContext): RichCssFil
     )
 }
 
+private fun parseClipPath(value: String, context: CssLengthContext): RichClipPath? {
+    val normalized = value.trim()
+    if (normalized.equals("none", ignoreCase = true)) return null
+    val function = Regex("""^([a-zA-Z-]+)\((.*)\)$""", RegexOption.IGNORE_CASE)
+        .find(normalized)
+        ?: return null
+    val name = function.groupValues[1].lowercase()
+    val body = function.groupValues[2].trim()
+    return when (name) {
+        "inset" -> parseInsetClipPath(body, context)
+        "circle" -> parseCircleClipPath(body, context)
+        "ellipse" -> parseEllipseClipPath(body, context)
+        else -> null
+    }
+}
+
+private fun parseInsetClipPath(body: String, context: CssLengthContext): RichClipPath.Inset? {
+    val parts = body.split(Regex("""\s+round\s+""", RegexOption.IGNORE_CASE), limit = 2)
+    val insets = splitCssTopLevelWhitespace(parts.getOrNull(0).orEmpty())
+        .mapNotNull { parseRichSize(it, context) }
+    if (insets.isEmpty()) return null
+    val top = insets.getOrNull(0) ?: RichSize.DpSize(0.dp)
+    val right = insets.getOrNull(1) ?: top
+    val bottom = insets.getOrNull(2) ?: top
+    val left = insets.getOrNull(3) ?: right
+    val radius = parts.getOrNull(1)
+        ?.let(::splitCssTopLevelWhitespace)
+        ?.firstOrNull()
+        ?.let { parseCssDp(it, context) }
+        ?: 0.dp
+    return RichClipPath.Inset(top, right, bottom, left, radius)
+}
+
+private fun parseCircleClipPath(body: String, context: CssLengthContext): RichClipPath.Circle? {
+    val parts = splitCssAtKeyword(body)
+    val radius = parts.before
+        .firstOrNull()
+        ?.takeUnless { it in CSS_BASIC_SHAPE_SIZE_KEYWORDS }
+        ?.let { parseRichSize(it, context) }
+        ?: RichSize.Fraction(0.5f)
+    val center = parseShapeCenter(parts.after, context)
+    return RichClipPath.Circle(radius = radius, centerX = center.first, centerY = center.second)
+}
+
+private fun parseEllipseClipPath(body: String, context: CssLengthContext): RichClipPath.Ellipse? {
+    val parts = splitCssAtKeyword(body)
+    val radii = parts.before.filterNot { it in CSS_BASIC_SHAPE_SIZE_KEYWORDS }
+    val radiusX = radii.getOrNull(0)?.let { parseRichSize(it, context) } ?: RichSize.Fraction(0.5f)
+    val radiusY = radii.getOrNull(1)?.let { parseRichSize(it, context) } ?: RichSize.Fraction(0.5f)
+    val center = parseShapeCenter(parts.after, context)
+    return RichClipPath.Ellipse(radiusX = radiusX, radiusY = radiusY, centerX = center.first, centerY = center.second)
+}
+
+private data class CssBasicShapeParts(
+    val before: List<String>,
+    val after: List<String>,
+)
+
+private fun splitCssAtKeyword(body: String): CssBasicShapeParts {
+    val tokens = splitCssTopLevelWhitespace(body.lowercase())
+    val atIndex = tokens.indexOf("at")
+    return if (atIndex >= 0) {
+        CssBasicShapeParts(tokens.take(atIndex), tokens.drop(atIndex + 1))
+    } else {
+        CssBasicShapeParts(tokens, emptyList())
+    }
+}
+
+private fun parseShapeCenter(tokens: List<String>, context: CssLengthContext): Pair<RichSize, RichSize> {
+    if (tokens.isEmpty()) return RichSize.Fraction(0.5f) to RichSize.Fraction(0.5f)
+    fun parseAxis(token: String, horizontal: Boolean): RichSize? = when (token) {
+        "left" -> RichSize.Fraction(0f).takeIf { horizontal }
+        "right" -> RichSize.Fraction(1f).takeIf { horizontal }
+        "top" -> RichSize.Fraction(0f).takeIf { !horizontal }
+        "bottom" -> RichSize.Fraction(1f).takeIf { !horizontal }
+        "center" -> RichSize.Fraction(0.5f)
+        else -> parseRichSize(token, context)
+    }
+    val xToken = tokens.firstOrNull { it !in setOf("top", "bottom") } ?: tokens.firstOrNull()
+    val yToken = tokens.firstOrNull { it !in setOf("left", "right") && it != xToken } ?: tokens.getOrNull(1)
+    val x = xToken?.let { parseAxis(it, horizontal = true) } ?: RichSize.Fraction(0.5f)
+    val y = yToken?.let { parseAxis(it, horizontal = false) } ?: RichSize.Fraction(0.5f)
+    return x to y
+}
+
+private fun parseMaskImage(value: String): RichBackgroundImage? {
+    return when (val image = parseBackgroundImage(splitCssTopLevel(value, ',').firstOrNull().orEmpty())) {
+        is RichBackgroundImage.LinearGradient -> image
+        is RichBackgroundImage.RadialGradient -> image
+        else -> null
+    }
+}
+
 private fun parseBackgroundUrl(value: String): String? {
     return Regex("""url\((['"]?)(.*?)\1\)""", RegexOption.IGNORE_CASE)
         .find(value)?.groupValues?.getOrNull(2)?.takeIf { it.isNotBlank() }
@@ -2381,7 +2793,11 @@ private data class ParsedBackgroundShorthand(
 
 private fun parseBackgroundShorthand(value: String, context: CssLengthContext): ParsedBackgroundShorthand {
     val firstLayer = splitCssTopLevel(value, ',').firstOrNull().orEmpty()
-    val slashParts = splitCssTopLevel(firstLayer, '/')
+    return parseBackgroundLayerShorthand(firstLayer, context)
+}
+
+private fun parseBackgroundLayerShorthand(value: String, context: CssLengthContext): ParsedBackgroundShorthand {
+    val slashParts = splitCssTopLevel(value, '/')
     val beforeSlash = slashParts.getOrNull(0).orEmpty()
     val afterSlash = slashParts.getOrNull(1).orEmpty()
     val tokens = splitCssTopLevelWhitespace(beforeSlash)
@@ -2397,18 +2813,90 @@ private fun parseBackgroundShorthand(value: String, context: CssLengthContext): 
             !token.contains("gradient", ignoreCase = true) &&
             !token.startsWith("url", ignoreCase = true)
     }
-    val declaredColor = tokens.firstNotNullOfOrNull(::parseRichCssColor)
+    val declaredColor = tokens
+        .filterNot(::isBackgroundImageToken)
+        .firstNotNullOfOrNull(::parseRichCssColor)
     return ParsedBackgroundShorthand(
         color = resolveRichCssColor(declaredColor, null),
         declaredColor = declaredColor,
-        image = parseBackgroundImage(firstLayer),
-        url = parseBackgroundUrl(firstLayer),
+        image = parseBackgroundImage(value),
+        url = parseBackgroundUrl(value),
         size = sizeTokens.takeIf { it.isNotEmpty() }?.joinToString(" ")?.let { parseBackgroundSize(it, context) },
         position = positionTokens.takeIf { it.isNotEmpty() }?.joinToString(" ")?.let { parseBackgroundPosition(it, context) },
         repeat = repeat,
         origin = afterSlashBoxTokens.getOrNull(0) ?: boxTokens.getOrNull(0),
         clip = afterSlashBoxTokens.getOrNull(1) ?: boxTokens.getOrNull(1) ?: afterSlashBoxTokens.getOrNull(0) ?: boxTokens.getOrNull(0),
     )
+}
+
+private fun parseSafeBackgroundLayers(
+    imageValue: String?,
+    sizeValue: String?,
+    positionValue: String?,
+    repeatValue: String?,
+    originValue: String?,
+    clipValue: String?,
+    context: CssLengthContext,
+    fallbackSize: RichBackgroundSize,
+    fallbackPosition: RichBackgroundPosition,
+    fallbackRepeat: RichBackgroundRepeat,
+    fallbackOrigin: RichBackgroundBox,
+    fallbackClip: RichBackgroundBox,
+): List<RichBackgroundLayer>? {
+    if (imageValue.isNullOrBlank()) return null
+    val sourceLayers = splitCssTopLevel(imageValue, ',')
+    if (sourceLayers.isEmpty()) return null
+    val sizes = sizeValue?.let { splitCssTopLevel(it, ',') }.orEmpty()
+    val positions = positionValue?.let { splitCssTopLevel(it, ',') }.orEmpty()
+    val repeats = repeatValue?.let { splitCssTopLevel(it, ',') }.orEmpty()
+    val origins = originValue?.let { splitCssTopLevel(it, ',') }.orEmpty()
+    val clips = clipValue?.let { splitCssTopLevel(it, ',') }.orEmpty()
+    val parsed = sourceLayers.mapIndexedNotNull { index, rawLayer ->
+        val shorthand = parseBackgroundLayerShorthand(rawLayer, context)
+        val image = parseBackgroundImage(rawLayer)
+        val url = parseBackgroundUrl(rawLayer)?.takeIf(::isSafeRichHtmlImageSource)
+        if (image == null && url == null) {
+            null
+        } else {
+            RichBackgroundLayer(
+                image = image,
+                url = url,
+                size = sizes.layerValue(index)?.let { parseBackgroundSize(it, context) }
+                    ?: shorthand.size
+                    ?: fallbackSize,
+                position = positions.layerValue(index)?.let { parseBackgroundPosition(it, context) }
+                    ?: shorthand.position
+                    ?: fallbackPosition,
+                repeat = repeats.layerValue(index)?.let(::parseBackgroundRepeat)
+                    ?: shorthand.repeat
+                    ?: fallbackRepeat,
+                origin = origins.layerValue(index)?.let(::parseBackgroundBox)
+                    ?: shorthand.origin
+                    ?: fallbackOrigin,
+                clip = clips.layerValue(index)?.let(::parseBackgroundBox)
+                    ?: shorthand.clip
+                    ?: fallbackClip,
+            )
+        }
+    }
+    return selectSafeBackgroundLayers(parsed).takeIf { it.isNotEmpty() }
+}
+
+private fun List<String>.layerValue(index: Int): String? = when {
+    isEmpty() -> null
+    index < size -> this[index]
+    else -> last()
+}
+
+private fun selectSafeBackgroundLayers(layers: List<RichBackgroundLayer>): List<RichBackgroundLayer> {
+    val gradient = layers.firstOrNull { it.image != null }
+    val url = layers.firstOrNull { it.url != null }
+    return layers.filter { layer -> layer == gradient || layer == url }.take(2)
+}
+
+private fun isBackgroundImageToken(token: String): Boolean {
+    return token.contains("gradient", ignoreCase = true) ||
+        token.startsWith("url", ignoreCase = true)
 }
 
 private fun parseBackgroundSize(value: String, context: CssLengthContext): RichBackgroundSize? {
@@ -2708,6 +3196,7 @@ private fun parseCssDp(value: String, context: CssLengthContext): Dp? {
     return when {
         normalized.endsWith("px") -> normalized.removeSuffix("px").trim().toFloatOrNull()?.dp
         normalized.endsWith("dp") -> normalized.removeSuffix("dp").trim().toFloatOrNull()?.dp
+        normalized.endsWith("vw") -> normalized.removeSuffix("vw").trim().toFloatOrNull()?.let { context.viewportWidth * (it / 100f) }
         normalized.endsWith("rem") -> normalized.removeSuffix("rem").trim().toFloatOrNull()?.let { context.rootFontSizeDp() * it }
         normalized.endsWith("em") -> normalized.removeSuffix("em").trim().toFloatOrNull()?.let { context.fontSizeDp() * it }
         normalized.endsWith("%") -> normalized.removeSuffix("%").trim().toFloatOrNull()?.let { context.viewportWidth * (it / 100f) }
@@ -2813,6 +3302,7 @@ private fun parseSimpleCssDp(value: String, context: CssLengthContext): Dp? {
     return when {
         normalized.endsWith("px") -> normalized.removeSuffix("px").trim().toFloatOrNull()?.dp
         normalized.endsWith("dp") -> normalized.removeSuffix("dp").trim().toFloatOrNull()?.dp
+        normalized.endsWith("vw") -> normalized.removeSuffix("vw").trim().toFloatOrNull()?.let { context.viewportWidth * (it / 100f) }
         normalized.endsWith("rem") -> normalized.removeSuffix("rem").trim().toFloatOrNull()?.let { context.rootFontSizeDp() * it }
         normalized.endsWith("em") -> normalized.removeSuffix("em").trim().toFloatOrNull()?.let { context.fontSizeDp() * it }
         normalized.endsWith("%") -> normalized.removeSuffix("%").trim().toFloatOrNull()?.let { context.viewportWidth * (it / 100f) }
@@ -2838,8 +3328,15 @@ private fun findMatchingParen(text: String, openIndex: Int): Int? {
     return null
 }
 
-private fun parseCssFontSize(value: String, baseFontSize: TextUnit = 16.sp): TextUnit? {
+private fun parseCssFontSize(
+    value: String,
+    baseFontSize: TextUnit = 16.sp,
+    context: CssLengthContext? = null,
+): TextUnit? {
     val normalized = value.trim().lowercase()
+    if (context != null) {
+        parseCssLengthFunction(normalized, context)?.let { return it.value.sp.takeIfFiniteCssTextUnit() }
+    }
     val base = baseFontSize.cssReferenceFontSize()
     return when {
         normalized.endsWith("sp") -> normalized.removeSuffix("sp").trim().toFloatOrNull()?.sp
@@ -3063,6 +3560,7 @@ private fun parseCssTextAlign(value: String): TextAlign? = when (value.trim().lo
 private val CSS_LENGTH_TOKEN = Regex("""-?[0-9]*\.?[0-9]+(?:px|dp|rem|em)?""")
 private val CSS_FUNCTION_TOKEN = Regex("""([a-zA-Z-]+)\(([^()]*)\)""")
 private val CSS_PROPERTY_NAME = Regex("""([A-Za-z-]+)\s*:""")
+private val CSS_BASIC_SHAPE_SIZE_KEYWORDS = setOf("closest-side", "farthest-side", "closest-corner", "farthest-corner")
 private val INTERACTIVE_PSEUDO_SELECTOR = Regex(""":(hover|active|focus|focus-visible|focus-within)\b""", RegexOption.IGNORE_CASE)
 private val ANIMATED_LAYOUT_PROPERTIES = setOf(
     "width",
@@ -3094,7 +3592,9 @@ private val ANIMATED_LAYOUT_PROPERTIES = setOf(
 )
 private val NATIVE_ANIMATION_PROPERTIES = setOf("opacity", "transform")
 private const val MAX_NATIVE_ANIMATION_DURATION_MS = 1_200
+private const val MAX_NATIVE_ANIMATION_TOTAL_MS = 1_800
 private const val MAX_NATIVE_ANIMATION_DELAY_MS = 1_500
+private const val MAX_NATIVE_ANIMATION_ITERATIONS = 3
 private val ANIMATION_SHORTHAND_KEYWORDS = setOf(
     "none",
     "linear",

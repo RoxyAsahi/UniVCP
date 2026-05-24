@@ -147,6 +147,7 @@ android {
             isMinifyEnabled = false
             isShrinkResources = false
             isProfileable = true
+            buildConfigField("boolean", "UNIVCP_RENDER_SEED_ENABLED", "true")
         }
     }
     compileOptions {

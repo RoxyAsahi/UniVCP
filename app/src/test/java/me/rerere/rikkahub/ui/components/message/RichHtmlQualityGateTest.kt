@@ -2,16 +2,20 @@ package me.rerere.rikkahub.ui.components.message
 
 import me.rerere.rikkahub.ui.components.richtext.RichBlock
 import me.rerere.rikkahub.ui.components.richtext.RichAlign
+import me.rerere.rikkahub.ui.components.richtext.RichBackgroundImage
+import me.rerere.rikkahub.ui.components.richtext.RichClipPath
 import me.rerere.rikkahub.ui.components.richtext.RichContainerBlock
 import me.rerere.rikkahub.ui.components.richtext.RichDisplay
 import me.rerere.rikkahub.ui.components.richtext.RichFlexDirection
 import me.rerere.rikkahub.ui.components.richtext.RichFlexWrap
 import me.rerere.rikkahub.ui.components.richtext.RichHtmlCompiler
 import me.rerere.rikkahub.ui.components.richtext.RichSvgBlock
+import me.rerere.rikkahub.ui.components.richtext.RichSvgCommand
 import me.rerere.rikkahub.ui.components.richtext.RichTableBlock
 import me.rerere.rikkahub.ui.components.richtext.RichTextBlock
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -49,6 +53,89 @@ class RichHtmlQualityGateTest {
             assertFalse("${fixture.name} should not be safe for native", safety.safeForNative)
             assertEquals("${fixture.name} should be dynamic fallback", RichHtmlRenderKind.ComplexDynamic, analysis.kind)
         }
+    }
+
+    @Test
+    fun `background clip text keeps gradient out of the text box background`() {
+        val html = """
+            <div id="response-root" style="position:relative; overflow:hidden; padding:28px 26px; border-radius:24px; background:linear-gradient(135deg,#0f172a 0%,#111827 46%,#1e1b4b 100%); color:#fff;">
+              <style>
+                #response-root .title {
+                  position:relative;
+                  z-index:1;
+                  margin:0;
+                  font-size:clamp(34px, 7vw, 64px);
+                  line-height:1.05;
+                  font-weight:900;
+                  background:linear-gradient(90deg,#38bdf8,#a78bfa,#f472b6,#facc15);
+                  background-size:260% 100%;
+                  -webkit-background-clip:text;
+                  background-clip:text;
+                  color:transparent;
+                }
+              </style>
+              <h1 class="title">渐变色大标题</h1>
+            </div>
+        """.trimIndent()
+
+        val blocks = RichHtmlCompiler.compile(html).blocks.flatMap(::flatten)
+        val title = blocks.filterIsInstance<RichTextBlock>().single { it.content.text == "渐变色大标题" }
+
+        assertTrue(title.style.backgroundImage is RichBackgroundImage.LinearGradient)
+        assertEquals("Text", title.style.backgroundClip.name)
+        assertNull("text-clipped gradients must not paint the whole text box", title.style.backgroundColor)
+        assertEquals(34f, title.style.fontSize.value, 0.01f)
+    }
+
+    @Test
+    fun `safe css painting subset compiles into native style model`() {
+        val html = """
+            <div id="response-root">
+              <img src="data:image/png;base64,iVBORw0KGgo=" style="width:64px;height:64px;clip-path:circle(50% at center);" />
+              <div style="height:80px;mask-image:linear-gradient(to bottom,#000 0%,transparent 100%);background:linear-gradient(180deg,#38bdf8,#0f172a);">Fade</div>
+              <div style="background:linear-gradient(90deg,#fff,#ddd),url(data:image/png;base64,iVBORw0KGgo=);backdrop-filter:blur(8px) brightness(1.1);">Glass</div>
+            </div>
+        """.trimIndent()
+
+        val model = RichHtmlCompiler.compile(html)
+        val blocks = model.blocks.flatMap(::flatten)
+        val debug = blocks.joinToString { block ->
+            "${block::class.simpleName}(clip=${block.style.clipPath},mask=${block.style.maskImage},backdrop=${block.style.backdropFilter})"
+        }
+        val avatar = blocks.firstOrNull { it.style.clipPath is RichClipPath.Circle }
+        val masked = blocks.firstOrNull { it.style.maskImage is RichBackgroundImage.LinearGradient }
+        val glass = blocks.firstOrNull { it.style.backdropFilter.blurRadius != null }
+
+        assertTrue("expected circle clip path in $debug", avatar?.style?.clipPath is RichClipPath.Circle)
+        assertTrue("expected gradient mask in $debug", masked?.style?.maskImage is RichBackgroundImage.LinearGradient)
+        assertEquals(1, glass?.style?.extraBackgroundLayers)
+        assertEquals(2, glass?.style?.backgroundLayers?.size)
+        assertTrue(glass?.style?.backgroundLayers?.firstOrNull()?.image is RichBackgroundImage.LinearGradient)
+        assertTrue(glass?.style?.backgroundLayers?.any { it.image is RichBackgroundImage.LinearGradient } == true)
+        assertTrue(glass?.style?.backgroundLayers?.any { it.url?.startsWith("data:image/png") == true } == true)
+        assertTrue(model.unsupported.isEmpty())
+    }
+
+    @Test
+    fun `svg dash arrays are normalized before native drawing`() {
+        val html = """
+            <div id="vcp-root">
+              <svg width="80" height="40" viewBox="0 0 80 40">
+                <line x1="4" y1="8" x2="76" y2="8" stroke="#fff" stroke-width="2" stroke-dasharray="4"/>
+                <line x1="4" y1="20" x2="76" y2="20" stroke="#fff" stroke-width="2" stroke-dasharray="4 0 2"/>
+                <line x1="4" y1="32" x2="76" y2="32" stroke="#fff" stroke-width="2" stroke-dasharray="0 -1 none"/>
+              </svg>
+            </div>
+        """.trimIndent()
+
+        val svg = (RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock)
+            .children
+            .single() as RichSvgBlock
+        val lines = svg.model.commands.filterIsInstance<RichSvgCommand.Line>()
+
+        assertEquals(listOf(4f, 4f), lines[0].strokeDashArray)
+        assertEquals(listOf(4f, 2f), lines[1].strokeDashArray)
+        assertTrue(lines[2].strokeDashArray.isEmpty())
     }
 
     private fun assertMetadataOnly(fixture: FidelityFixture, metadata: String) {
@@ -101,6 +188,9 @@ class RichHtmlQualityGateTest {
                 containers.any { it.style.position.name == "Absolute" },
             )
             assertTrue(blocks.filterIsInstance<RichTextBlock>().any { it.style.backgroundClip.name == "Text" })
+            val gradientTitle = blocks.filterIsInstance<RichTextBlock>().first { it.content.text.contains("Uika") }
+            assertTrue(gradientTitle.style.backgroundImage is RichBackgroundImage.LinearGradient)
+            assertNull("gradient text should not paint a rectangular background", gradientTitle.style.backgroundColor)
             assertTrue(blocks.filterIsInstance<RichContainerBlock>().any { it.style.display == RichDisplay.Flex })
         },
         FidelityFixture(
@@ -125,7 +215,11 @@ class RichHtmlQualityGateTest {
             assertEquals(12f, flex.style.columnGap.value, 0.01f)
             assertEquals(RichAlign.Baseline, flex.style.alignItems)
             assertTrue(flex.children.any { it.style.alignSelf == RichAlign.Baseline })
-            assertTrue(grid.children.any { it.style.gridColumnSpan == 3 && it.style.gridRowSpan == 2 })
+            assertTrue(grid.children.any {
+                it.style.gridColumnStart == 2 &&
+                    it.style.gridColumnSpan == 3 &&
+                    it.style.gridRowSpan == 2
+            })
         },
         FidelityFixture(
             name = "table fidelity",

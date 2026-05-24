@@ -421,6 +421,70 @@
           ]
         }
       ]
+    },
+    {
+      "id": "2bedab92-d15f-454f-8a14-0a3cb2b6d801",
+      "assistantSeedId": "7b28895b-f6d8-418f-a4f0-14bf8095de08",
+      "title": "Seed: Snapshot fallback static card",
+      "createdAt": 1778706000000,
+      "updatedAt": 1778706120000,
+      "suggestions": [
+        "检查静态快照",
+        "打开动态预览",
+        "对比原生高度"
+      ],
+      "messages": [
+        {
+          "id": "5b9dbc3b-5872-46b6-8615-cadcfad7bd65",
+          "nodeId": "916edb2c-c0fc-4084-8a9e-5e0f1275ce8e",
+          "role": "user",
+          "createdAt": 1778706000000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "补一个复杂但静态的玻璃拟态卡片，用来命中 WebView snapshot 兜底。"
+            }
+          ]
+        },
+        {
+          "id": "c433eea2-4735-4493-9419-683b54615d16",
+          "nodeId": "5c366d41-817b-4ace-b0cb-91298d77f41e",
+          "role": "assistant",
+          "createdAt": 1778706060000,
+          "updatedAt": 1778706120000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "<div id='response-root' style='font-family:system-ui,Segoe UI,sans-serif;background:linear-gradient(135deg,#eef2ff,#ecfeff);color:#111827;padding:18px;border-radius:18px;position:relative;overflow:hidden;'>\n  <style>\n    .snapshot-glass-card{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-top:14px;}\n    .snapshot-glass-tile{padding:14px;border-radius:16px;background:rgba(255,255,255,.62);border:1px solid rgba(255,255,255,.5);box-shadow:0 16px 40px rgba(37,99,235,.14);backdrop-filter:blur(14px);}\n    .snapshot-orb{position:absolute;right:-20px;top:-24px;width:120px;height:120px;border-radius:999px;background:#38bdf8;opacity:.22;filter:blur(3px);mix-blend-mode:multiply;clip-path:circle(48% at 50% 50%);}\n    .snapshot-mask{height:36px;background:linear-gradient(90deg,#6366f1,#22d3ee);mask-image:linear-gradient(90deg,transparent,#000 18%,#000 82%,transparent);}\n  </style>\n  <div class='snapshot-orb'></div>\n  <h2 style='margin:0;font-size:1.35rem;'>Snapshot fallback sample</h2>\n  <p style='margin:6px 0 0 0;line-height:1.55;color:#475569;'>这段安全静态 HTML 使用 backdrop-filter、mask、clip-path 和 mix-blend-mode，原生路径应优先识别为静态快照候选。</p>\n  <div class='snapshot-mask'></div>\n  <div class='snapshot-glass-card'>\n    <section class='snapshot-glass-tile'><b>Fidelity</b><br/><span style='font-size:.9rem;color:#475569;'>WebView 离屏生成静态图，聊天列表不常驻 live WebView。</span></section>\n    <section class='snapshot-glass-tile'><b>Safety</b><br/><span style='font-size:.9rem;color:#475569;'>无 script/canvas/iframe，适合 snapshot route。</span></section>\n  </div>\n</div>"
+            }
+          ]
+        },
+        {
+          "id": "f5524e9c-31a4-43e5-aa17-2a016d4db1ac",
+          "nodeId": "67e01aef-493f-49d1-8095-68d46ea7ec7a",
+          "role": "user",
+          "createdAt": 1778706180000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "再补一个 Snapshot v1.1 的高度与缓存观测样本，包含小字体、固定高度、长列表切换时容易暴露的静态视觉层。"
+            }
+          ]
+        },
+        {
+          "id": "2b7a92b2-496d-45db-9715-4e12429b2a96",
+          "nodeId": "8ffcb72a-f720-49df-b110-b58b39e431cc",
+          "role": "assistant",
+          "createdAt": 1778706240000,
+          "updatedAt": 1778706300000,
+          "parts": [
+            {
+              "type": "text",
+              "text": "<div id='response-root' style='font-family:Inter,Segoe UI,sans-serif;background:#f8fafc;color:#0f172a;border-radius:16px;padding:14px;min-height:280px;position:relative;overflow:hidden;'>\n  <style>\n    .snapshot-v11-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:12px;}\n    .snapshot-v11-card{height:86px;padding:10px;border-radius:12px;background:rgba(255,255,255,.76);border:1px solid rgba(148,163,184,.34);backdrop-filter:blur(10px);box-shadow:0 10px 28px rgba(15,23,42,.08);}\n    .snapshot-v11-label{font-size:11px;line-height:1.25;text-transform:uppercase;letter-spacing:.6px;color:#475569;font-weight:700;}\n    .snapshot-v11-copy{font-size:12px;line-height:1.45;color:#334155;margin-top:6px;}\n    .snapshot-v11-strip{position:absolute;left:0;right:0;bottom:0;height:34px;background:linear-gradient(90deg,#6366f1,#06b6d4);mask-image:linear-gradient(90deg,transparent,#000 20%,#000 80%,transparent);opacity:.72;}\n  </style>\n  <h3 style='margin:0;font-size:18px;line-height:1.25;'>Snapshot v1.1 height sample</h3>\n  <p style='margin:5px 0 0 0;font-size:12px;line-height:1.5;color:#64748b;'>这个样本用于观测缓存命中、队列等待与快照高度偏差，不包含脚本和运行时媒体。</p>\n  <div class='snapshot-v11-grid'>\n    <section class='snapshot-v11-card'><div class='snapshot-v11-label'>Cache hit</div><div class='snapshot-v11-copy'>同宽度同主题再次进入应直接显示静态图。</div></section>\n    <section class='snapshot-v11-card'><div class='snapshot-v11-label'>Queue wait</div><div class='snapshot-v11-copy'>快速切换历史聊天时应只共享同一个 in-flight 任务。</div></section>\n    <section class='snapshot-v11-card'><div class='snapshot-v11-label'>Height delta</div><div class='snapshot-v11-copy'>固定高度与小字体用于暴露异常测高。</div></section>\n  </div>\n  <div class='snapshot-v11-strip'></div>\n</div>"
+            }
+          ]
+        }
+      ]
     }
   ]
 }

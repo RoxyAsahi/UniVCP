@@ -271,7 +271,7 @@ fun ChatMessage(
     }
 }
 
-private fun openMessageAttachment(
+internal fun openMessageAttachment(
     context: android.content.Context,
     url: String,
     mimeType: String,
@@ -378,6 +378,7 @@ private fun AssistantTextBlocks(
                                             html = previewHtml,
                                             onSendInput = onBubbleInput,
                                             transientCache = true,
+                                            enableSnapshot = false,
                                             renderFallback = {
                                                 StreamingRichHtmlPlaceholder(
                                                     previewText = previewAnalysis.previewText.ifBlank { analysis.previewText },
@@ -432,7 +433,7 @@ private fun AssistantTextBlocks(
 }
 
 @Composable
-private fun SafeRichHtmlBubbleBlock(
+internal fun SafeRichHtmlBubbleBlock(
     html: String,
     previewText: String,
     onOpen: () -> Unit,
@@ -441,6 +442,7 @@ private fun SafeRichHtmlBubbleBlock(
     RichHtmlBubbleBlock(
         html = html,
         onSendInput = onSendInput,
+        onOpenPreview = onOpen,
         renderFallback = {
             DynamicRichHtmlPreviewBlock(
                 previewText = previewText,
@@ -451,7 +453,7 @@ private fun SafeRichHtmlBubbleBlock(
 }
 
 @Composable
-private fun ProtocolTextBlock(block: MessageTextBlock.Protocol) {
+internal fun ProtocolTextBlock(block: MessageTextBlock.Protocol) {
     var expanded by remember(block.raw) { mutableStateOf(false) }
     val title = when (block.kind) {
         ProtocolKind.MetaThinking -> "VCP 元思考链"
@@ -503,7 +505,7 @@ private fun ProtocolTextBlock(block: MessageTextBlock.Protocol) {
 }
 
 @Composable
-private fun DynamicRichHtmlPreviewBlock(
+internal fun DynamicRichHtmlPreviewBlock(
     previewText: String,
     onOpen: () -> Unit,
 ) {
@@ -597,7 +599,7 @@ private fun rememberStreamingRenderText(
 }
 
 @Composable
-private fun StreamingRichHtmlPlaceholder(
+internal fun StreamingRichHtmlPlaceholder(
     previewText: String,
 ) {
     Surface(
@@ -995,7 +997,7 @@ private fun MessagePartsBlock(
 }
 
 @Composable
-private fun RichHtmlChatRenderTrace(
+internal fun RichHtmlChatRenderTrace(
     messageId: String,
     loading: Boolean,
     showAssistantBubble: Boolean,

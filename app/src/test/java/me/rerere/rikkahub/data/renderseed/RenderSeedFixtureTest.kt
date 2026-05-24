@@ -23,7 +23,7 @@ class RenderSeedFixtureTest {
         val conversations = root["conversations"]!!.jsonArray
 
         assertEquals(2, assistants.size)
-        assertEquals(9, conversations.size)
+        assertEquals(10, conversations.size)
 
         val ids = mutableSetOf<String>()
         assistants.forEach { assistant ->
@@ -70,6 +70,11 @@ class RenderSeedFixtureTest {
         assertTrue(allText.contains("<button"))
         assertTrue(allText.contains("math-block"))
         assertTrue(allText.contains("&lt;script&gt;"))
+        assertTrue(allText.contains("Snapshot fallback sample"))
+        assertTrue(allText.contains("Snapshot v1.1 height sample"))
+        assertTrue(allText.contains("backdrop-filter"))
+        assertTrue(allText.contains("mask-image"))
+        assertTrue(allText.contains("mix-blend-mode"))
         assertTrue(allText.contains("\"type\": \"tool\""))
         assertTrue(allText.contains("\"type\": \"image\""))
         assertTrue(allText.contains("\"type\": \"document\""))

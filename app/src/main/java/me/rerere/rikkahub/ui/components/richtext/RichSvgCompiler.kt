@@ -113,7 +113,13 @@ internal object RichSvgCompiler {
             }
         }
 
-        return if (commands.isEmpty()) null else RichSvgModel(width, height, viewBox, commands.take(256), visualHints)
+        return if (commands.isEmpty()) {
+            null
+        } else {
+            RichSvgModel(width, height, viewBox, commands.take(256), visualHints).also { model ->
+                runCatching { RichSvgPreparedDrawCache.prepare(model) }
+            }
+        }
     }
 
     private fun collectSvgVisualHints(svg: Element): List<RichVisualHint> {
@@ -273,9 +279,15 @@ private fun parseLineJoin(value: String): RichSvgLineJoin = when (value.trim().l
 private fun parseDashArray(value: String): List<Float> {
     val normalized = value.trim()
     if (normalized.isBlank() || normalized.equals("none", ignoreCase = true)) return emptyList()
-    return normalized.split(Regex("""[\s,]+"""))
+    val intervals = normalized.split(Regex("""[\s,]+"""))
         .mapNotNull { parseSvgFloat(it)?.takeIf { number -> number > 0f } }
         .take(16)
+    if (intervals.isEmpty()) return emptyList()
+    return if (intervals.size % 2 == 0) {
+        intervals
+    } else {
+        (intervals + intervals).take(16)
+    }
 }
 
 private fun parseFontWeight(value: String): Int? = when (value.trim().lowercase()) {

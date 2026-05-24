@@ -51,11 +51,15 @@ private fun parseMessageTextBlocksUncached(
 
     fun appendMarkdown(value: String) {
         if (value.isBlank()) return
-        val previous = result.lastOrNull()
-        if (previous is MessageTextBlock.Markdown) {
-            result[result.lastIndex] = previous.copy(text = previous.text + value)
-        } else {
-            result += MessageTextBlock.Markdown(value)
+        splitLongMarkdownBlock(value).forEach { chunk ->
+            val previous = result.lastOrNull()
+            if (previous is MessageTextBlock.Markdown &&
+                previous.text.length + chunk.length <= MAX_MARKDOWN_CELL_CHARS
+            ) {
+                result[result.lastIndex] = previous.copy(text = previous.text + chunk)
+            } else {
+                result += MessageTextBlock.Markdown(chunk)
+            }
         }
     }
 
@@ -88,7 +92,11 @@ internal fun stableMessageTextBlockKey(
     }
     val content = when (block) {
         is MessageTextBlock.Markdown -> block.text
-        is MessageTextBlock.VcpHtml -> block.html
+        is MessageTextBlock.VcpHtml -> if (block.partial) {
+            "streaming-rich-html"
+        } else {
+            block.html
+        }
         is MessageTextBlock.Protocol -> block.raw
     }
     return "$messageId:$blockIndex:$type:${renderTextCacheKey(content)}"
@@ -357,6 +365,35 @@ private val EXECUTABLE_HTML_PATTERNS = listOf(
     Regex("""<script\b""", RegexOption.IGNORE_CASE),
     Regex("""\shref\s*=\s*(['"])\s*javascript:""", RegexOption.IGNORE_CASE),
 )
+
+private fun splitLongMarkdownBlock(text: String): List<String> {
+    if (text.length <= MAX_MARKDOWN_CELL_CHARS) return listOf(text)
+    val chunks = mutableListOf<String>()
+    var cursor = 0
+    while (cursor < text.length) {
+        val target = (cursor + MAX_MARKDOWN_CELL_CHARS).coerceAtMost(text.length)
+        val split = findMarkdownCellSplit(text, cursor, target)
+        chunks += text.substring(cursor, split)
+        cursor = split
+    }
+    return chunks.filter { it.isNotBlank() }
+}
+
+private fun findMarkdownCellSplit(text: String, start: Int, target: Int): Int {
+    if (target >= text.length) return text.length
+    val paragraph = text.lastIndexOf("\n\n", startIndex = target).takeIf { it > start + MIN_MARKDOWN_CELL_CHARS }
+    if (paragraph != null) return paragraph + 2
+    val line = text.lastIndexOf('\n', startIndex = target).takeIf { it > start + MIN_MARKDOWN_CELL_CHARS }
+    if (line != null) return line + 1
+    val sentence = text.lastIndexOf('。', startIndex = target).takeIf { it > start + MIN_MARKDOWN_CELL_CHARS }
+    if (sentence != null) return sentence + 1
+    val space = text.lastIndexOf(' ', startIndex = target).takeIf { it > start + MIN_MARKDOWN_CELL_CHARS }
+    if (space != null) return space + 1
+    return target
+}
+
+private const val MAX_MARKDOWN_CELL_CHARS = 2_800
+private const val MIN_MARKDOWN_CELL_CHARS = 1_200
 private val TOOL_RESULT_SUCCESS = Regex("""(✅\s*SUCCESS|执行状态:\s*✅?\s*SUCCESS|\bSUCCESS\b)""", RegexOption.IGNORE_CASE)
 private val TOOL_RESULT_FAILURE = Regex("""(❌|执行状态:\s*(FAILED|FAILURE|ERROR)|\b(FAILED|FAILURE|ERROR)\b)""", RegexOption.IGNORE_CASE)
 private val messageTextBlockCache = RenderLruCache<String, List<MessageTextBlock>>(maxEntries = 192)
