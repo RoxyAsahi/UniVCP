@@ -41,6 +41,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.requiredHeight
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -69,11 +71,13 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
@@ -101,10 +105,14 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextMeasurer
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.TextUnitType
@@ -121,6 +129,7 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 private val LocalRichRenderColorDefaults = staticCompositionLocalOf { RichRenderColorDefaults.Fallback }
 private val LocalRichEffectiveBackground = staticCompositionLocalOf<Color?> { null }
@@ -171,10 +180,11 @@ private fun RichBlockView(
     onSendInput: (String) -> Unit,
     modifier: Modifier = Modifier,
     root: Boolean = false,
+    inline: Boolean = false,
 ) {
     when (block) {
-        is RichTextBlock -> RichTextBlockView(block, modifier)
-        is RichContainerBlock -> RichContainerBlockView(block, modifier, onSendInput, root)
+        is RichTextBlock -> RichTextBlockView(block, modifier, onSendInput, inline)
+        is RichContainerBlock -> RichContainerBlockView(block, modifier, onSendInput, root, inline)
         is RichImageBlock -> RichImageBlockView(block, modifier)
         is RichTableBlock -> RichTableBlockView(block, modifier)
         is RichSvgBlock -> RichSvgBlockView(block, modifier)
@@ -191,8 +201,9 @@ private fun RichContainerBlockView(
     modifier: Modifier,
     onSendInput: (String) -> Unit,
     root: Boolean,
+    inline: Boolean = false,
 ) {
-    StyledContainer(block.style, modifier = modifier, root = root, animationKey = block.blockId) {
+    StyledContainer(block.style, modifier = modifier, root = root, animationKey = block.blockId, inline = inline) {
         ProvideTextStyle(LocalTextStyle.current.merge(block.style.toTextStyle(LocalContentColor.current))) {
             val positionedChildren = block.children.filter { it.style.isPositionedOverlay() }
                 .sortedBy { it.style.zIndex }
@@ -240,15 +251,15 @@ private fun RichContainerFlowChildren(
     onSendInput: (String) -> Unit,
 ) {
     when {
-        parentStyle.display == RichDisplay.Flex -> {
+        parentStyle.display.isFlexContainer() -> {
             RichFlexBoxChildren(children = children, parentStyle = parentStyle, onSendInput = onSendInput)
         }
-        parentStyle.display == RichDisplay.Grid -> {
+        parentStyle.display.isGridContainer() -> {
             RichGridChildren(children = children, parentStyle = parentStyle, onSendInput = onSendInput)
         }
         else -> {
             Column(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = if (parentStyle.display.isBlockFilling()) Modifier.fillMaxWidth() else Modifier,
                 verticalArrangement = Arrangement.spacedBy(parentStyle.rowGap),
             ) {
                 children.forEach { child ->
@@ -266,7 +277,7 @@ private fun RichGridChildren(
     onSendInput: (String) -> Unit,
 ) {
     Layout(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = if (parentStyle.display == RichDisplay.Grid) Modifier.fillMaxWidth() else Modifier,
         content = {
             children.forEach { child ->
                 androidx.compose.runtime.key(child.blockId) {
@@ -360,7 +371,7 @@ private fun RichFlexBoxChildren(
     onSendInput: (String) -> Unit,
 ) {
     FlexBox(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = if (parentStyle.display == RichDisplay.Flex) Modifier.fillMaxWidth() else Modifier,
         config = {
             direction(parentStyle.toFlexDirection())
             wrap(parentStyle.toFlexWrap())
@@ -389,8 +400,13 @@ private fun RichFlexBoxChildren(
 }
 
 @Composable
-private fun RichTextBlockView(block: RichTextBlock, modifier: Modifier) {
-    StyledContainer(block.style, modifier = modifier, root = false, animationKey = block.blockId) {
+private fun RichTextBlockView(
+    block: RichTextBlock,
+    modifier: Modifier,
+    onSendInput: (String) -> Unit,
+    inline: Boolean = false,
+) {
+    StyledContainer(block.style, modifier = modifier, root = false, animationKey = block.blockId, inline = inline) {
         val textClipBrush = block.style.textClipBrush()
         val textStyle = LocalTextStyle.current.merge(
             block.style.toTextStyle(if (textClipBrush != null) Color.White else LocalContentColor.current)
@@ -419,15 +435,181 @@ private fun RichTextBlockView(block: RichTextBlock, modifier: Modifier) {
             }
             return@StyledContainer
         }
-        val inline = buildInlineMathText(text, block.inlineMath, textStyle)
+        val inline = buildInlineRichText(text, block.inlineMath, block.inlineBoxes, textStyle, onSendInput)
+        val inlinePaints = if (block.inlineMath.isEmpty()) block.inlinePaints else emptyList()
+        if (block.rendersAsInlineBoxFlow() && textClipBrush == null) {
+            RichInlineBoxFlow(
+                block = block,
+                onSendInput = onSendInput,
+            )
+            return@StyledContainer
+        }
+        var textLayout by remember(inline.text, inlinePaints) { mutableStateOf<TextLayoutResult?>(null) }
         Text(
             text = inline.text,
-            modifier = Modifier.textClipBrushMask(textClipBrush),
+            modifier = Modifier
+                .inlineTextPaints(inlinePaints, textLayout)
+                .textClipBrushMask(textClipBrush),
             inlineContent = inline.inlineContent,
             style = textStyle,
             maxLines = if (block.style.whiteSpace == RichWhiteSpace.NoWrap) 1 else Int.MAX_VALUE,
             overflow = if (block.style.textOverflow == RichTextOverflow.Ellipsis) TextOverflow.Ellipsis else TextOverflow.Clip,
+            onTextLayout = { textLayout = it },
         )
+    }
+}
+
+@Composable
+private fun RichInlineBoxFlow(
+    block: RichTextBlock,
+    onSendInput: (String) -> Unit,
+) {
+    val horizontalAlignment = block.style.inlineFlowHorizontalAlignment()
+    val lineGap = block.style.inlineFlowLineGap()
+    Layout(
+        content = {
+            block.inlineBoxes.forEach { run ->
+                androidx.compose.runtime.key(run.block.blockId) {
+                    RichBlockView(
+                        block = run.block,
+                        onSendInput = onSendInput,
+                        modifier = Modifier,
+                        inline = true,
+                    )
+                }
+            }
+        },
+    ) { measurables, constraints ->
+        if (measurables.isEmpty()) {
+            return@Layout layout(constraints.minWidth, constraints.minHeight) {}
+        }
+        val maxWidth = constraints.maxWidth.takeIf { it != Constraints.Infinity }
+            ?: measurables.sumOf { measurable ->
+                measurable.minIntrinsicWidth(Constraints.Infinity)
+            }.coerceAtLeast(constraints.minWidth)
+        val childConstraints = Constraints(
+            minWidth = 0,
+            maxWidth = maxWidth,
+            minHeight = 0,
+            maxHeight = Constraints.Infinity,
+        )
+        val placeables = measurables.map { it.measure(childConstraints) }
+        val lines = mutableListOf<InlineBoxFlowLine>()
+        var current = mutableListOf<Placeable>()
+        var lineWidth = 0
+        var lineHeight = 0
+
+        fun flushLine() {
+            if (current.isEmpty()) return
+            lines += InlineBoxFlowLine(
+                placeables = current,
+                width = lineWidth,
+                height = lineHeight,
+            )
+            current = mutableListOf()
+            lineWidth = 0
+            lineHeight = 0
+        }
+
+        placeables.forEach { placeable ->
+            val childWidth = placeable.width.coerceAtMost(maxWidth)
+            if (current.isNotEmpty() && lineWidth + childWidth > maxWidth) {
+                flushLine()
+            }
+            current += placeable
+            lineWidth += childWidth
+            lineHeight = max(lineHeight, placeable.height)
+        }
+        flushLine()
+
+        val gapPx = lineGap.roundToPx().coerceAtLeast(0)
+        val contentHeight = lines.sumOf { it.height } + gapPx * (lines.size - 1).coerceAtLeast(0)
+        val layoutWidth = maxWidth.constrainDimension(constraints.minWidth, constraints.maxWidth)
+        val layoutHeight = contentHeight.constrainDimension(constraints.minHeight, constraints.maxHeight)
+        layout(layoutWidth, layoutHeight) {
+            var y = 0
+            lines.forEach { line ->
+                val x = horizontalAlignment.align(
+                    size = line.width.coerceAtMost(layoutWidth),
+                    space = layoutWidth,
+                    layoutDirection = layoutDirection,
+                )
+                var childX = x
+                line.placeables.forEach { placeable ->
+                    placeable.placeRelative(childX, y + (line.height - placeable.height) / 2)
+                    childX += placeable.width
+                }
+                y += line.height + gapPx
+            }
+        }
+    }
+}
+
+private data class InlineBoxFlowLine(
+    val placeables: List<Placeable>,
+    val width: Int,
+    val height: Int,
+)
+
+private fun RichTextBlock.rendersAsInlineBoxFlow(): Boolean {
+    if (inlineBoxes.isEmpty() || inlineMath.isNotEmpty() || inlinePaints.isNotEmpty()) return false
+    val placeholderCount = content.text.count { it == INLINE_RICH_BOX_PLACEHOLDER_CHAR }
+    if (placeholderCount != inlineBoxes.size) return false
+    return content.text.all { it == INLINE_RICH_BOX_PLACEHOLDER_CHAR || it.isWhitespace() }
+}
+
+private fun ComputedStyle.inlineFlowHorizontalAlignment(): Alignment.Horizontal = when (textAlign) {
+    TextAlign.Center -> Alignment.CenterHorizontally
+    TextAlign.End,
+    TextAlign.Right -> Alignment.End
+    else -> Alignment.Start
+}
+
+private fun ComputedStyle.inlineFlowLineGap(): Dp {
+    return when {
+        rowGap > 0.dp -> rowGap
+        gap > 0.dp -> gap
+        else -> 6.dp
+    }
+}
+
+private const val INLINE_RICH_BOX_PLACEHOLDER_CHAR = '\uFFFC'
+
+private fun Modifier.inlineTextPaints(
+    paints: List<InlineTextPaintRun>,
+    layout: TextLayoutResult?,
+): Modifier {
+    if (paints.isEmpty() || layout == null) return this
+    return drawBehind {
+        paints.forEach { paint ->
+            val start = paint.start.coerceIn(0, layout.layoutInput.text.length)
+            val end = paint.end.coerceIn(start, layout.layoutInput.text.length)
+            if (end <= start) return@forEach
+            val startLine = layout.getLineForOffset(start)
+            val endLine = layout.getLineForOffset((end - 1).coerceAtLeast(start))
+            for (line in startLine..endLine) {
+                val lineStart = maxOf(start, layout.getLineStart(line))
+                val lineEnd = minOf(end, layout.getLineEnd(line, visibleEnd = true))
+                if (lineEnd <= lineStart) continue
+                val left = layout.getBoundingBox(lineStart).left.coerceAtLeast(0f)
+                val right = layout.getBoundingBox((lineEnd - 1).coerceAtLeast(lineStart)).right.coerceAtMost(size.width)
+                if (right <= left) continue
+                val lineTop = layout.getLineTop(line)
+                val lineBottom = layout.getLineBottom(line)
+                val lineHeight = (lineBottom - lineTop).coerceAtLeast(1f)
+                val requestedHeight = lineHeight * paint.heightFraction.coerceIn(0.02f, 1f)
+                val height = maxOf(requestedHeight, paint.minHeight.toPx()).coerceAtMost(lineHeight)
+                val top = (lineTop + lineHeight * paint.topFraction.coerceIn(0f, 1f))
+                    .coerceAtMost(lineBottom - height)
+                val radius = paint.cornerRadius.toPx()
+                drawRoundRect(
+                    color = paint.color,
+                    topLeft = Offset(left, top),
+                    size = Size(right - left, height),
+                    cornerRadius = CornerRadius(radius, radius),
+                )
+            }
+        }
     }
 }
 
@@ -488,9 +670,9 @@ private fun RichTableBlockView(block: RichTableBlock, modifier: Modifier) {
                 block.caption?.let { caption ->
                     Text(
                         caption,
+                        modifier = Modifier.fillMaxWidth(),
                         style = MaterialTheme.typography.labelMedium.merge(block.captionStyle?.toTextStyle(LocalContentColor.current) ?: TextStyle.Default),
                         textAlign = block.captionStyle?.textAlign?.takeIf { it != TextAlign.Unspecified } ?: TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth(),
                     )
                 }
             }
@@ -663,11 +845,141 @@ private fun RichButtonBlockView(
         animationKey = block.blockId,
         onClick = click.takeIf { block.action.isNotBlank() },
     ) {
-        Text(
-            text = block.label,
-            style = LocalTextStyle.current.merge(block.style.toTextStyle(LocalContentColor.current)),
-            color = LocalContentColor.current,
-        )
+        val textStyle = LocalTextStyle.current.merge(block.style.toTextStyle(LocalContentColor.current))
+        val buttonTextStyle = textStyle.withButtonTextAlignment(block.style)
+        val inline = buildInlineRichText(block.label, block.inlineMath, block.inlineBoxes, textStyle, onSendInput)
+        val inlinePaints = if (block.inlineMath.isEmpty()) block.inlinePaints else emptyList()
+        var textLayout by remember(inline.text, inlinePaints) { mutableStateOf<TextLayoutResult?>(null) }
+        ButtonContentLayout(style = block.style) {
+            if (block.children.isNotEmpty()) {
+                RichContainerFlowChildren(
+                    children = block.children,
+                    parentStyle = block.style,
+                    onSendInput = onSendInput,
+                )
+            } else {
+                Text(
+                    text = inline.text,
+                    modifier = Modifier.inlineTextPaints(inlinePaints, textLayout),
+                    inlineContent = inline.inlineContent,
+                    style = buttonTextStyle,
+                    color = LocalContentColor.current,
+                    onTextLayout = { textLayout = it },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ButtonContentLayout(
+    style: ComputedStyle,
+    content: @Composable () -> Unit,
+) {
+    val alignment = style.buttonContentAlignment()
+    Layout(content = content) { measurables, constraints ->
+        val measurable = measurables.singleOrNull()
+        if (measurable == null) {
+            layout(constraints.minWidth, constraints.minHeight) {}
+        } else {
+            val fillWidth = style.buttonContentFillsWidth() && constraints.maxWidth != Constraints.Infinity
+            val textConstraints = constraints.copy(
+                minWidth = if (fillWidth) constraints.maxWidth else 0,
+                minHeight = 0,
+            )
+            val placeable = measurable.measure(textConstraints)
+            val layoutWidth = if (fillWidth) {
+                constraints.maxWidth
+            } else {
+                placeable.width.constrainDimension(constraints.minWidth, constraints.maxWidth)
+            }
+            val layoutHeight = maxOf(placeable.height, constraints.minHeight)
+                .constrainDimension(constraints.minHeight, constraints.maxHeight)
+            layout(layoutWidth, layoutHeight) {
+                val offset = alignment.align(
+                    size = IntSize(placeable.width, placeable.height),
+                    space = IntSize(layoutWidth, layoutHeight),
+                    layoutDirection = layoutDirection,
+                )
+                placeable.placeRelative(offset.x, offset.y)
+            }
+        }
+    }
+}
+
+private fun TextStyle.withButtonTextAlignment(style: ComputedStyle): TextStyle {
+    if (textAlign != TextAlign.Unspecified) return this
+    val cssTextAlign = style.textAlign.takeIf { it != TextAlign.Unspecified }
+    val flexTextAlign = if (style.display.isFlexContainer()) {
+        when (style.justifyContent) {
+            RichJustify.Center,
+            RichJustify.SpaceAround,
+            RichJustify.SpaceEvenly -> TextAlign.Center
+
+            RichJustify.End -> TextAlign.End
+            RichJustify.Start,
+            RichJustify.SpaceBetween -> null
+        }
+    } else {
+        null
+    }
+    return copy(textAlign = cssTextAlign ?: flexTextAlign ?: TextAlign.Center)
+}
+
+private fun ComputedStyle.buttonContentFillsWidth(): Boolean {
+    return when {
+        display.isFlexContainer() || display.isGridContainer() -> true
+        flexGrow > 0f || flexBasis != RichSize.Auto -> true
+        width != RichSize.Auto || minWidth != null || maxWidth != null -> true
+        else -> false
+    }
+}
+
+private fun ComputedStyle.buttonContentAlignment(): Alignment {
+    val horizontal = when {
+        display.isFlexContainer() || display.isGridContainer() -> when (justifyContent) {
+            RichJustify.Center,
+            RichJustify.SpaceAround,
+            RichJustify.SpaceEvenly -> Alignment.CenterHorizontally
+
+            RichJustify.End -> Alignment.End
+            RichJustify.Start,
+            RichJustify.SpaceBetween -> Alignment.Start
+        }
+
+        textAlign == TextAlign.Center -> Alignment.CenterHorizontally
+        textAlign == TextAlign.End || textAlign == TextAlign.Right -> Alignment.End
+        else -> Alignment.Start
+    }
+    val vertical = when {
+        display.isFlexContainer() || display.isGridContainer() -> when (alignItems) {
+            RichAlign.Center -> Alignment.CenterVertically
+            RichAlign.End -> Alignment.Bottom
+            RichAlign.Start,
+            RichAlign.Stretch,
+            RichAlign.Baseline -> Alignment.Top
+        }
+
+        else -> Alignment.CenterVertically
+    }
+    return when (horizontal) {
+        Alignment.CenterHorizontally -> when (vertical) {
+            Alignment.CenterVertically -> Alignment.Center
+            Alignment.Bottom -> Alignment.BottomCenter
+            else -> Alignment.TopCenter
+        }
+
+        Alignment.End -> when (vertical) {
+            Alignment.CenterVertically -> Alignment.CenterEnd
+            Alignment.Bottom -> Alignment.BottomEnd
+            else -> Alignment.TopEnd
+        }
+
+        else -> when (vertical) {
+            Alignment.CenterVertically -> Alignment.CenterStart
+            Alignment.Bottom -> Alignment.BottomStart
+            else -> Alignment.TopStart
+        }
     }
 }
 
@@ -727,10 +1039,12 @@ private fun StyledContainer(
     modifier: Modifier = Modifier,
     root: Boolean,
     animationKey: String?,
+    inline: Boolean = false,
     onClick: (() -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
     val shape = style.shape(default = 0.dp)
+    val inlineBox = inline || style.display.isInlineBox()
     val defaults = LocalRichRenderColorDefaults.current
     val parentBackground = LocalRichEffectiveBackground.current
     val effectiveOpacity = style.effectiveOpacity()
@@ -740,26 +1054,29 @@ private fun StyledContainer(
         declared = backgroundColor,
         fallback = defaults.surface,
     )
-    val contentColor = RichColorResolver.resolveTextColor(
-        requested = style.color,
-        fallback = LocalContentColor.current,
-        background = effectiveBackground,
-        largeOrBold = style.isLargeOrBoldText(),
-    ).copy(alpha = (style.color?.alpha ?: 1f) * effectiveOpacity)
     val paintBoxBackground = style.backgroundClip != RichBackgroundBox.Text
     val backgroundLayers = style.backgroundLayers.takeIf { paintBoxBackground && it.isNotEmpty() }.orEmpty()
     val hasLayerBackground = backgroundLayers.isNotEmpty()
     val brush = style.backgroundBrush().takeIf { paintBoxBackground }
+    val contentColor = style.resolvedContainerContentColor(
+        fallback = LocalContentColor.current,
+        effectiveBackground = effectiveBackground,
+        effectiveOpacity = effectiveOpacity,
+    )
     val surfaceBorder = style.surfaceBorderStroke()
     val drawBorder = style.hasCustomDrawBorder()
-    val backdropApproximation = style.backdropFilter.hasSupportedEffect
+    val backdropApproximation = !inlineBox && style.backdropFilter.hasSupportedEffect
     var outer = modifier
         .then(style.marginModifier())
         .then(style.baseModifier(root))
-    outer = outer.then(style.richShadowModifier(shape))
+    if (inlineBox) {
+        outer = outer.clipToBounds()
+    } else {
+        outer = outer.then(style.richShadowModifier(shape))
+    }
     outer = outer.then(style.cssClipPathModifier())
     outer = outer.then(style.cssMaskModifier())
-    outer = outer.then(style.cssBlurFilterModifier())
+    if (!inlineBox) outer = outer.then(style.cssBlurFilterModifier())
     outer = outer.then(style.cssColorFilterModifier())
     outer = outer.then(style.nativeAnimationModifier(animationKey))
     if (style.overflow == RichOverflow.Hidden) outer = outer.clip(shape)
@@ -822,6 +1139,23 @@ private fun StyledContainer(
             }
         }
     }
+}
+
+private fun ComputedStyle.resolvedContainerContentColor(
+    fallback: Color,
+    effectiveBackground: Color?,
+    effectiveOpacity: Float,
+): Color {
+    val requested = color
+    val resolved = requested ?: run {
+        RichColorResolver.resolveTextColor(
+            requested = null,
+            fallback = fallback,
+            background = effectiveBackground,
+            largeOrBold = isLargeOrBoldText(),
+        )
+    }
+    return resolved.copy(alpha = resolved.alpha * effectiveOpacity)
 }
 
 private fun ComputedStyle.cssColorFilterModifier(): Modifier {
@@ -1042,7 +1376,7 @@ private fun RichCssFilter.toAndroidColorMatrix(): ColorMatrix? {
     return matrix
 }
 
-private data class InlineMathText(
+private data class InlineRichText(
     val text: AnnotatedString,
     val inlineContent: Map<String, InlineTextContent>,
 )
@@ -1058,36 +1392,220 @@ private fun Modifier.textClipBrushMask(brush: Brush?): Modifier {
 }
 
 @Composable
-private fun buildInlineMathText(
+private fun buildInlineRichText(
     source: AnnotatedString,
-    runs: List<InlineMathRun>,
+    mathRuns: List<InlineMathRun>,
+    boxRuns: List<InlineRichBoxRun>,
     style: TextStyle,
-): InlineMathText {
-    if (runs.isEmpty()) return InlineMathText(source, emptyMap())
+    onSendInput: (String) -> Unit,
+): InlineRichText {
+    if (mathRuns.isEmpty() && boxRuns.isEmpty()) return InlineRichText(source, emptyMap())
     val density = LocalDensity.current
+    val textMeasurer = rememberTextMeasurer()
     val inlineContent = linkedMapOf<String, InlineTextContent>()
     val fontSize = style.fontSize.takeOrElse { 14.sp }
     val text = buildAnnotatedString {
         var cursor = 0
-        runs.sortedBy { it.start }.forEachIndexed { index, run ->
-            if (run.start > cursor) append(source.subSequence(cursor, run.start))
-            val key = "math-$index-${run.latex.hashCode()}"
-            val size = with(density) {
-                runCatching { assumeLatexSize(run.latex, fontSize.toPx()) }.getOrNull()
+        val runs = buildList {
+            mathRuns.forEachIndexed { index, run ->
+                add(InlineComposableRun.Math(index, run))
             }
-            val width = with(density) { (size?.width()?.coerceAtLeast(12) ?: 12).toSp() }
-            val height = with(density) { (size?.height()?.coerceAtLeast(12) ?: 12).toSp() }
-            inlineContent[key] = InlineTextContent(
-                placeholder = Placeholder(width, height, PlaceholderVerticalAlign.TextCenter),
-            ) {
-                MathInline(latex = run.latex, fontSize = fontSize)
+            boxRuns.forEachIndexed { index, run ->
+                add(InlineComposableRun.Box(index, run))
             }
-            appendInlineContent(key, run.latex)
-            cursor = run.end
+        }.sortedBy { it.start }
+        runs.forEach { inlineRun ->
+            val start = inlineRun.start.coerceIn(0, source.length)
+            val end = inlineRun.end.coerceIn(start, source.length)
+            if (start > cursor) append(source.subSequence(cursor, start))
+            when (inlineRun) {
+                is InlineComposableRun.Math -> {
+                    val run = inlineRun.run
+                    val key = "math-${inlineRun.index}-${run.latex.hashCode()}"
+                    val size = with(density) {
+                        runCatching { assumeLatexSize(run.latex, fontSize.toPx()) }.getOrNull()
+                    }
+                    val width = with(density) { (size?.width()?.coerceAtLeast(12) ?: 12).toSp() }
+                    val height = with(density) { (size?.height()?.coerceAtLeast(12) ?: 12).toSp() }
+                    inlineContent[key] = InlineTextContent(
+                        placeholder = Placeholder(width, height, PlaceholderVerticalAlign.TextCenter),
+                    ) {
+                        MathInline(latex = run.latex, fontSize = fontSize)
+                    }
+                    appendInlineContent(key, run.latex)
+                }
+                is InlineComposableRun.Box -> {
+                    val run = inlineRun.run
+                    val key = "box-${inlineRun.index}-${run.block.blockId}"
+                    val widthDp = run.resolvedPlaceholderWidth(style, textMeasurer, density)
+                    val heightDp = run.resolvedPlaceholderHeight(style, textMeasurer, density)
+                    val width = with(density) { widthDp.toSp() }
+                    val height = with(density) { heightDp.toSp() }
+                    inlineContent[key] = InlineTextContent(
+                        placeholder = Placeholder(width, height, PlaceholderVerticalAlign.TextCenter),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .requiredWidth(widthDp)
+                                .requiredHeight(heightDp)
+                                .clipToBounds(),
+                            contentAlignment = Alignment.CenterStart,
+                        ) {
+                            RichBlockView(
+                                block = run.block,
+                                onSendInput = onSendInput,
+                                modifier = Modifier,
+                                inline = true,
+                            )
+                        }
+                    }
+                    appendInlineContent(key, "\uFFFC")
+                }
+            }
+            cursor = end
         }
         if (cursor < source.length) append(source.subSequence(cursor, source.length))
     }
-    return InlineMathText(text, inlineContent)
+    return InlineRichText(text, inlineContent)
+}
+
+private fun InlineRichBoxRun.resolvedPlaceholderWidth(
+    textStyle: TextStyle,
+    textMeasurer: TextMeasurer,
+    density: Density,
+): Dp {
+    val style = block.style
+    val contentWidth = measureInlineTextSize(textStyle, textMeasurer, density)?.width
+        ?: (text.sumOf { char -> char.inlinePlaceholderWidthUnits().toDouble() }
+            .toFloat() * textStyle.inlineFontSizeSp()).dp
+    val measured = contentWidth +
+        style.padding.horizontal() +
+        style.border.horizontalWidth() +
+        style.margin.horizontal() +
+        INLINE_BOX_PLACEHOLDER_SAFETY
+    val explicitWidth = style.width.dpOrNull()
+    val width = explicitWidth
+        ?.let { it + style.padding.horizontal() + style.border.horizontalWidth() + style.margin.horizontal() }
+        ?: measured
+    return width
+        .coerceAtLeast(style.minWidth ?: 0.dp)
+        .let { value -> style.maxWidth?.let(value::coerceAtMost) ?: value }
+}
+
+private fun InlineRichBoxRun.resolvedPlaceholderHeight(
+    textStyle: TextStyle,
+    textMeasurer: TextMeasurer,
+    density: Density,
+): Dp {
+    val style = block.style
+    val measuredTextHeight = measureInlineTextSize(textStyle, textMeasurer, density)?.height
+    val font = textStyle.inlineFontSizeSp()
+    val line = measuredTextHeight ?: run {
+        val rawLine = when (textStyle.lineHeight.type) {
+            TextUnitType.Sp -> textStyle.lineHeight.value.dp
+            TextUnitType.Em -> (font * textStyle.lineHeight.value).dp
+            else -> (font * 1.35f).dp
+        }
+        rawLine.coerceIn((font * 1.05f).dp, (font * 1.8f).dp)
+    }
+    val measured = line +
+        style.padding.vertical() +
+        style.border.verticalWidth() +
+        style.margin.vertical() +
+        INLINE_BOX_PLACEHOLDER_SAFETY
+    val explicitHeight = style.height.dpOrNull()
+    val height = explicitHeight
+        ?.let { it + style.padding.vertical() + style.border.verticalWidth() + style.margin.vertical() }
+        ?: measured
+    return height
+        .coerceAtLeast(style.minHeight ?: 0.dp)
+        .let { value -> style.maxHeight?.let(value::coerceAtMost) ?: value }
+}
+
+private val INLINE_BOX_PLACEHOLDER_SAFETY = 2.dp
+
+private data class InlineMeasuredTextSize(
+    val width: Dp,
+    val height: Dp,
+)
+
+private fun InlineRichBoxRun.measureInlineTextSize(
+    parentTextStyle: TextStyle,
+    textMeasurer: TextMeasurer,
+    density: Density,
+): InlineMeasuredTextSize? {
+    if (text.isBlank()) return null
+    val inlineTextStyle = block.primaryInlineTextStyle() ?: return null
+    val measured = textMeasurer.measure(
+        text = AnnotatedString(text),
+        style = parentTextStyle.merge(inlineTextStyle.toTextStyle(Color.Unspecified)),
+        maxLines = 1,
+        softWrap = false,
+    )
+    return with(density) {
+        InlineMeasuredTextSize(
+            width = measured.size.width.toDp(),
+            height = measured.size.height.toDp(),
+        )
+    }
+}
+
+private fun RichBlock.primaryInlineTextStyle(): ComputedStyle? = when (this) {
+    is RichTextBlock -> style
+    is RichButtonBlock -> style
+    is RichContainerBlock -> {
+        children.singleOrNull()
+            ?.let { it as? RichTextBlock }
+            ?.style
+    }
+    else -> null
+}
+
+private fun TextStyle.inlineFontSizeSp(): Float {
+    return when (fontSize.type) {
+        TextUnitType.Sp -> fontSize.value
+        TextUnitType.Em -> 14f * fontSize.value
+        else -> 14f
+    }.coerceAtLeast(8f)
+}
+
+private fun Char.inlinePlaceholderWidthUnits(): Float = when {
+    isWhitespace() -> 0.35f
+    code in 0x2E80..0x9FFF -> 1.05f
+    code >= 0x1F000 -> 1.35f
+    isUpperCase() -> 0.72f
+    isDigit() -> 0.62f
+    else -> 0.60f
+}
+
+private fun RichSpacing.horizontal(): Dp = left + right
+
+private fun RichSpacing.vertical(): Dp = top + bottom
+
+private fun RichBorder.horizontalWidth(): Dp = left.width + right.width
+
+private fun RichBorder.verticalWidth(): Dp = top.width + bottom.width
+
+private sealed interface InlineComposableRun {
+    val index: Int
+    val start: Int
+    val end: Int
+
+    data class Math(
+        override val index: Int,
+        val run: InlineMathRun,
+    ) : InlineComposableRun {
+        override val start: Int = run.start
+        override val end: Int = run.end
+    }
+
+    data class Box(
+        override val index: Int,
+        val run: InlineRichBoxRun,
+    ) : InlineComposableRun {
+        override val start: Int = run.start
+        override val end: Int = run.end
+    }
 }
 
 private fun ComputedStyle.toTextStyle(textColor: Color? = null): TextStyle {
@@ -1132,7 +1650,9 @@ private fun ComputedStyle.isLargeOrBoldText(): Boolean {
 
 private fun ComputedStyle.baseModifier(root: Boolean): Modifier {
     var modifier: Modifier = Modifier
-    if (root || (width == RichSize.Auto && maxWidth == null)) modifier = modifier.fillMaxWidth()
+    if (root || (display.isBlockFilling() && width == RichSize.Auto && maxWidth == null)) {
+        modifier = modifier.fillMaxWidth()
+    }
     width.dpOrNull()?.let { modifier = modifier.width(it) }
     (width as? RichSize.Fraction)?.let { modifier = modifier.fillMaxWidth(it.value) }
     height.dpOrNull()?.let { modifier = modifier.height(it) }
@@ -1466,7 +1986,7 @@ private fun richGridCellKey(row: Int, column: Int): Long {
 }
 
 private fun ComputedStyle.flexShrinkWidths(children: List<RichBlock>, availableWidth: Dp?): Map<String, Dp> {
-    if (availableWidth == null || display != RichDisplay.Flex || !flexDirection.isRowAxis() || flexWrap != RichFlexWrap.NoWrap) {
+    if (availableWidth == null || !display.isFlexContainer() || !flexDirection.isRowAxis() || flexWrap != RichFlexWrap.NoWrap) {
         return emptyMap()
     }
     val basisItems = children.mapNotNull { child ->
@@ -1518,7 +2038,7 @@ private fun RowScope.rowFlexItemModifier(
             else -> modifier.align(it.toRowAlignment())
         }
     }
-    if (shrinkWidth == null && parentStyle.display == RichDisplay.Flex && style.flexGrow > 0f) {
+    if (shrinkWidth == null && parentStyle.display.isFlexContainer() && style.flexGrow > 0f) {
         modifier = modifier.weight(style.flexGrow, fill = style.flexBasis == RichSize.Auto)
     }
     return modifier
@@ -1537,7 +2057,7 @@ private fun ColumnScope.columnFlexItemModifier(style: ComputedStyle, parentStyle
             else -> modifier.align(it.toColumnAlignment())
         }
     }
-    if (parentStyle.display == RichDisplay.Flex && style.flexGrow > 0f) {
+    if (parentStyle.display.isFlexContainer() && style.flexGrow > 0f) {
         modifier = modifier.weight(style.flexGrow, fill = style.flexBasis == RichSize.Auto)
     }
     return modifier
@@ -1613,7 +2133,7 @@ private fun ComputedStyle.backgroundLayersModifier(
     baseColor: Color?,
 ): Modifier {
     if (layers.isEmpty()) return Modifier
-    val safeLayers = layers.take(2)
+    val safeLayers = layers.take(MAX_SAFE_BACKGROUND_LAYERS)
     val painters = safeLayers.map { layer -> layer.url?.let { rememberAsyncImagePainter(it) } }
     val style = this
     return Modifier
@@ -1642,7 +2162,7 @@ private fun DrawScope.drawBackgroundLayer(
     ) {
         layer.image?.let { image ->
             translate(left = paintArea.left, top = paintArea.top) {
-                drawRect(brush = richBackgroundImageBrush(image), size = paintArea.size)
+                drawRect(brush = richBackgroundImageBrush(image, paintArea.size), size = paintArea.size)
             }
         }
         if (painter != null) {
@@ -1684,6 +2204,7 @@ private fun DrawScope.drawBackgroundLayer(
 }
 
 private const val MAX_BACKGROUND_TILES = 96
+private const val MAX_SAFE_BACKGROUND_LAYERS = 4
 
 private data class BackgroundArea(
     val left: Float,
@@ -1743,26 +2264,23 @@ private fun ComputedStyle.backgroundAreaPadding(box: RichBackgroundBox): RichSpa
 }
 
 private fun ComputedStyle.backgroundBrushModifier(brush: Brush, shape: RoundedCornerShape): Modifier {
-    return if (backgroundOrigin == RichBackgroundBox.PaddingBox && backgroundClip == RichBackgroundBox.BorderBox) {
-        Modifier.background(brush, shape)
-    } else {
-        Modifier
-            .clip(shape)
-            .drawBehind {
-                val paintArea = backgroundAreaRect(this@backgroundBrushModifier, backgroundOrigin)
-                val clipArea = backgroundAreaRect(this@backgroundBrushModifier, backgroundClip)
-                clipRect(
-                    left = clipArea.left,
-                    top = clipArea.top,
-                    right = clipArea.right,
-                    bottom = clipArea.bottom,
-                ) {
-                    translate(left = paintArea.left, top = paintArea.top) {
-                        drawRect(brush = brush, size = paintArea.size)
-                    }
+    return Modifier
+        .clip(shape)
+        .drawBehind {
+            val paintArea = backgroundAreaRect(this@backgroundBrushModifier, backgroundOrigin)
+            val clipArea = backgroundAreaRect(this@backgroundBrushModifier, backgroundClip)
+            val areaBrush = backgroundImage?.let { richBackgroundImageBrush(it, paintArea.size) } ?: brush
+            clipRect(
+                left = clipArea.left,
+                top = clipArea.top,
+                right = clipArea.right,
+                bottom = clipArea.bottom,
+            ) {
+                translate(left = paintArea.left, top = paintArea.top) {
+                    drawRect(brush = areaBrush, size = paintArea.size)
                 }
             }
-    }
+        }
 }
 
 private fun ComputedStyle.backdropApproximationModifier(
@@ -1927,16 +2445,23 @@ private fun RichBorder.visibleSides(): List<RichBorderSide> {
 
 private fun ComputedStyle.richShadowModifier(shape: RoundedCornerShape): Modifier {
     if (shadows.isEmpty()) return Modifier
+    val inlineBox = display.isInlineBox()
     return Modifier.drawBehind {
         shadows.filterNot { it.inset }.forEach { shadow ->
-            val spreadPx = shadow.spread.toPx()
+            val spreadPx = if (inlineBox) shadow.spread.toPx().coerceIn(0f, 2.dp.toPx()) else shadow.spread.toPx()
+            val blurPx = if (inlineBox) shadow.blurRadius.toPx().coerceAtMost(10.dp.toPx()) else shadow.blurRadius.toPx()
+            val shadowColor = if (inlineBox) {
+                shadow.color.copy(alpha = shadow.color.alpha * 0.35f)
+            } else {
+                shadow.color
+            }
             val left = shadow.offsetX.toPx() - spreadPx
             val top = shadow.offsetY.toPx() - spreadPx
             val right = size.width + shadow.offsetX.toPx() + spreadPx
             val bottom = size.height + shadow.offsetY.toPx() + spreadPx
             val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = shadow.color.copy(alpha = shadow.color.alpha * 0.02f).toArgb()
-                setShadowLayer(shadow.blurRadius.toPx(), shadow.offsetX.toPx(), shadow.offsetY.toPx(), shadow.color.toArgb())
+                color = shadowColor.copy(alpha = shadowColor.alpha * 0.02f).toArgb()
+                setShadowLayer(blurPx, shadow.offsetX.toPx(), shadow.offsetY.toPx(), shadowColor.toArgb())
             }
             drawIntoCanvas { canvas ->
                 canvas.nativeCanvas.drawRoundRect(
@@ -2056,19 +2581,29 @@ private fun ComputedStyle.backgroundBrush(): Brush? {
     return backgroundImage?.let(::richBackgroundImageBrush)
 }
 
-private fun richBackgroundImageBrush(image: RichBackgroundImage): Brush {
+private fun richBackgroundImageBrush(image: RichBackgroundImage, targetSize: Size? = null): Brush {
     return when (image) {
         is RichBackgroundImage.LinearGradient -> {
             val radians = Math.toRadians(image.angleDegrees.toDouble())
-            val start = Offset.Zero
-            val end = Offset(cos(radians).toFloat() * 1000f, sin(radians).toFloat() * 1000f)
+            val width = targetSize?.width?.coerceAtLeast(1f) ?: 1000f
+            val height = targetSize?.height?.coerceAtLeast(1f) ?: 1000f
+            val length = sqrt(width * width + height * height)
+            val center = Offset(width / 2f, height / 2f)
+            val vector = Offset(
+                x = cos(radians).toFloat() * length / 2f,
+                y = sin(radians).toFloat() * length / 2f,
+            )
+            val start = center - vector
+            val end = center + vector
             image.stops.colorStopPairs()?.let { colorStops ->
                 Brush.linearGradient(colorStops = colorStops, start = start, end = end)
             } ?: Brush.linearGradient(colors = image.stops.colors(), start = start, end = end)
         }
         is RichBackgroundImage.RadialGradient -> {
-            image.stops.colorStopPairs()?.let { Brush.radialGradient(colorStops = it) }
-                ?: Brush.radialGradient(image.stops.colors())
+            val center = targetSize?.let { Offset(it.width / 2f, it.height / 2f) } ?: Offset.Unspecified
+            val radius = targetSize?.let { max(it.width, it.height).coerceAtLeast(1f) / 2f } ?: Float.POSITIVE_INFINITY
+            image.stops.colorStopPairs()?.let { Brush.radialGradient(colorStops = it, center = center, radius = radius) }
+                ?: Brush.radialGradient(image.stops.colors(), center = center, radius = radius)
         }
         is RichBackgroundImage.ConicGradient -> {
             image.stops.colorStopPairs()?.let { Brush.sweepGradient(colorStops = it) }

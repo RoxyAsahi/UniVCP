@@ -3,16 +3,21 @@ package me.rerere.rikkahub.ui.components.message
 import me.rerere.rikkahub.ui.components.richtext.RichBlock
 import me.rerere.rikkahub.ui.components.richtext.RichAlign
 import me.rerere.rikkahub.ui.components.richtext.RichBackgroundImage
+import me.rerere.rikkahub.ui.components.richtext.RichButtonBlock
 import me.rerere.rikkahub.ui.components.richtext.RichClipPath
 import me.rerere.rikkahub.ui.components.richtext.RichContainerBlock
 import me.rerere.rikkahub.ui.components.richtext.RichDisplay
 import me.rerere.rikkahub.ui.components.richtext.RichFlexDirection
 import me.rerere.rikkahub.ui.components.richtext.RichFlexWrap
 import me.rerere.rikkahub.ui.components.richtext.RichHtmlCompiler
+import me.rerere.rikkahub.ui.components.richtext.RichJustify
+import me.rerere.rikkahub.ui.components.richtext.RichSize
 import me.rerere.rikkahub.ui.components.richtext.RichSvgBlock
 import me.rerere.rikkahub.ui.components.richtext.RichSvgCommand
 import me.rerere.rikkahub.ui.components.richtext.RichTableBlock
 import me.rerere.rikkahub.ui.components.richtext.RichTextBlock
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -117,6 +122,246 @@ class RichHtmlQualityGateTest {
     }
 
     @Test
+    fun `inline flex badge is preserved as shrinkable native container`() {
+        val html = """
+            <div id="vcp-root" style="padding:12px;background:#fff;">
+              <span class="sync-badge" style="display:inline-flex;align-items:center;border-radius:999px;padding:4px 12px;background:#dff4ff;color:#0f7490;font-weight:700;">记忆同步成功</span>
+            </div>
+        """.trimIndent()
+
+        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
+        val inlineFlow = root.children.single() as RichTextBlock
+        val inlineBox = inlineFlow.inlineBoxes.single()
+        val badge = inlineBox.block as RichContainerBlock
+        val label = badge.children.single() as RichTextBlock
+
+        assertEquals("\uFFFC", inlineFlow.content.text)
+        assertEquals(RichDisplay.InlineFlex, badge.style.display)
+        assertEquals(12f, badge.style.padding.left.value, 0.01f)
+        assertTrue("badge label should not duplicate the badge box padding", label.style.padding.valueSum() == 0f)
+        assertNull("anonymous badge text should not repaint the badge background", label.style.backgroundColor)
+    }
+
+    @Test
+    fun `inline flex badge stays in surrounding text flow`() {
+        val html = """
+            <div id="vcp-root">
+              <p>状态 <span style="display:inline-flex;align-items:center;border-radius:999px;padding:4px 12px;background:#dff4ff;color:#0f7490;font-weight:700;">记忆同步成功</span> 完成</p>
+            </div>
+        """.trimIndent()
+
+        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
+        val text = root.children.single() as RichTextBlock
+        val inlineBox = text.inlineBoxes.single()
+        val badge = inlineBox.block as RichContainerBlock
+
+        assertEquals("状态 \uFFFC 完成", text.content.text)
+        assertEquals(3, inlineBox.start)
+        assertEquals(4, inlineBox.end)
+        assertEquals(RichDisplay.InlineFlex, badge.style.display)
+        assertEquals(12f, badge.style.padding.left.value, 0.01f)
+        assertTrue("inline badge placeholder should reserve shrink-to-content width", inlineBox.width.value in 90f..150f)
+    }
+
+    @Test
+    fun `inline rounded background span becomes native inline box`() {
+        val html = """
+            <div id="vcp-root">
+              <p>底部 <span style="border-radius:10px;padding:2px 6px;background:#ffe4f0;">♥ 已收藏</span></p>
+            </div>
+        """.trimIndent()
+
+        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
+        val text = root.children.single() as RichTextBlock
+        val inlineBox = text.inlineBoxes.single()
+        val chip = inlineBox.block as RichContainerBlock
+
+        assertEquals("底部 \uFFFC", text.content.text)
+        assertEquals(RichDisplay.Inline, chip.style.display)
+        assertEquals(6f, chip.style.padding.left.value, 0.01f)
+        assertTrue("rounded inline background should not be flattened into plain SpanStyle", chip.style.borderRadius != me.rerere.rikkahub.ui.components.richtext.RichCornerRadius.Zero)
+    }
+
+    @Test
+    fun `inline gradient highlighter becomes native text paint run`() {
+        val html = """
+            <div id="vcp-root">
+              <p>关于<span style="background:linear-gradient(180deg, transparent 58%, rgba(255,105,180,.45) 58%, rgba(255,105,180,.45) 100%);">权限边界与GUI原理</span>的讨论</p>
+            </div>
+        """.trimIndent()
+
+        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
+        val text = root.children.single() as RichTextBlock
+        val paint = text.inlinePaints.single()
+
+        assertEquals("关于权限边界与GUI原理的讨论", text.content.text)
+        assertEquals(2, paint.start)
+        assertEquals(12, paint.end)
+        assertTrue("highlighter should paint the lower part of the line", paint.topFraction > 0.5f)
+    }
+
+    @Test
+    fun `inline bottom border underline does not become clipping placeholder`() {
+        val html = """
+            <div id="vcp-root">
+              <p>脚本<span style="border-bottom:2px solid #f8a5bd;">魔法</span>来间接实现它</p>
+            </div>
+        """.trimIndent()
+
+        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
+        val text = root.children.single() as RichTextBlock
+        val paint = text.inlinePaints.single()
+
+        assertEquals("脚本魔法来间接实现它", text.content.text)
+        assertTrue("decorative underline should stay in the Text flow", text.inlineBoxes.isEmpty())
+        assertEquals(2, paint.start)
+        assertEquals(4, paint.end)
+    }
+
+    @Test
+    fun `inline paint survives sibling inline box placeholders`() {
+        val html = """
+            <div id="vcp-root">
+              <p>关于<span style="background:linear-gradient(180deg, transparent 58%, rgba(255,105,180,.45) 58%, rgba(255,105,180,.45) 100%);">权限边界</span> <span style="border-radius:20px;padding:5px 15px;background:linear-gradient(45deg,#4facfe,#00f2fe);color:white;font-weight:bold;">ScreenPilot</span></p>
+            </div>
+        """.trimIndent()
+
+        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
+        val text = root.children.single() as RichTextBlock
+
+        assertEquals(1, text.inlinePaints.size)
+        assertEquals(1, text.inlineBoxes.size)
+        assertEquals("关于权限边界 \uFFFC", text.content.text)
+    }
+
+    @Test
+    fun `button labels preserve rich inline content`() {
+        val html = """
+            <div id="vcp-root">
+              <button onclick="input('go')" style="border-radius:24px;padding:8px 16px;background:#111;color:white;">
+                运行 <span style="border-radius:20px;padding:3px 10px;background:linear-gradient(45deg,#4facfe,#00f2fe);color:white;font-weight:bold;">ScreenPilot</span>
+                <span style="background:linear-gradient(180deg, transparent 60%, rgba(255,255,0,.5) 60%);">检查</span>
+              </button>
+            </div>
+        """.trimIndent()
+
+        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
+        val inlineFlow = root.children.single() as RichTextBlock
+        val button = inlineFlow.inlineBoxes.single().block as RichButtonBlock
+
+        assertEquals("go", button.action)
+        assertEquals("\uFFFC", inlineFlow.content.text)
+        assertTrue("button label should keep inline chip placeholders", button.inlineBoxes.isNotEmpty())
+        assertTrue("button label should keep decorative inline paints", button.inlinePaints.isNotEmpty())
+        assertTrue(button.label.text.contains("\uFFFC"))
+    }
+
+    @Test
+    fun `button content keeps browser-like alignment defaults and flex alignment`() {
+        val html = """
+            <div id="vcp-root">
+              <button onclick="input('a')">默认按钮</button>
+              <button onclick="input('b')" style="display:flex;align-items:center;justify-content:center;width:48%;height:72px;">💻 VCPDesktop 教学</button>
+            </div>
+        """.trimIndent()
+
+        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
+        val inlineFlow = root.children[0] as RichTextBlock
+        val defaultButton = inlineFlow.inlineBoxes.single().block as RichButtonBlock
+        val flexButton = root.children[1] as RichButtonBlock
+
+        assertEquals("browser button labels are centered by default", TextAlign.Center, defaultButton.style.textAlign)
+        assertEquals(RichDisplay.Flex, flexButton.style.display)
+        assertEquals(RichJustify.Center, flexButton.style.justifyContent)
+        assertEquals(RichAlign.Center, flexButton.style.alignItems)
+        assertEquals(TextAlign.Center, flexButton.style.textAlign)
+    }
+
+    @Test
+    fun `flex button preserves direct children for gap based layout`() {
+        val html = """
+            <div id="vcp-root">
+              <button onclick="input('opt')" style="display:flex;align-items:center;justify-content:center;gap:10px;">
+                <span>🔍</span><span>优化配置</span>
+              </button>
+            </div>
+        """.trimIndent()
+
+        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
+        val button = root.children.single() as RichButtonBlock
+
+        assertEquals(RichDisplay.Flex, button.style.display)
+        assertEquals(10f, button.style.gap.value, 0.01f)
+        assertEquals("flex button child spans should not be flattened into a single Text node", 2, button.children.size)
+    }
+
+    @Test
+    fun `flex item buttons retain sizing cues for stretched browser content`() {
+        val html = """
+            <div id="vcp-root" style="display:flex;gap:10px;">
+              <button onclick="input('a')" style="flex:1;padding:12px;background:#0ea5e9;color:white;">🔍 优化配置</button>
+              <button onclick="input('b')" style="flex:1;padding:12px;background:#334155;color:white;">🖥️ VCPDesktop 教学</button>
+            </div>
+        """.trimIndent()
+
+        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
+        val first = root.children[0] as RichButtonBlock
+        val second = root.children[1] as RichButtonBlock
+
+        assertEquals(RichDisplay.Flex, root.style.display)
+        assertEquals(10f, root.style.gap.value, 0.01f)
+        listOf(first, second).forEach { button ->
+            assertEquals(1f, button.style.flexGrow, 0.01f)
+            assertEquals(RichSize.DpSize(0.dp), button.style.flexBasis)
+            assertEquals(TextAlign.Center, button.style.textAlign)
+        }
+    }
+
+    @Test
+    fun `ordinary inline block buttons share a browser inline formatting row`() {
+        val html = """
+            <div id="vcp-root">
+              <div style="margin-top:20px;border-top:1px solid #334155;padding-top:20px;">
+                <p style="margin:0 0 15px 0;"><strong>🛠️ 接下来小初可以为您做：</strong></p>
+                <button onclick="input('请帮我分析这份载荷数据')" style="background:#38bdf8;color:#0f172a;border:none;padding:10px 20px;border-radius:6px;font-weight:bold;cursor:pointer;">🔍 分析数据</button>
+                <button onclick="input('清理过期的缓存记录')" style="background:transparent;color:#94a3b8;border:1px solid #475569;padding:10px 20px;border-radius:6px;cursor:pointer;margin-left:10px;">🧹 清理缓存</button>
+              </div>
+            </div>
+        """.trimIndent()
+
+        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
+        val panel = root.children.single() as RichContainerBlock
+        val actions = panel.children[1] as RichTextBlock
+        val first = actions.inlineBoxes[0].block as RichButtonBlock
+        val second = actions.inlineBoxes[1].block as RichButtonBlock
+
+        assertEquals("\uFFFC\uFFFC", actions.content.text)
+        assertEquals(2, actions.inlineBoxes.size)
+        assertEquals("请帮我分析这份载荷数据", first.action)
+        assertEquals("清理过期的缓存记录", second.action)
+        assertEquals("inline-block button should remain atomic in normal flow", RichDisplay.InlineBlock, first.style.display)
+        assertEquals(10f, second.style.margin.left.value, 0.01f)
+    }
+
+    @Test
+    fun `safe background parser retains several decorative layers`() {
+        val html = """
+            <div id="vcp-root" style="background:
+              linear-gradient(90deg,#111,#222),
+              radial-gradient(circle,#4facfe,transparent),
+              linear-gradient(180deg,rgba(255,255,255,.4),transparent),
+              url(data:image/png;base64,iVBORw0KGgo=),
+              linear-gradient(45deg,#000,#fff);">Layers</div>
+        """.trimIndent()
+
+        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
+
+        assertEquals(4, root.style.backgroundLayers.size)
+        assertTrue(root.style.backgroundLayers.count { it.image is RichBackgroundImage.LinearGradient } >= 2)
+        assertTrue(root.style.backgroundLayers.any { it.url?.startsWith("data:image/png") == true })
+    }
+
+    @Test
     fun `svg dash arrays are normalized before native drawing`() {
         val html = """
             <div id="vcp-root">
@@ -147,6 +392,10 @@ class RichHtmlQualityGateTest {
     private fun flatten(block: RichBlock): List<RichBlock> = when (block) {
         is RichContainerBlock -> listOf(block) + block.children.flatMap(::flatten)
         else -> listOf(block)
+    }
+
+    private fun me.rerere.rikkahub.ui.components.richtext.RichSpacing.valueSum(): Float {
+        return top.value + right.value + bottom.value + left.value
     }
 
     private data class FidelityFixture(

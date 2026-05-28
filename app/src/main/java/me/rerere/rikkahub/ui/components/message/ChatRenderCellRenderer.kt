@@ -416,8 +416,10 @@ private fun RichHtmlCellContent(
                     },
                 )
             } else {
-                DynamicRichHtmlPreviewBlock(
+                InlineDynamicWebViewBlock(
+                    html = block.html,
                     previewText = analysis.previewText,
+                    cellIndex = cellIndex,
                     onOpen = onOpen,
                 )
             }

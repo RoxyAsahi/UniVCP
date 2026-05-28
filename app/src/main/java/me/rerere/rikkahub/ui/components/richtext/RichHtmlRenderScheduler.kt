@@ -54,7 +54,7 @@ internal data class RichHtmlPrewarmTarget(
 internal object RichHtmlRenderScheduler {
     private const val MaxNativeFirstRenders = 2
     private const val MaxEntries = 512
-    private const val MaxPrewarmTargets = 4
+    private const val MaxPrewarmTargets = 6
     private val lock = Any()
     private val firstRendered = LinkedHashSet<String>()
     private val inFlightFirstRenders = LinkedHashSet<String>()
@@ -141,6 +141,7 @@ internal object RichHtmlRenderScheduler {
         targets: List<RichHtmlPrewarmTarget>,
         maxTargets: Int = MaxPrewarmTargets,
     ) {
+        val activeBudget = maxTargets.coerceAtLeast(0)
         val admittedTargets = targets
             .asSequence()
             .filter { it.risk.route == RichContentRoute.NativeNow || it.risk.route == RichContentRoute.NativeDeferred }
@@ -153,23 +154,16 @@ internal object RichHtmlRenderScheduler {
                     cacheMode = RichHtmlCompileCacheMode.Persistent,
                 ) != null
             }
-            .take(maxTargets.coerceAtLeast(0))
+            .take(activeBudget)
             .toList()
-        val targetKeys = admittedTargets.mapTo(linkedSetOf()) { it.key }
-        val jobsToCancel = synchronized(lock) {
-            val removed = prewarmJobs
-                .filterKeys { it !in targetKeys }
-                .values
-                .toList()
-            prewarmJobs.keys.removeAll { it !in targetKeys }
+        synchronized(lock) {
+            if (activeBudget == 0) return
             admittedTargets.forEach { target ->
-                if (prewarmJobs[target.key] == null) {
+                if (prewarmJobs.size < activeBudget && prewarmJobs[target.key] == null) {
                     prewarmJobs[target.key] = launchPrewarm(target)
                 }
             }
-            removed
         }
-        jobsToCancel.forEach { it.cancel() }
     }
 
     suspend fun drainPrewarmForTest() {

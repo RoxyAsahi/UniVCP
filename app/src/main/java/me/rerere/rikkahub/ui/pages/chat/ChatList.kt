@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.ui.pages.chat
 
 import android.os.SystemClock
+import android.view.Choreographer
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Tick01
 import me.rerere.hugeicons.stroke.ArrowDown01
@@ -103,6 +104,7 @@ import me.rerere.rikkahub.ui.components.message.ChatMessage
 import me.rerere.rikkahub.ui.components.message.ChatRenderCell
 import me.rerere.rikkahub.ui.components.message.ChatRenderCellItem
 import me.rerere.rikkahub.ui.components.message.RichHtmlRenderTelemetry
+import me.rerere.rikkahub.ui.components.message.inlineDynamicWebViewActiveCount
 import me.rerere.rikkahub.ui.components.message.messageMetaOrNull
 import me.rerere.rikkahub.ui.components.richtext.LocalRichRenderScrollState
 import me.rerere.rikkahub.ui.components.richtext.RichHtmlPrewarmTarget
@@ -121,6 +123,7 @@ import kotlin.uuid.Uuid
 private const val TAG = "ChatList"
 private const val LoadingIndicatorKey = "LoadingIndicator"
 private const val ScrollBottomKey = "ScrollBottomKey"
+private val ChatListContentPadding = 16.dp
 
 @Composable
 internal fun ChatList(
@@ -354,7 +357,11 @@ private fun ChatListNormal(
                 val nearStart = (firstVisible - prewarmBehind).coerceAtLeast(0)
                 val nearEnd = (lastVisible + prewarmAhead).coerceAtMost((renderCells.size - 1).coerceAtLeast(0))
                 val viewportWidthDp = with(density) {
-                    state.layoutInfo.viewportSize.width.toDp().value
+                    val horizontalContentPaddingPx = ChatListContentPadding.roundToPx() * 2
+                    (state.layoutInfo.viewportSize.width - horizontalContentPaddingPx)
+                        .coerceAtLeast(1)
+                        .toDp()
+                        .value
                 }.takeIf { it > 0f } ?: 360f
                 RichRenderScrollState(
                     scrolling = isRecentScroll || state.isScrollInProgress,
@@ -401,12 +408,15 @@ private fun ChatListNormal(
             }
         }
 
+        ChatFramePressureTelemetry(richRenderScrollState)
+
         CompositionLocalProvider(
             LocalRichRenderScrollState provides richRenderScrollState
         ) {
             LazyColumn(
                 state = state,
-                contentPadding = PaddingValues(16.dp) + PaddingValues(bottom = 32.dp + innerPadding.calculateBottomPadding()),
+                contentPadding = PaddingValues(ChatListContentPadding) +
+                    PaddingValues(bottom = 32.dp + innerPadding.calculateBottomPadding()),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Top,
                 modifier = Modifier
@@ -736,13 +746,17 @@ private fun buildRichHtmlPrewarmTargets(
     renderCells: List<ChatRenderCell>,
     scrollState: RichRenderScrollState,
 ): List<RichHtmlPrewarmTarget> {
-    if (scrollState.fastScrolling || scrollState.nearViewportRange.isEmptyRange()) return emptyList()
+    if (scrollState.nearViewportRange.isEmptyRange()) return emptyList()
     val visibleRange = scrollState.visibleCellRange
-    val orderedIndexes = scrollState.nearViewportRange
+    val candidateIndexes = scrollState.nearViewportRange
         .asSequence()
         .filter { it in renderCells.indices }
-        .filterNot { visibleRange.isNotEmptyRange() && it in visibleRange }
         .toList()
+    val visibleIndexes = candidateIndexes
+        .filter { visibleRange.isNotEmptyRange() && it in visibleRange }
+        .sortedBy { distanceToRange(it, visibleRange) }
+    val nearIndexes = candidateIndexes
+        .filterNot { visibleRange.isNotEmptyRange() && it in visibleRange }
         .let { indexes ->
             when (scrollState.scrollDirection) {
                 RichRenderScrollDirection.Down -> indexes.sorted()
@@ -750,6 +764,7 @@ private fun buildRichHtmlPrewarmTargets(
                 RichRenderScrollDirection.Idle -> indexes.sortedBy { distanceToRange(it, visibleRange) }
             }
         }
+    val orderedIndexes = visibleIndexes + nearIndexes
     return orderedIndexes.mapNotNull { index ->
         val cell = renderCells[index] as? ChatRenderCell.RichHtmlCell ?: return@mapNotNull null
         if (cell.block.partial) return@mapNotNull null
@@ -833,6 +848,38 @@ private fun SelectableMessageFrame(
         )
         Box(modifier = Modifier.weight(1f)) {
             content()
+        }
+    }
+}
+
+@Composable
+private fun ChatFramePressureTelemetry(scrollState: RichRenderScrollState) {
+    val currentScrollState by rememberUpdatedState(scrollState)
+    DisposableEffect(Unit) {
+        val choreographer = Choreographer.getInstance()
+        var lastFrameNanos = 0L
+        val callback = object : Choreographer.FrameCallback {
+            override fun doFrame(frameTimeNanos: Long) {
+                if (lastFrameNanos > 0L) {
+                    val state = currentScrollState
+                    if (state.scrollInProgress) {
+                        val frameMs = (frameTimeNanos - lastFrameNanos) / 1_000_000f
+                        RichHtmlRenderTelemetry.recordFramePressure(
+                            frameMs = frameMs,
+                            direction = state.scrollDirection.name,
+                            visibleCellRange = state.visibleCellRange,
+                            fastScrolling = state.fastScrolling,
+                            inlineActiveCount = inlineDynamicWebViewActiveCount(),
+                        )
+                    }
+                }
+                lastFrameNanos = frameTimeNanos
+                choreographer.postFrameCallback(this)
+            }
+        }
+        choreographer.postFrameCallback(callback)
+        onDispose {
+            choreographer.removeFrameCallback(callback)
         }
     }
 }

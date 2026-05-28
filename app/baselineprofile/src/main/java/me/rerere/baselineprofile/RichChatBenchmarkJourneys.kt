@@ -17,3 +17,16 @@ internal fun MacrobenchmarkScope.scrollRichChatJourney(repetitions: Int = 5) {
         device.waitForIdle()
     }
 }
+
+internal fun MacrobenchmarkScope.scrollRichChatHistoryJourney(repetitions: Int = 8) {
+    device.wait(Until.hasObject(By.scrollable(true)), RichChatWaitTimeoutMs)
+    val feed = device.findObject(By.scrollable(true)) ?: return
+    repeat(2) {
+        feed.fling(Direction.DOWN)
+        device.waitForIdle()
+    }
+    repeat(repetitions) {
+        feed.fling(Direction.UP)
+        device.waitForIdle()
+    }
+}

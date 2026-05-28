@@ -133,6 +133,37 @@ class RichHtmlRenderSchedulerTest {
     }
 
     @Test
+    fun `prewarm keeps started jobs when scroll target changes`() = runBlocking {
+        RichHtmlCompiler.clearCacheForTest()
+        RichHtmlRenderScheduler.resetForTest()
+        val html = buildString {
+            append("""<div id="vcp-root">""")
+            repeat(240) { index ->
+                append("""<p style="padding:2px 4px;background:linear-gradient(90deg,#fff,#eef);">near viewport $index</p>""")
+            }
+            append("</div>")
+        }
+        val options = RichHtmlCompileOptions(viewportWidthDp = 360f)
+
+        RichHtmlRenderScheduler.updatePrewarmTargets(
+            targets = listOf(
+                RichHtmlPrewarmTarget(
+                    html = html,
+                    cellIndex = 8,
+                    viewportWidthDp = 360f,
+                    risk = RenderRiskScore.Low,
+                )
+            ),
+            maxTargets = 1,
+        )
+        RichHtmlRenderScheduler.updatePrewarmTargets(emptyList(), maxTargets = 1)
+        RichHtmlRenderScheduler.drainPrewarmForTest()
+
+        assertNotNull(RichHtmlCompiler.getCached(html, options))
+        assertEquals(0, RichHtmlRenderScheduler.prewarmJobCountForTest())
+    }
+
+    @Test
     fun `height cache separates content type buckets`() {
         RichHtmlHeightCache.resetForTest()
         val richHtmlKey = RichHtmlHeightCache.key(

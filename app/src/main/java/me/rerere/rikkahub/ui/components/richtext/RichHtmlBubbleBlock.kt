@@ -81,9 +81,28 @@ internal fun RichHtmlBubbleBlock(
         }
         val scrollState = LocalRichRenderScrollState.current
         val mainHandler = remember { Handler(Looper.getMainLooper()) }
-        val renderAdmission = remember(renderId, analysis, scrollState, transientCache, renderCellIndex, renderRisk) {
+        val compileOptions = remember(viewportWidthDp) {
+            RichHtmlCompileOptions(viewportWidthDp = viewportWidthDp)
+        }
+        val cachedModelAvailable = !transientCache &&
+            RichHtmlCompiler.getCached(
+                html = html,
+                options = compileOptions,
+                cacheMode = RichHtmlCompileCacheMode.Persistent,
+            ) != null
+        val renderAdmission = remember(
+            renderId,
+            analysis,
+            scrollState,
+            transientCache,
+            renderCellIndex,
+            renderRisk,
+            cachedModelAvailable,
+        ) {
             if (transientCache) {
                 RichHtmlRenderAdmission(nativeAllowed = true, reason = "transient")
+            } else if (cachedModelAvailable) {
+                RichHtmlRenderAdmission(nativeAllowed = true, reason = "compiled-cache")
             } else {
                 RichHtmlRenderScheduler.admission(
                     key = renderId,
@@ -256,8 +275,9 @@ private fun rememberNativePresentationAllowed(
     scrollState: RichRenderScrollState,
 ): Boolean {
     val alreadyRendered = RichHtmlRenderScheduler.hasRendered(renderId)
+    val deferForScroll = remember(model) { model.shouldDeferNativePresentationDuringScroll() }
     var allowed by remember(renderId, viewportWidthDp, transientCache) {
-        mutableStateOf(transientCache || alreadyRendered)
+        mutableStateOf(transientCache || alreadyRendered || !deferForScroll)
     }
     var scrollDeferralLogged by remember(renderId, viewportWidthDp, transientCache) {
         mutableStateOf(false)
@@ -274,6 +294,7 @@ private fun rememberNativePresentationAllowed(
     ) {
         when {
             transientCache || alreadyRendered -> allowed = true
+            !deferForScroll -> allowed = true
             scrollState.scrolling || scrollState.scrollInProgress || scrollState.fastScrolling -> {
                 if (!scrollDeferralLogged) {
                     scrollDeferralLogged = true
@@ -291,6 +312,53 @@ private fun rememberNativePresentationAllowed(
         }
     }
     return allowed
+}
+
+private fun RichHtmlRenderModel.shouldDeferNativePresentationDuringScroll(): Boolean {
+    if (animationStats.nativeAnimatedCount > 0 || animationStats.layoutAnimationCount > 0) return true
+    val hintCost = visualHints.sumOf { hint ->
+        when (hint) {
+            RichVisualHint.CssFilter,
+            RichVisualHint.CssBackdropFilter,
+            RichVisualHint.CssMask,
+            RichVisualHint.SvgFilter,
+            RichVisualHint.SvgMask,
+            RichVisualHint.SvgClipPath,
+            RichVisualHint.SvgPattern,
+            RichVisualHint.SvgSymbol,
+            RichVisualHint.SvgUse,
+            RichVisualHint.SvgForeignObject -> 10
+
+            RichVisualHint.CssAnimation,
+            RichVisualHint.CssTransition,
+            RichVisualHint.CssKeyframes,
+            RichVisualHint.CssInfiniteAnimation,
+            RichVisualHint.CssLayoutAnimation -> 8
+
+            else -> 2
+        }
+    }
+    val blockCost = blocks.sumOf(::nativePresentationCost)
+    return blockCost + hintCost >= RICH_HTML_NATIVE_PRESENTATION_DEFER_COST
+}
+
+private fun nativePresentationCost(block: RichBlock): Int {
+    return when (block) {
+        is RichTextBlock -> 1 + block.inlinePaints.size + block.inlineMath.size * 3 +
+            block.inlineBoxes.sumOf { 3 + nativePresentationCost(it.block) }
+
+        is RichContainerBlock -> 2 + block.children.sumOf(::nativePresentationCost)
+        is RichImageBlock -> 4
+        is RichTableBlock -> 10 + block.rows.sumOf { row -> row.size } + block.headers.size
+        is RichSvgBlock -> 18
+        is RichMathBlock -> 6
+        is RichButtonBlock -> 3 + block.inlinePaints.size + block.inlineMath.size * 3 +
+            block.inlineBoxes.sumOf { 3 + nativePresentationCost(it.block) } +
+            block.children.sumOf(::nativePresentationCost)
+
+        is RichDetailsBlock -> 4 + block.children.sumOf(::nativePresentationCost)
+        is RichUnsupportedBlock -> 1
+    }
 }
 
 @Composable
@@ -512,5 +580,6 @@ private fun Throwable.isFatalRichHtmlThrowable(): Boolean {
     return this is VirtualMachineError || this is ThreadDeath || this is LinkageError
 }
 
-private const val RICH_HTML_NATIVE_PRESENTATION_IDLE_DELAY_MS = 120L
+private const val RICH_HTML_NATIVE_PRESENTATION_IDLE_DELAY_MS = 48L
+private const val RICH_HTML_NATIVE_PRESENTATION_DEFER_COST = 90
 private const val RICH_HTML_RENDER_FALLBACK_DELAY_MS = 48L

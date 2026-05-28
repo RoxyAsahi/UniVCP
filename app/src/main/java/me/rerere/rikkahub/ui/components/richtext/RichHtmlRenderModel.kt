@@ -86,6 +86,8 @@ internal data class RichTextBlock(
     override val style: ComputedStyle,
     val content: AnnotatedString,
     val inlineMath: List<InlineMathRun> = emptyList(),
+    val inlinePaints: List<InlineTextPaintRun> = emptyList(),
+    val inlineBoxes: List<InlineRichBoxRun> = emptyList(),
     val listMarker: String? = null,
 ) : RichBlock
 
@@ -150,6 +152,10 @@ internal data class RichButtonBlock(
     override val style: ComputedStyle,
     val label: AnnotatedString,
     val action: String,
+    val inlineMath: List<InlineMathRun> = emptyList(),
+    val inlinePaints: List<InlineTextPaintRun> = emptyList(),
+    val inlineBoxes: List<InlineRichBoxRun> = emptyList(),
+    val children: List<RichBlock> = emptyList(),
 ) : RichBlock
 
 internal data class RichDetailsBlock(
@@ -178,6 +184,25 @@ internal data class InlineMathRun(
     val start: Int,
     val end: Int,
     val latex: String,
+)
+
+internal data class InlineTextPaintRun(
+    val start: Int,
+    val end: Int,
+    val color: Color,
+    val topFraction: Float = 0f,
+    val heightFraction: Float = 1f,
+    val minHeight: Dp = 0.dp,
+    val cornerRadius: Dp = 0.dp,
+)
+
+internal data class InlineRichBoxRun(
+    val start: Int,
+    val end: Int,
+    val block: RichBlock,
+    val text: String,
+    val width: Dp,
+    val height: Dp,
 )
 
 internal data class ComputedStyle(
@@ -297,9 +322,24 @@ internal enum class RichDisplay {
     Block,
     Inline,
     InlineBlock,
+    InlineFlex,
+    InlineGrid,
     Flex,
     Grid,
 }
+
+internal fun RichDisplay.isFlexContainer(): Boolean = this == RichDisplay.Flex || this == RichDisplay.InlineFlex
+
+internal fun RichDisplay.isGridContainer(): Boolean = this == RichDisplay.Grid || this == RichDisplay.InlineGrid
+
+internal fun RichDisplay.isInlineBox(): Boolean = this == RichDisplay.Inline ||
+    this == RichDisplay.InlineBlock ||
+    this == RichDisplay.InlineFlex ||
+    this == RichDisplay.InlineGrid
+
+internal fun RichDisplay.isBlockFilling(): Boolean = this == RichDisplay.Block ||
+    this == RichDisplay.Flex ||
+    this == RichDisplay.Grid
 
 internal enum class RichPosition {
     Static,

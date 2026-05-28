@@ -1,5 +1,6 @@
 package me.rerere.rikkahub.ui.components.message
 
+import android.os.SystemClock
 import android.util.Log
 import me.rerere.rikkahub.BuildConfig
 import kotlin.math.abs
@@ -19,11 +20,13 @@ internal data class RichHtmlFallbackKey(
 
 internal object RichHtmlRenderTelemetry {
     private const val TAG = "RichHtmlRender"
+    private const val FramePressureRetentionMs = 5_000L
     private val lock = Any()
     private val fallbackCounters = linkedMapOf<RichHtmlFallbackKey, Int>()
     private val paritySamples = ArrayDeque<RichHtmlParitySample>()
     private val snapshotSamples = ArrayDeque<RichHtmlSnapshotTelemetrySample>()
     private val compileQueueSamples = ArrayDeque<RichHtmlCompileQueueSample>()
+    private val framePressureSamples = ArrayDeque<RichFramePressureSample>()
 
     fun recordFallback(stage: RichHtmlFallbackStage, reason: String) {
         if (!BuildConfig.DEBUG) return
@@ -104,6 +107,7 @@ internal object RichHtmlRenderTelemetry {
         paritySamples.clear()
         snapshotSamples.clear()
         compileQueueSamples.clear()
+        framePressureSamples.clear()
     }
 
     fun recordCompileStart(id: String, viewportWidthDp: Float, length: Int) {
@@ -330,6 +334,111 @@ internal object RichHtmlRenderTelemetry {
         }
     }
 
+    fun recordInlineDynamicWebView(
+        id: String,
+        event: String,
+        reason: String,
+        cellIndex: Int?,
+        heightCssPx: Int? = null,
+        activeCount: Int? = null,
+    ) {
+        if (!BuildConfig.DEBUG) return
+        safeLog {
+            Log.d(
+                TAG,
+                "inline-webview id=$id event=$event reason=$reason cell=${cellIndex ?: -1} " +
+                    "heightCssPx=${heightCssPx ?: -1} active=${activeCount ?: -1}",
+            )
+        }
+    }
+
+    fun recordInlineDynamicWebViewPhase(
+        id: String,
+        phase: String,
+        reason: String,
+        cellIndex: Int? = null,
+        previous: String? = null,
+    ) {
+        if (!BuildConfig.DEBUG) return
+        safeLog {
+            Log.d(
+                TAG,
+                "inline-webview-phase id=$id phase=$phase previous=${previous.orEmpty()} " +
+                    "reason=$reason cell=${cellIndex ?: -1}",
+            )
+        }
+    }
+
+    fun recordFramePressure(
+        frameMs: Float,
+        direction: String,
+        visibleCellRange: IntRange,
+        fastScrolling: Boolean,
+        inlineActiveCount: Int? = null,
+        sampleAtMs: Long = SystemClock.uptimeMillis(),
+    ) {
+        val severity = when {
+            frameMs >= 50f -> "severe"
+            frameMs >= 33f -> "jank"
+            frameMs >= 24f -> "slow"
+            else -> return
+        }
+        if (BuildConfig.DEBUG) {
+            safeLog {
+                Log.d(
+                    TAG,
+                    "frame-pressure severity=$severity frameMs=${"%.1f".format(frameMs)} " +
+                        "direction=$direction visible=${visibleCellRange.first}..${visibleCellRange.last} " +
+                        "fast=$fastScrolling inlineActive=${inlineActiveCount ?: -1}",
+                )
+            }
+        }
+        synchronized(lock) {
+            framePressureSamples.addLast(
+                RichFramePressureSample(
+                    frameMs = frameMs,
+                    severity = severity,
+                    direction = direction,
+                    visibleCellRange = visibleCellRange,
+                    fastScrolling = fastScrolling,
+                    inlineActiveCount = inlineActiveCount,
+                    sampleAtMs = sampleAtMs,
+                )
+            )
+            val oldestAllowedMs = sampleAtMs - FramePressureRetentionMs
+            while (framePressureSamples.size > 96 ||
+                framePressureSamples.firstOrNull()?.sampleAtMs?.let { it < oldestAllowedMs } == true
+            ) {
+                framePressureSamples.removeFirst()
+            }
+        }
+    }
+
+    fun framePressureSnapshot(): List<RichFramePressureSample> = synchronized(lock) {
+        framePressureSamples.toList()
+    }
+
+    fun recentFramePressureWindow(
+        nowMs: Long = SystemClock.uptimeMillis(),
+        windowMs: Long = 900L,
+        direction: String? = null,
+    ): RichFramePressureWindow {
+        val samples = synchronized(lock) {
+            framePressureSamples.filter { sample ->
+                sample.sampleAtMs in (nowMs - windowMs)..nowMs &&
+                    (direction == null || sample.direction == direction)
+            }
+        }
+        if (samples.isEmpty()) return RichFramePressureWindow()
+        return RichFramePressureWindow(
+            slowFrames = samples.count { it.severity == "slow" },
+            jankyFrames = samples.count { it.severity == "jank" },
+            severeFrames = samples.count { it.severity == "severe" },
+            maxFrameMs = samples.maxOf { it.frameMs },
+            inlineActiveMax = samples.mapNotNull { it.inlineActiveCount }.maxOrNull() ?: 0,
+        )
+    }
+
     fun recordPrewarm(
         id: String,
         cellIndex: Int,
@@ -479,4 +588,22 @@ internal data class RichHtmlCompileQueueSample(
     val stage: String,
     val outcome: String?,
     val cellIndex: Int?,
+)
+
+internal data class RichFramePressureSample(
+    val frameMs: Float,
+    val severity: String,
+    val direction: String,
+    val visibleCellRange: IntRange,
+    val fastScrolling: Boolean,
+    val inlineActiveCount: Int?,
+    val sampleAtMs: Long,
+)
+
+internal data class RichFramePressureWindow(
+    val slowFrames: Int = 0,
+    val jankyFrames: Int = 0,
+    val severeFrames: Int = 0,
+    val maxFrameMs: Float = 0f,
+    val inlineActiveMax: Int = 0,
 )

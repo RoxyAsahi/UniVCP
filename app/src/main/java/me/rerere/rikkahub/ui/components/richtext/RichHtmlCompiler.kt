@@ -344,7 +344,10 @@ private class AnimationBudgetRun(
             is RichTableBlock -> block.copy(style = style)
             is RichSvgBlock -> block.copy(style = style)
             is RichMathBlock -> block.copy(style = style)
-            is RichButtonBlock -> block.copy(style = style)
+            is RichButtonBlock -> block.copy(
+                style = style,
+                children = block.children.map(::visit),
+            )
             is RichDetailsBlock -> block.copy(
                 style = style,
                 children = block.children.map(::visit),
@@ -447,8 +450,9 @@ private class CompilerRun(
                 }
                 if (
                     !forceContainer &&
-                    style.display != RichDisplay.Flex &&
-                    style.display != RichDisplay.Grid &&
+                    !style.display.isFlexContainer() &&
+                    !style.display.isGridContainer() &&
+                    !style.display.needsInlineContainerDisplay() &&
                     isInlineOnly(element) &&
                     element.hasInlineRenderableContent(style) &&
                     !hasInlineChildRequiringOwnBlock(element, style, resolved.variables)
@@ -480,13 +484,15 @@ private class CompilerRun(
         fun flushInline() {
             cancellationCheck()
             if (inlineBuffer.isEmpty()) return
-            val content = buildInlineContent(inlineBuffer, style, variables)
+            val content = buildInlineContent(inlineBuffer, style, variables, "$blockId-t${result.size}")
             if (content.text.text.isNotBlank()) {
                 result += RichTextBlock(
                     blockId = "$blockId-t${result.size}",
-                    style = style,
+                    style = style.anonymousInlineTextStyle(),
                     content = content.text,
                     inlineMath = content.inlineMath,
+                    inlinePaints = content.inlinePaints,
+                    inlineBoxes = content.inlineBoxes,
                 )
             }
             inlineBuffer.clear()
@@ -502,14 +508,7 @@ private class CompilerRun(
                     val tag = node.tagName().lowercase()
                     if (tag == "style" || isDangerousRichHtmlTag(tag)) return@forEachIndexed
                     val childStyle = resolver.resolve(node, style, variables).style
-                    if (
-                        isInlineTag(tag) &&
-                        style.display != RichDisplay.Flex &&
-                        style.display != RichDisplay.Grid &&
-                        !isMathFormulaContainer(node) &&
-                        !childStyle.isPositionedOverlay() &&
-                        !childStyle.needsOwnInlineBlock()
-                    ) {
+                    if (childStyle.participatesInParentInlineFlow(tag, parentStyle = style) && !isMathFormulaContainer(node)) {
                         inlineBuffer.add(node)
                     } else {
                         flushInline()
@@ -536,7 +535,8 @@ private class CompilerRun(
             val tag = child.tagName().lowercase()
             if (!isInlineTag(tag) || isMathFormulaContainer(child)) return@any false
             val childStyle = resolver.resolve(child, style, variables).style
-            childStyle.needsOwnInlineBlock() || hasInlineChildRequiringOwnBlock(child, childStyle, variables)
+            (childStyle.display.needsInlineContainerDisplay() && !childStyle.canRenderAsInlineRichBox()) ||
+                hasInlineChildRequiringOwnBlock(child, childStyle, variables)
         }
     }
 
@@ -546,8 +546,8 @@ private class CompilerRun(
         blockId: String,
         variables: Map<String, String>,
     ): RichTextBlock {
-        val content = buildInlineContent(element.childNodes(), style, variables)
-        return RichTextBlock(blockId, style, content.text, content.inlineMath)
+        val content = buildInlineContent(element.childNodes(), style, variables, blockId)
+        return RichTextBlock(blockId, style, content.text, content.inlineMath, content.inlinePaints, content.inlineBoxes)
     }
 
     private fun compileImage(element: Element, style: ComputedStyle, blockId: String): RichBlock? {
@@ -569,10 +569,26 @@ private class CompilerRun(
             onclick = element.attr("onclick"),
             fallbackText = element.text(),
         )
-        val label = buildInlineContent(element.childNodes(), style, variables).text
-            .takeIf { it.text.isNotBlank() }
+        val content = buildInlineContent(element.childNodes(), style, variables, "$blockId-label")
+        val hasLabel = content.text.text.isNotBlank()
+        val label = content.text
+            .takeIf { hasLabel }
             ?: AnnotatedString(action.ifBlank { "继续" })
-        return RichButtonBlock(blockId, style, label, action)
+        val children = if (style.display.isFlexContainer() || style.display.isGridContainer()) {
+            compileChildren(element, style, variables, "$blockId-content")
+        } else {
+            emptyList()
+        }
+        return RichButtonBlock(
+            blockId = blockId,
+            style = style,
+            label = label,
+            action = action,
+            inlineMath = if (hasLabel) content.inlineMath else emptyList(),
+            inlinePaints = if (hasLabel) content.inlinePaints else emptyList(),
+            inlineBoxes = if (hasLabel) content.inlineBoxes else emptyList(),
+            children = children,
+        )
     }
 
     private fun compileDetails(
@@ -635,14 +651,19 @@ private class CompilerRun(
                 val inlineNodes = item.childNodes().filterNot { child ->
                     child is Element && child.tagName().lowercase() in setOf("ul", "ol")
                 }
+                val inlineContent = buildInlineContent(inlineNodes, effectiveItemStyle, itemStyle.variables, "$blockId-li$index")
+                val markerOffset = marker.length
                 val content = buildAnnotatedString {
                     if (marker.isNotBlank()) append(marker)
-                    append(buildInlineContent(inlineNodes, effectiveItemStyle, itemStyle.variables).text)
+                    append(inlineContent.text)
                 }
                 val textBlock = RichTextBlock(
                     blockId = "$blockId-li$index",
                     style = effectiveItemStyle,
                     content = content,
+                    inlineMath = inlineContent.inlineMath.shiftInlineMath(markerOffset),
+                    inlinePaints = inlineContent.inlinePaints.shiftInlinePaints(markerOffset),
+                    inlineBoxes = inlineContent.inlineBoxes.shiftInlineBoxes(markerOffset),
                     listMarker = marker.takeIf { it.isNotBlank() },
                 )
                 val nestedLists = item.children()
@@ -777,17 +798,20 @@ private class CompilerRun(
         nodes: List<Node>,
         parentStyle: ComputedStyle,
         variables: Map<String, String>,
+        ownerBlockId: String = "inline",
     ): InlineContent {
         val inlineMath = mutableListOf<InlineMathRun>()
+        val inlinePaints = mutableListOf<InlineTextPaintRun>()
+        val inlineBoxes = mutableListOf<InlineRichBoxRun>()
         val text = buildAnnotatedString {
             parentStyle.beforeContent?.let { append(it) }
             nodes.forEach {
                 cancellationCheck()
-                appendInlineNode(it, parentStyle, variables, inlineMath)
+                appendInlineNode(it, parentStyle, variables, inlineMath, inlinePaints, inlineBoxes, ownerBlockId)
             }
             parentStyle.afterContent?.let { append(it) }
         }
-        return InlineContent(text, inlineMath)
+        return InlineContent(text, inlineMath, inlinePaints, inlineBoxes)
     }
 
     private fun AnnotatedString.Builder.appendInlineNode(
@@ -795,6 +819,9 @@ private class CompilerRun(
         parentStyle: ComputedStyle,
         variables: Map<String, String>,
         inlineMath: MutableList<InlineMathRun>,
+        inlinePaints: MutableList<InlineTextPaintRun>,
+        inlineBoxes: MutableList<InlineRichBoxRun>,
+        ownerBlockId: String,
     ) {
         cancellationCheck()
         when (node) {
@@ -808,7 +835,9 @@ private class CompilerRun(
                 val tag = node.tagName().lowercase()
                 if (tag == "style" || isDangerousRichHtmlTag(tag)) return
                 if (tag == "a" && node.hasAttr("href") && !isSafeRichHtmlHref(node.attr("href"))) {
-                    node.childNodes().forEach { appendInlineNode(it, parentStyle, variables, inlineMath) }
+                    node.childNodes().forEach {
+                        appendInlineNode(it, parentStyle, variables, inlineMath, inlinePaints, inlineBoxes, ownerBlockId)
+                    }
                     return
                 }
                 val resolved = resolver.resolve(node, parentStyle, variables)
@@ -824,15 +853,67 @@ private class CompilerRun(
                     if (latex.isNotBlank()) inlineMath += InlineMathRun(start, length, latex)
                     return
                 }
+                if (tagStyle.shouldRenderAsInlineRichBox(tag)) {
+                    appendInlineRichBox(
+                        element = node,
+                        style = tagStyle,
+                        parentStyle = parentStyle,
+                        parentVars = variables,
+                        inlineBoxes = inlineBoxes,
+                        ownerBlockId = ownerBlockId,
+                    )
+                    return
+                }
                 withStyle(tagStyle.textSpan().merge(tag.inlineSpanDefaults())) {
+                    val start = length
                     if (tag == "code") {
                         append(node.text())
                     } else {
-                        node.childNodes().forEach { appendInlineNode(it, tagStyle, resolved.variables, inlineMath) }
+                        node.childNodes().forEach {
+                            appendInlineNode(
+                                it,
+                                tagStyle,
+                                resolved.variables,
+                                inlineMath,
+                                inlinePaints,
+                                inlineBoxes,
+                                ownerBlockId,
+                            )
+                        }
                     }
+                    tagStyle.inlineTextPaint(start, length)?.let { inlinePaints.add(it) }
+                    Unit
                 }
             }
         }
+    }
+
+    private fun AnnotatedString.Builder.appendInlineRichBox(
+        element: Element,
+        style: ComputedStyle,
+        parentStyle: ComputedStyle,
+        parentVars: Map<String, String>,
+        inlineBoxes: MutableList<InlineRichBoxRun>,
+        ownerBlockId: String,
+    ) {
+        val blockId = "$ownerBlockId-inline-${inlineBoxes.size}"
+        val block = compileElement(
+            element = element,
+            parentStyle = parentStyle,
+            parentVars = parentVars,
+            blockId = blockId,
+            forceContainer = true,
+        )?.withInlineFallbackDisplay() ?: return
+        val start = length
+        append(INLINE_RICH_BOX_PLACEHOLDER)
+        inlineBoxes += InlineRichBoxRun(
+            start = start,
+            end = length,
+            block = block,
+            text = normalizeText(element.wholeText(), style.whiteSpace),
+            width = style.estimatedInlineBoxWidth(element),
+            height = style.estimatedInlineBoxHeight(),
+        )
     }
 
     private fun AnnotatedString.Builder.appendTextWithMath(
@@ -858,7 +939,26 @@ private class CompilerRun(
 private data class InlineContent(
     val text: AnnotatedString,
     val inlineMath: List<InlineMathRun>,
+    val inlinePaints: List<InlineTextPaintRun>,
+    val inlineBoxes: List<InlineRichBoxRun>,
 )
+
+private const val INLINE_RICH_BOX_PLACEHOLDER = "\uFFFC"
+
+private fun List<InlineMathRun>.shiftInlineMath(offset: Int): List<InlineMathRun> {
+    if (offset == 0) return this
+    return map { it.copy(start = it.start + offset, end = it.end + offset) }
+}
+
+private fun List<InlineTextPaintRun>.shiftInlinePaints(offset: Int): List<InlineTextPaintRun> {
+    if (offset == 0) return this
+    return map { it.copy(start = it.start + offset, end = it.end + offset) }
+}
+
+private fun List<InlineRichBoxRun>.shiftInlineBoxes(offset: Int): List<InlineRichBoxRun> {
+    if (offset == 0) return this
+    return map { it.copy(start = it.start + offset, end = it.end + offset) }
+}
 
 internal data class ResolvedStyle(
     val style: ComputedStyle,
@@ -1451,6 +1551,7 @@ private fun uaDeclarationsFor(tag: String): Map<String, String> = when (tag) {
         "display" to "inline-block",
         "font-size" to "1em",
         "line-height" to "normal",
+        "text-align" to "center",
         "padding" to "2px 6px",
         "border" to "1px solid #767676",
         "border-radius" to "2px",
@@ -1529,7 +1630,10 @@ private fun ComputedStyle.hasVisualBox(): Boolean {
 }
 
 private fun ComputedStyle.needsOwnInlineBlock(): Boolean {
-    return position != RichPosition.Static ||
+    return display == RichDisplay.InlineBlock ||
+        display == RichDisplay.InlineFlex ||
+        display == RichDisplay.InlineGrid ||
+        position != RichPosition.Static ||
         opacity != 1f ||
         cssFilter != RichCssFilter.None ||
         backdropFilter != RichCssFilter.None ||
@@ -1538,9 +1642,176 @@ private fun ComputedStyle.needsOwnInlineBlock(): Boolean {
         transition.isDeclared
 }
 
+private fun RichDisplay.needsInlineContainerDisplay(): Boolean {
+    return this == RichDisplay.InlineBlock || this == RichDisplay.InlineFlex || this == RichDisplay.InlineGrid
+}
+
+private fun ComputedStyle.canRenderAsInlineRichBox(): Boolean {
+    if (isPositionedOverlay()) return false
+    val hasFullBoxBorder = border.hasNonDecorativeInlineBoxBorder()
+    return display == RichDisplay.InlineBlock ||
+        display == RichDisplay.InlineFlex ||
+        display == RichDisplay.InlineGrid ||
+        width != RichSize.Auto ||
+        height != RichSize.Auto ||
+        minWidth != null ||
+        minHeight != null ||
+        maxWidth != null ||
+        maxHeight != null ||
+        padding != RichSpacing.Zero ||
+        margin != RichSpacing.Zero ||
+        hasFullBoxBorder ||
+        borderRadius != RichCornerRadius.Zero ||
+        shadows.isNotEmpty()
+}
+
+private fun ComputedStyle.shouldRenderAsInlineRichBox(tag: String): Boolean {
+    return canRenderAsInlineRichBox() && (isInlineTag(tag) || display.isInlineBox())
+}
+
+private fun ComputedStyle.participatesInParentInlineFlow(
+    tag: String,
+    parentStyle: ComputedStyle,
+): Boolean {
+    if (parentStyle.display.isFlexContainer() || parentStyle.display.isGridContainer()) return false
+    if (isPositionedOverlay()) return false
+    return when {
+        shouldRenderAsInlineRichBox(tag) -> true
+        isInlineTag(tag) && !needsOwnInlineBlock() -> true
+        else -> false
+    }
+}
+
+private fun RichBlock.withInlineFallbackDisplay(): RichBlock {
+    if (style.display != RichDisplay.Block) return this
+    val inlineStyle = style.copy(display = RichDisplay.Inline)
+    return when (this) {
+        is RichTextBlock -> copy(style = inlineStyle)
+        is RichContainerBlock -> copy(style = inlineStyle)
+        is RichImageBlock -> copy(style = inlineStyle)
+        is RichTableBlock -> copy(style = inlineStyle)
+        is RichSvgBlock -> copy(style = inlineStyle)
+        is RichMathBlock -> copy(style = inlineStyle)
+        is RichButtonBlock -> copy(style = inlineStyle)
+        is RichDetailsBlock -> copy(style = inlineStyle)
+        is RichUnsupportedBlock -> copy(style = inlineStyle)
+    }
+}
+
+private fun ComputedStyle.estimatedInlineBoxWidth(element: Element): Dp {
+    width.dpOrNull()?.let { return it + padding.horizontal() + border.horizontalWidth() + margin.horizontal() }
+    val rawText = normalizeText(element.wholeText(), whiteSpace)
+    val textWidth = rawText.sumOf { char -> char.inlineWidthUnits().toDouble() }.toFloat() * inlineFontDp()
+    val boxWidth = textWidth.dp + padding.horizontal() + border.horizontalWidth()
+    return boxWidth
+        .coerceAtLeast(minWidth ?: 0.dp)
+        .let { width -> maxWidth?.let(width::coerceAtMost) ?: width }
+        .let { it + margin.horizontal() }
+}
+
+private fun ComputedStyle.estimatedInlineBoxHeight(): Dp {
+    height.dpOrNull()?.let { return it + padding.vertical() + border.verticalWidth() + margin.vertical() }
+    val font = inlineFontDp()
+    val line = when (lineHeight.type) {
+        TextUnitType.Sp -> lineHeight.value.dp
+        TextUnitType.Em -> (font * lineHeight.value).dp
+        else -> (font * 1.25f).dp
+    }
+    val boxHeight = line + padding.vertical() + border.verticalWidth()
+    return boxHeight
+        .coerceAtLeast(minHeight ?: 0.dp)
+        .let { height -> maxHeight?.let(height::coerceAtMost) ?: height }
+        .let { it + margin.vertical() }
+}
+
+private fun ComputedStyle.inlineFontDp(): Float {
+    return when (fontSize.type) {
+        TextUnitType.Sp -> fontSize.value
+        TextUnitType.Em -> 14f * fontSize.value
+        else -> 14f
+    }.coerceAtLeast(8f)
+}
+
+private fun Char.inlineWidthUnits(): Float = when {
+    isWhitespace() -> 0.35f
+    code in 0x2E80..0x9FFF -> 1.0f
+    code >= 0x1F000 -> 1.1f
+    isUpperCase() -> 0.68f
+    isDigit() -> 0.58f
+    else -> 0.56f
+}
+
+private fun RichSize.dpOrNull(): Dp? = (this as? RichSize.DpSize)?.value
+
+private fun RichSpacing.horizontal(): Dp = left + right
+
+private fun RichSpacing.vertical(): Dp = top + bottom
+
+private fun RichBorder.horizontalWidth(): Dp = left.width + right.width
+
+private fun RichBorder.verticalWidth(): Dp = top.width + bottom.width
+
+private fun RichBorder.hasNonDecorativeInlineBoxBorder(): Boolean {
+    return listOf(top, right, left).any { it.style != RichBorderStyle.None && it.width > 0.dp && it.color.alpha > 0f }
+}
+
+private fun ComputedStyle.anonymousInlineTextStyle(): ComputedStyle {
+    val inherited = inheritedCssStyle().copy(display = RichDisplay.Block)
+    return if (backgroundClip == RichBackgroundBox.Text) {
+        inherited.copy(
+            backgroundImage = backgroundImage,
+            backgroundSize = backgroundSize,
+            backgroundPosition = backgroundPosition,
+            backgroundRepeat = backgroundRepeat,
+            backgroundClip = backgroundClip,
+        )
+    } else {
+        inherited
+    }
+}
+
 private fun isInlineTag(tag: String): Boolean = tag in setOf(
     "span", "strong", "b", "em", "i", "u", "code", "a", "mark", "kbd", "del", "ins", "sub", "sup", "small", "label", "br"
 )
+
+private fun ComputedStyle.inlineTextPaint(start: Int, end: Int): InlineTextPaintRun? {
+    if (end <= start) return null
+    inlineHighlightPaint(start, end)?.let { return it }
+    val bottomBorder = border.bottom
+    return bottomBorder
+        .takeIf { it.style != RichBorderStyle.None && it.width > 0.dp && it.color.alpha > 0f }
+        ?.let {
+            InlineTextPaintRun(
+                start = start,
+                end = end,
+                color = it.color.copy(alpha = it.color.alpha * effectiveOpacity()),
+                topFraction = 0.82f,
+                heightFraction = 0.10f,
+                minHeight = it.width,
+                cornerRadius = it.width,
+            )
+        }
+}
+
+private fun ComputedStyle.inlineHighlightPaint(start: Int, end: Int): InlineTextPaintRun? {
+    val gradient = backgroundImage as? RichBackgroundImage.LinearGradient ?: return null
+    if (backgroundClip == RichBackgroundBox.Text) return null
+    val coloredStops = gradient.stops.filter { it.color.alpha > 0.05f }
+    val transparentStops = gradient.stops.filter { it.color.alpha <= 0.05f }
+    if (coloredStops.isEmpty() || transparentStops.isEmpty()) return null
+    val color = coloredStops.maxByOrNull { it.color.alpha }?.color ?: return null
+    val firstColorOffset = coloredStops.mapNotNull { it.offset }.minOrNull() ?: 0.62f
+    val top = firstColorOffset.coerceIn(0.45f, 0.9f)
+    return InlineTextPaintRun(
+        start = start,
+        end = end,
+        color = color.copy(alpha = color.alpha * effectiveOpacity()),
+        topFraction = top,
+        heightFraction = (1f - top).coerceIn(0.08f, 0.48f),
+        minHeight = 2.dp,
+        cornerRadius = 2.dp,
+    )
+}
 
 private fun isMathFormulaContainer(element: Element): Boolean {
     val tag = element.tagName().lowercase()
@@ -1868,8 +2139,10 @@ private fun parseDisplay(value: String): RichDisplay? = when (value.trim().lower
     "none" -> RichDisplay.None
     "inline" -> RichDisplay.Inline
     "inline-block" -> RichDisplay.InlineBlock
-    "flex", "inline-flex" -> RichDisplay.Flex
-    "grid", "inline-grid" -> RichDisplay.Grid
+    "flex" -> RichDisplay.Flex
+    "inline-flex" -> RichDisplay.InlineFlex
+    "grid" -> RichDisplay.Grid
+    "inline-grid" -> RichDisplay.InlineGrid
     "block", "flow-root", "table" -> RichDisplay.Block
     else -> null
 }
@@ -2889,9 +3162,9 @@ private fun List<String>.layerValue(index: Int): String? = when {
 }
 
 private fun selectSafeBackgroundLayers(layers: List<RichBackgroundLayer>): List<RichBackgroundLayer> {
-    val gradient = layers.firstOrNull { it.image != null }
-    val url = layers.firstOrNull { it.url != null }
-    return layers.filter { layer -> layer == gradient || layer == url }.take(2)
+    return layers
+        .filter { layer -> layer.image != null || layer.url != null }
+        .take(MAX_SAFE_BACKGROUND_LAYERS)
 }
 
 private fun isBackgroundImageToken(token: String): Boolean {
@@ -3011,7 +3284,7 @@ private fun parseBackgroundImage(value: String): RichBackgroundImage? {
         else -> return null
     }
     val body = normalized.substringAfter("$function(", "").substringBeforeLast(")", "")
-    val stops = parseGradientStops(body).take(8)
+    val stops = parseGradientStops(body).take(MAX_SAFE_GRADIENT_STOPS)
     if (stops.size < 2) return null
     return when (function) {
         "linear-gradient" -> RichBackgroundImage.LinearGradient(parseGradientAngle(body), stops)
@@ -3595,6 +3868,8 @@ private const val MAX_NATIVE_ANIMATION_DURATION_MS = 1_200
 private const val MAX_NATIVE_ANIMATION_TOTAL_MS = 1_800
 private const val MAX_NATIVE_ANIMATION_DELAY_MS = 1_500
 private const val MAX_NATIVE_ANIMATION_ITERATIONS = 3
+private const val MAX_SAFE_BACKGROUND_LAYERS = 4
+private const val MAX_SAFE_GRADIENT_STOPS = 16
 private val ANIMATION_SHORTHAND_KEYWORDS = setOf(
     "none",
     "linear",

@@ -1714,6 +1714,10 @@ class MessageTextBlocksTest {
     private fun flattenRichBlocks(block: RichBlock): List<RichBlock> {
         return when (block) {
             is RichContainerBlock -> listOf(block) + block.children.flatMap(::flattenRichBlocks)
+            is RichTextBlock -> listOf(block) + block.inlineBoxes.flatMap { flattenRichBlocks(it.block) }
+            is RichButtonBlock -> listOf(block) +
+                block.inlineBoxes.flatMap { flattenRichBlocks(it.block) } +
+                block.children.flatMap(::flattenRichBlocks)
             else -> listOf(block)
         }
     }
@@ -1721,8 +1725,14 @@ class MessageTextBlocksTest {
     private fun assertFiniteTypography(block: RichBlock) {
         assertFiniteTextUnit("${block.blockId}.fontSize", block.style.fontSize)
         assertFiniteTextUnit("${block.blockId}.lineHeight", block.style.lineHeight)
-        if (block is RichContainerBlock) {
-            block.children.forEach(::assertFiniteTypography)
+        when (block) {
+            is RichContainerBlock -> block.children.forEach(::assertFiniteTypography)
+            is RichTextBlock -> block.inlineBoxes.forEach { assertFiniteTypography(it.block) }
+            is RichButtonBlock -> {
+                block.inlineBoxes.forEach { assertFiniteTypography(it.block) }
+                block.children.forEach(::assertFiniteTypography)
+            }
+            else -> Unit
         }
     }
 

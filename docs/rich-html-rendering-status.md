@@ -8,6 +8,8 @@
 
 当前开发阶段：IR 编译器与 Compose renderer 已落地，架构硬化与高保真校准 v1 已完成一轮，静态 CSS 覆盖 Phase 1/2 v2 已进入维护补洞，Phase 3 布局增强 v3 已迁移到官方 Compose FlexBox，Phase 4 表格高保真 v2/v3 已开始落地；WebView Snapshot v1.1 已作为复杂安全静态内容的兜底路径接入并完成首轮性能硬化；Compose Cell Feed Pipeline v3.1 已把聊天列表切换到稳定 cell、viewport-aware admission、near-viewport prewarm、prepared draw cache，并补上已缓存 prewarm 消噪、编译等待态稳定高度占位、首 native 呈现 recent-scroll idle gate、Lazy measure 失败非 0 高度兜底和 render model key 修正。当前主线进入“fidelity-driven quality gate + device benchmark closure”：用真实 VCP 高频样例、visual hints、snapshot policy、JVM/Android tests 和 Macrobenchmark 约束后续开发，而不是回到 live WebView。
 
+长期原生架构路线已单独沉淀到 `docs/rich-render-native-architecture-roadmap-v1-v6.md`：主张在当前路径上继续演进为 `RichContentAst -> RichRenderPlan -> TextFlow/Box/Table/SVG/Media/Action/SnapshotIsland/InlineWebView` 的计划驱动架构，目标是保真优先，同时用子树级路由、持久高度缓存、统一 orchestrator 和 fidelity gate 控制性能与回归。
+
 ## 当前方向
 
 当前路线是“切块 + 分类 + 原生编译渲染 + 静态快照兜底 + 动态预览兜底”：

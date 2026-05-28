@@ -27,7 +27,10 @@ class RichChatScrollBenchmarks {
     @Test
     fun richChatSnapshotMixBenchmark() = benchmark(repetitions = 6)
 
-    private fun benchmark(repetitions: Int) {
+    @Test
+    fun richChatHistoryScrollBenchmark() = benchmark(repetitions = 10, historyOnly = true)
+
+    private fun benchmark(repetitions: Int, historyOnly: Boolean = false) {
         rule.measureRepeated(
             packageName = InstrumentationRegistry.getArguments().getString("targetAppId")
                 ?: throw Exception("targetAppId not passed as instrumentation runner arg"),
@@ -40,7 +43,11 @@ class RichChatScrollBenchmarks {
                 startActivityAndWait()
             },
             measureBlock = {
-                scrollRichChatJourney(repetitions = repetitions)
+                if (historyOnly) {
+                    scrollRichChatHistoryJourney(repetitions = repetitions)
+                } else {
+                    scrollRichChatJourney(repetitions = repetitions)
+                }
             },
         )
     }
