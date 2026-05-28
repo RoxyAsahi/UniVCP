@@ -355,6 +355,11 @@ private fun RichHtmlCellContent(
                         renderCellIndex = cellIndex,
                         renderRisk = cell.renderRisk,
                         heightContentType = cell.contentType.name,
+                        renderPlan = buildRichRenderPlan(
+                            html = previewHtml,
+                            analysis = previewAnalysis,
+                            risk = RenderRiskScore.fromHtml(previewHtml, previewAnalysis),
+                        ),
                         renderFallback = {
                             StreamingRichHtmlPlaceholder(
                                 previewText = previewAnalysis.previewText.ifBlank { analysis.previewText },
@@ -387,6 +392,7 @@ private fun RichHtmlCellContent(
                 renderCellIndex = cellIndex,
                 renderRisk = cell.renderRisk,
                 heightContentType = cell.contentType.name,
+                renderPlan = cell.renderPlan,
                 renderFallback = {
                     DynamicRichHtmlPreviewBlock(
                         previewText = analysis.previewText,
@@ -408,6 +414,7 @@ private fun RichHtmlCellContent(
                     renderCellIndex = cellIndex,
                     renderRisk = cell.renderRisk,
                     heightContentType = cell.contentType.name,
+                    renderPlan = cell.renderPlan,
                     renderFallback = {
                         DynamicRichHtmlPreviewBlock(
                             previewText = analysis.previewText,
@@ -416,6 +423,14 @@ private fun RichHtmlCellContent(
                     },
                 )
             } else {
+                LaunchedEffect(cell.renderPlan) {
+                    RichHtmlRenderTelemetry.recordRichRenderPlan(
+                        cell.renderPlan.withRoute(
+                            route = RichRenderPlanRoute.InlineWebView,
+                            reason = "ComplexDynamicInlineWebView",
+                        )
+                    )
+                }
                 InlineDynamicWebViewBlock(
                     html = block.html,
                     previewText = analysis.previewText,

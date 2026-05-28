@@ -27,6 +27,7 @@ internal object RichHtmlRenderTelemetry {
     private val snapshotSamples = ArrayDeque<RichHtmlSnapshotTelemetrySample>()
     private val compileQueueSamples = ArrayDeque<RichHtmlCompileQueueSample>()
     private val framePressureSamples = ArrayDeque<RichFramePressureSample>()
+    private val richRenderPlanSamples = ArrayDeque<RichRenderPlanSample>()
 
     fun recordFallback(stage: RichHtmlFallbackStage, reason: String) {
         if (!BuildConfig.DEBUG) return
@@ -108,6 +109,32 @@ internal object RichHtmlRenderTelemetry {
         snapshotSamples.clear()
         compileQueueSamples.clear()
         framePressureSamples.clear()
+        richRenderPlanSamples.clear()
+    }
+
+    fun recordRichRenderPlan(plan: RichRenderPlan) {
+        if (!BuildConfig.DEBUG) return
+        val sample = RichRenderPlanSample.from(plan)
+        safeLog {
+            Log.d(
+                TAG,
+                "render-plan id=${sample.id} route=${sample.route} confidence=${sample.nativeConfidence} " +
+                    "reason=${sample.reason} sourceNodes=${sample.sourceNodeCount} " +
+                    "estimatedRenderBlocks=${sample.estimatedRenderBlockCount} " +
+                    "textFlowCandidates=${sample.textFlowCandidateCount} " +
+                    "snapshotIslandCandidates=${sample.snapshotIslandCandidateCount} " +
+                    "interactiveActions=${sample.interactiveActionCount} " +
+                    "visualHints=${sample.visualHints.sorted()} unsupported=${sample.unsupported.sorted()} " +
+                    "risk=${sample.riskScore} riskReasons=${sample.riskReasons.sorted()} " +
+                    "heightCache=${sample.heightCache}",
+            )
+        }
+        synchronized(lock) {
+            richRenderPlanSamples.addLast(sample)
+            while (richRenderPlanSamples.size > 96) {
+                richRenderPlanSamples.removeFirst()
+            }
+        }
     }
 
     fun recordCompileStart(id: String, viewportWidthDp: Float, length: Int) {
@@ -418,6 +445,29 @@ internal object RichHtmlRenderTelemetry {
         framePressureSamples.toList()
     }
 
+    fun richRenderPlanSnapshot(): List<RichRenderPlanSample> = synchronized(lock) {
+        richRenderPlanSamples.toList()
+    }
+
+    fun richRenderPlanSummary(): RichRenderPlanSummary = synchronized(lock) {
+        fun <T> Iterable<T>.countBy(name: (T) -> String): Map<String, Int> {
+            val result = linkedMapOf<String, Int>()
+            forEach { value ->
+                val key = name(value)
+                result[key] = (result[key] ?: 0) + 1
+            }
+            return result
+        }
+        RichRenderPlanSummary(
+            total = richRenderPlanSamples.size,
+            routes = richRenderPlanSamples.countBy { it.route },
+            nativeConfidence = richRenderPlanSamples.countBy { it.nativeConfidence },
+            heightCache = richRenderPlanSamples.countBy { it.heightCache },
+            maxRiskScore = richRenderPlanSamples.maxOfOrNull { it.riskScore } ?: 0,
+            maxEstimatedRenderBlockCount = richRenderPlanSamples.maxOfOrNull { it.estimatedRenderBlockCount } ?: 0,
+        )
+    }
+
     fun recentFramePressureWindow(
         nowMs: Long = SystemClock.uptimeMillis(),
         windowMs: Long = 900L,
@@ -511,6 +561,14 @@ internal object RichHtmlRenderTelemetry {
             "failureReasons=${summary.failureReasons}"
     }
 
+    fun richRenderPlanDebugSummary(): String {
+        if (!BuildConfig.DEBUG) return ""
+        val summary = richRenderPlanSummary()
+        return "render plan summary total=${summary.total} routes=${summary.routes} " +
+            "confidence=${summary.nativeConfidence} heightCache=${summary.heightCache} " +
+            "maxRisk=${summary.maxRiskScore} maxRenderBlocks=${summary.maxEstimatedRenderBlockCount}"
+    }
+
     private inline fun safeLog(block: () -> Unit) {
         runCatching(block)
     }
@@ -588,6 +646,53 @@ internal data class RichHtmlCompileQueueSample(
     val stage: String,
     val outcome: String?,
     val cellIndex: Int?,
+)
+
+internal data class RichRenderPlanSample(
+    val id: String,
+    val route: String,
+    val nativeConfidence: String,
+    val reason: String,
+    val htmlLength: Int,
+    val sourceNodeCount: Int,
+    val estimatedRenderBlockCount: Int,
+    val textFlowCandidateCount: Int,
+    val snapshotIslandCandidateCount: Int,
+    val interactiveActionCount: Int,
+    val visualHints: Set<String>,
+    val unsupported: Set<String>,
+    val riskScore: Int,
+    val riskReasons: Set<String>,
+    val heightCache: String,
+) {
+    companion object {
+        fun from(plan: RichRenderPlan): RichRenderPlanSample = RichRenderPlanSample(
+            id = plan.id,
+            route = plan.route.name,
+            nativeConfidence = plan.nativeConfidence.name,
+            reason = plan.reason,
+            htmlLength = plan.htmlLength,
+            sourceNodeCount = plan.sourceNodeCount,
+            estimatedRenderBlockCount = plan.estimatedRenderBlockCount,
+            textFlowCandidateCount = plan.textFlowCandidateCount,
+            snapshotIslandCandidateCount = plan.snapshotIslandCandidateCount,
+            interactiveActionCount = plan.interactiveActionCount,
+            visualHints = plan.visualHints.mapTo(linkedSetOf()) { it.name },
+            unsupported = plan.unsupported.mapTo(linkedSetOf()) { it.name },
+            riskScore = plan.riskScore,
+            riskReasons = plan.riskReasons,
+            heightCache = plan.heightCache.name,
+        )
+    }
+}
+
+internal data class RichRenderPlanSummary(
+    val total: Int,
+    val routes: Map<String, Int>,
+    val nativeConfidence: Map<String, Int>,
+    val heightCache: Map<String, Int>,
+    val maxRiskScore: Int,
+    val maxEstimatedRenderBlockCount: Int,
 )
 
 internal data class RichFramePressureSample(

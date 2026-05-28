@@ -92,6 +92,11 @@ internal sealed interface ChatRenderCell {
         override val blockIndex = textBlockIndex
         override val renderRisk = RenderRiskScore.fromHtml(block.html, analysis)
         override val estimatedHeightClass = heightClassForRichHtml(analysis, renderRisk)
+        val renderPlan = buildRichRenderPlan(
+            html = block.html,
+            analysis = analysis,
+            risk = renderRisk,
+        )
     }
 
     data class ProtocolCell(
@@ -305,13 +310,10 @@ internal data class RenderRiskScore(
             analysis: RichHtmlAnalysis = analyzeRichHtml(html),
             historicalFailure: Boolean = false,
         ): RenderRiskScore {
-            val nodeCount = HTML_TAG.findAll(html).count()
-            val tableCellCount = TABLE_CELL_TAG.findAll(html).count()
-            val svgPathChars = SVG_PATH_D_ATTR.findAll(html).sumOf { it.groupValues.getOrNull(2)?.length ?: 0 }
-            val svgCommandCount = SVG_COMMAND_TAG.findAll(html).count()
-            val animationCount = ANIMATION_HINT.findAll(html).count()
-            val visualHintCount = VISUAL_HINT.findAll(html).count()
-            val estimatedHeight = analysis.previewText.length * 2 + nodeCount * 4 + tableCellCount * 6
+            val metrics = inspectRichRenderEstimatorMetrics(html)
+            val estimatedHeight = analysis.previewText.length * 2 +
+                metrics.sourceNodeCount * 4 +
+                metrics.tableCellCount * 6
 
             var score = 0
             val reasons = linkedSetOf<String>()
@@ -322,22 +324,23 @@ internal data class RenderRiskScore(
             }
 
             add((html.length / 1_000).coerceAtMost(25), "htmlLength")
-            add((nodeCount / 40).coerceAtMost(20), "domNodes")
-            add((tableCellCount / 12).coerceAtMost(20), "tableCells")
-            add((svgPathChars / 1_500).coerceAtMost(25), "svgPathChars")
-            add((svgCommandCount / 24).coerceAtMost(20), "svgCommands")
-            add((animationCount * 12).coerceAtMost(24), "animations")
-            add((visualHintCount * 5).coerceAtMost(15), "visualHints")
+            add((metrics.sourceNodeCount / 40).coerceAtMost(20), "domNodes")
+            add((metrics.tableCellCount / 12).coerceAtMost(20), "tableCells")
+            add((metrics.svgPathChars / 1_500).coerceAtMost(25), "svgPathChars")
+            add((metrics.svgCommandCount / 24).coerceAtMost(20), "svgCommands")
+            add((metrics.animationHintCount * 12).coerceAtMost(24), "animations")
+            add((metrics.visualHintCount * 5).coerceAtMost(15), "visualHints")
             add((estimatedHeight / 600).coerceAtMost(12), "estimatedHeight")
             if (analysis.nativeConfidence == NativeConfidence.WebViewFallback) add(35, "nativeConfidence")
             if (analysis.kind == RichHtmlRenderKind.InteractiveStatic) add(12, "interactiveStatic")
             if (analysis.kind == RichHtmlRenderKind.ComplexDynamic) add(100, "complexDynamic")
             if (historicalFailure) add(100, "historicalFailure")
 
-            val runtimeDynamic = RUNTIME_DYNAMIC_HINT.containsMatchIn(html)
             val route = when {
-                analysis.kind == RichHtmlRenderKind.ComplexDynamic && !runtimeDynamic &&
-                    (svgPathChars > 8_000 || svgCommandCount > 128 || tableCellCount > 160) -> {
+                analysis.kind == RichHtmlRenderKind.ComplexDynamic && !metrics.runtimeDynamic &&
+                    (metrics.svgPathChars > 8_000 ||
+                        metrics.svgCommandCount > 128 ||
+                        metrics.tableCellCount > 160) -> {
                     RichContentRoute.Snapshot
                 }
                 analysis.kind == RichHtmlRenderKind.ComplexDynamic -> RichContentRoute.DynamicPreview
@@ -566,14 +569,3 @@ private fun heightClassForRichHtml(
         else -> EstimatedHeightClass.Small
     }
 }
-
-private val HTML_TAG = Regex("""<[^>]+>""")
-private val TABLE_CELL_TAG = Regex("""<\s*(td|th)\b""", RegexOption.IGNORE_CASE)
-private val SVG_COMMAND_TAG = Regex("""<\s*(path|rect|circle|ellipse|line|polyline|polygon|text)\b""", RegexOption.IGNORE_CASE)
-private val SVG_PATH_D_ATTR = Regex("""<\s*path\b[^>]*\sd\s*=\s*(['"])([\s\S]*?)\1""", RegexOption.IGNORE_CASE)
-private val ANIMATION_HINT = Regex("""(@keyframes|\banimation\s*:|\btransition\s*:|requestAnimationFrame)""", RegexOption.IGNORE_CASE)
-private val VISUAL_HINT = Regex("""(linear-gradient|radial-gradient|box-shadow|filter\s*:|clip-path|mask\s*:|mix-blend-mode)""", RegexOption.IGNORE_CASE)
-private val RUNTIME_DYNAMIC_HINT = Regex(
-    """(<\s*(script|canvas|video|audio|iframe|object|embed)\b|\brequestAnimationFrame\s*\(|\bsetInterval\s*\(|\bTHREE\s*\.|\bWebGLRenderer\b|\bmermaid\s*\.)""",
-    RegexOption.IGNORE_CASE,
-)

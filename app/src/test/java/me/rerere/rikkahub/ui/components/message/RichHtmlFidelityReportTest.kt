@@ -4,10 +4,8 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import me.rerere.rikkahub.ui.components.richtext.RichBlock
 import me.rerere.rikkahub.ui.components.richtext.RichContainerBlock
 import me.rerere.rikkahub.ui.components.richtext.RichHtmlCompiler
-import me.rerere.rikkahub.ui.components.richtext.RichSvgBlock
 import org.jsoup.Jsoup
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -25,8 +23,12 @@ class RichHtmlFidelityReportTest {
         assertTrue("Expected at least one CSS property in report", reports.sumOf { it.cssProperties.values.sum() } > 0)
         assertTrue("Expected at least one tag in report", reports.sumOf { it.tags.values.sum() } > 0)
         assertTrue("Expected compiled blocks", reports.sumOf { it.blockCount } > 0)
+        assertTrue("Expected plan source nodes", reports.sumOf { it.planSourceNodeCount } > 0)
+        assertTrue("Expected plan route field", reports.any { it.planRoute.isNotBlank() })
 
         val serialized = reports.joinToString("\n") { it.toMetadataLine() }
+        assertTrue("Report should include plan route", serialized.contains("planRoute="))
+        assertTrue("Report should include plan estimated render blocks", serialized.contains("planEstimatedRenderBlocks="))
         loadRenderSeedAssistantTexts().forEach { sourceText ->
             sourceText.lineSequence()
                 .map { it.trim() }
@@ -78,7 +80,15 @@ class RichHtmlFidelityReportTest {
 
     private fun buildReport(index: Int, html: String): FidelityReport {
         val start = System.nanoTime()
+        val analysis = analyzeRichHtml(html)
+        val risk = RenderRiskScore.fromHtml(html, analysis)
         val model = RichHtmlCompiler.compile(html)
+        val plan = buildRichRenderPlan(
+            html = html,
+            analysis = analysis,
+            risk = risk,
+            model = model,
+        )
         val compileMs = (System.nanoTime() - start) / 1_000_000
         val document = Jsoup.parseBodyFragment(html)
         val tags = document.body().select("*")
@@ -117,16 +127,18 @@ class RichHtmlFidelityReportTest {
                 "unsupportedProperty" to model.animationStats.unsupportedPropertyCount,
             ).filterValues { it > 0 },
             compileMs = compileMs,
-            blockCount = model.blocks.sumOf(::countBlocks),
+            blockCount = model.blocks.sumOf(::countRichRenderBlocks),
+            planRoute = plan.route.name,
+            planConfidence = plan.nativeConfidence.name,
+            planReason = plan.reason,
+            planSourceNodeCount = plan.sourceNodeCount,
+            planEstimatedRenderBlockCount = plan.estimatedRenderBlockCount,
+            planTextFlowCandidateCount = plan.textFlowCandidateCount,
+            planSnapshotIslandCandidateCount = plan.snapshotIslandCandidateCount,
+            planInteractiveActionCount = plan.interactiveActionCount,
+            planVisualHintCount = plan.visualHints.size,
+            planUnsupportedCount = plan.unsupported.size,
         )
-    }
-
-    private fun countBlocks(block: RichBlock): Int {
-        return when (block) {
-            is RichContainerBlock -> 1 + block.children.sumOf(::countBlocks)
-            is RichSvgBlock -> 1 + block.model.commands.size
-            else -> 1
-        }
     }
 
     private fun loadRenderSeedAssistantTexts(): List<String> {
@@ -158,6 +170,16 @@ private data class FidelityReport(
     val animationCounts: Map<String, Int>,
     val compileMs: Long,
     val blockCount: Int,
+    val planRoute: String,
+    val planConfidence: String,
+    val planReason: String,
+    val planSourceNodeCount: Int,
+    val planEstimatedRenderBlockCount: Int,
+    val planTextFlowCandidateCount: Int,
+    val planSnapshotIslandCandidateCount: Int,
+    val planInteractiveActionCount: Int,
+    val planVisualHintCount: Int,
+    val planUnsupportedCount: Int,
 ) {
     fun toMetadataLine(): String {
         return listOf(
@@ -171,6 +193,16 @@ private data class FidelityReport(
             "animation=${animationCounts.toSortedMap()}",
             "compileMs=$compileMs",
             "blocks=$blockCount",
+            "planRoute=$planRoute",
+            "planConfidence=$planConfidence",
+            "planReason=$planReason",
+            "planSourceNodes=$planSourceNodeCount",
+            "planEstimatedRenderBlocks=$planEstimatedRenderBlockCount",
+            "planTextFlowCandidates=$planTextFlowCandidateCount",
+            "planSnapshotIslandCandidates=$planSnapshotIslandCandidateCount",
+            "planInteractiveActions=$planInteractiveActionCount",
+            "planVisualHintCount=$planVisualHintCount",
+            "planUnsupportedCount=$planUnsupportedCount",
         ).joinToString(" ")
     }
 }

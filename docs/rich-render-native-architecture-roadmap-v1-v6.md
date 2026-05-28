@@ -326,6 +326,8 @@ Goal:
 
 Reduce native renderer tree depth and improve browser-like text fidelity.
 
+Detailed implementation requirements: `docs/rich-render-v2-ast-textflow-requirements.md`.
+
 Requirements:
 
 - Add `RichContentAst` package.
@@ -572,4 +574,3 @@ RichRenderPlan is the contract.
 Renderer backends preserve fidelity by capability.
 Telemetry decides priorities from real chat data.
 ```
-

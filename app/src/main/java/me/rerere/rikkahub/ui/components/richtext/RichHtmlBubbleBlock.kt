@@ -28,12 +28,16 @@ import kotlinx.coroutines.TimeoutCancellationException
 import me.rerere.rikkahub.ui.components.message.RichHtmlFallbackStage
 import me.rerere.rikkahub.ui.components.message.RichHtmlRenderKind
 import me.rerere.rikkahub.ui.components.message.RichHtmlRenderTelemetry
+import me.rerere.rikkahub.ui.components.message.RichRenderHeightCacheState
+import me.rerere.rikkahub.ui.components.message.RichRenderPlan
+import me.rerere.rikkahub.ui.components.message.RichRenderPlanRoute
 import me.rerere.rikkahub.ui.components.message.RichHtmlSnapshotPolicy
 import me.rerere.rikkahub.ui.components.message.RichHtmlSnapshotRoute
 import me.rerere.rikkahub.ui.components.message.RichHtmlSafetyReason
 import me.rerere.rikkahub.ui.components.message.RenderRiskScore
 import me.rerere.rikkahub.ui.components.message.RichContentRoute
 import me.rerere.rikkahub.ui.components.message.analyzeRichHtml
+import me.rerere.rikkahub.ui.components.message.buildRichRenderPlan
 import me.rerere.rikkahub.ui.components.message.inspectRichHtmlSafety
 import me.rerere.rikkahub.ui.components.render.renderTextCacheKey
 import java.util.concurrent.atomic.AtomicBoolean
@@ -50,6 +54,7 @@ internal fun RichHtmlBubbleBlock(
     renderCellIndex: Int? = null,
     renderRisk: RenderRiskScore? = null,
     heightContentType: String = "rich-html",
+    renderPlan: RichRenderPlan? = null,
 ) {
     BoxWithConstraints(modifier = modifier.testTag("rich-html-bubble")) {
         val rootModifier = Modifier.fillMaxWidth()
@@ -66,11 +71,28 @@ internal fun RichHtmlBubbleBlock(
         }
         val analysis = remember(html) { analyzeRichHtml(html) }
         val renderId = remember(html) { renderTextCacheKey(html) }
+        val effectiveRisk = remember(html, analysis, renderRisk) {
+            renderRisk ?: RenderRiskScore.fromHtml(html, analysis)
+        }
         val density = LocalDensity.current
         val heightKey = remember(renderId, viewportWidthDp, density.fontScale, heightContentType) {
             RichHtmlHeightCache.key(renderId, viewportWidthDp, density.fontScale, heightContentType)
         }
         val cachedHeightPx = remember(heightKey) { RichHtmlHeightCache.get(heightKey) }
+        val heightCacheState = remember(transientCache, cachedHeightPx) {
+            when {
+                transientCache -> RichRenderHeightCacheState.Unknown
+                cachedHeightPx != null -> RichRenderHeightCacheState.Hit
+                else -> RichRenderHeightCacheState.Miss
+            }
+        }
+        val baseRenderPlan = remember(renderPlan, html, analysis, effectiveRisk, heightCacheState) {
+            (renderPlan ?: buildRichRenderPlan(
+                html = html,
+                analysis = analysis,
+                risk = effectiveRisk,
+            )).copy(heightCache = heightCacheState)
+        }
         LaunchedEffect(renderId, heightContentType, cachedHeightPx) {
             RichHtmlRenderTelemetry.recordHeightCache(
                 id = renderId,
@@ -109,7 +131,7 @@ internal fun RichHtmlBubbleBlock(
                     analysis = analysis,
                     scrollState = scrollState,
                     cellIndex = renderCellIndex,
-                    risk = renderRisk,
+                    risk = effectiveRisk,
                 )
             }
         }
@@ -137,7 +159,7 @@ internal fun RichHtmlBubbleBlock(
 
         @Composable
         fun SnapshotOrFallback(reason: String) {
-            val forcedSnapshot = renderRisk?.route == RichContentRoute.Snapshot
+            val forcedSnapshot = effectiveRisk.route == RichContentRoute.Snapshot
             if (!snapshotAllowed || (analysis.kind == RichHtmlRenderKind.ComplexDynamic && !forcedSnapshot)) {
                 fallbackContent()
                 return
@@ -160,6 +182,12 @@ internal fun RichHtmlBubbleBlock(
             !renderAdmission.nativeAllowed &&
                 (renderAdmission.reason == "circuit-breaker" ||
                     renderAdmission.reason == "risk-route:${RichContentRoute.Snapshot.name}") -> {
+                RecordRichRenderPlanEffect(
+                    baseRenderPlan.withRoute(
+                        route = RichRenderPlanRoute.Snapshot,
+                        reason = "NativeAdmission:${renderAdmission.reason}",
+                    )
+                )
                 SnapshotOrFallback(
                     reason = renderAdmission.reason +
                         RichHtmlRenderCircuitBreaker.failureReason(renderId)?.let { ":$it" }.orEmpty()
@@ -167,6 +195,12 @@ internal fun RichHtmlBubbleBlock(
             }
 
             !renderAdmission.nativeAllowed -> {
+                RecordRichRenderPlanEffect(
+                    baseRenderPlan.withRoute(
+                        route = RichRenderPlanRoute.Lightweight,
+                        reason = "NativeAdmission:${renderAdmission.reason}",
+                    )
+                )
                 LightweightRichHtmlPlaceholder(
                     previewText = analysis.previewText,
                     reason = renderAdmission.reason,
@@ -175,8 +209,22 @@ internal fun RichHtmlBubbleBlock(
                 )
             }
 
-            beforeCompileDecision.route == RichHtmlSnapshotRoute.DynamicPreview -> fallbackContent()
+            beforeCompileDecision.route == RichHtmlSnapshotRoute.DynamicPreview -> {
+                RecordRichRenderPlanEffect(
+                    baseRenderPlan.withRoute(
+                        route = RichRenderPlanRoute.DynamicPreview,
+                        reason = beforeCompileDecision.reason.ifBlank { "BeforeCompile:DynamicPreview" },
+                    )
+                )
+                fallbackContent()
+            }
             snapshotAllowed && beforeCompileDecision.route == RichHtmlSnapshotRoute.Snapshot -> {
+                RecordRichRenderPlanEffect(
+                    baseRenderPlan.withRoute(
+                        route = RichRenderPlanRoute.Snapshot,
+                        reason = beforeCompileDecision.reason.ifBlank { "BeforeCompile:Snapshot" },
+                    )
+                )
                 SnapshotOrFallback(beforeCompileDecision.reason)
             }
 
@@ -199,9 +247,42 @@ internal fun RichHtmlBubbleBlock(
                     },
                 )
                 when {
-                    failed -> SnapshotOrFallback(RichHtmlSnapshotPolicy.nativeFailure(analysis).reason)
-                    model?.unsupported?.contains(RichUnsupportedReason.UnsafeHtml) == true -> fallbackContent()
+                    failed -> {
+                        val failureDecision = RichHtmlSnapshotPolicy.nativeFailure(analysis)
+                        RecordRichRenderPlanEffect(
+                            baseRenderPlan.withRoute(
+                                route = failureDecision.route.toRichRenderPlanRoute(),
+                                reason = failureDecision.reason.ifBlank { "NativeFailure" },
+                            )
+                        )
+                        SnapshotOrFallback(failureDecision.reason)
+                    }
+                    model?.unsupported?.contains(RichUnsupportedReason.UnsafeHtml) == true -> {
+                        val unsafeModel = model
+                        val unsafePlan = remember(html, analysis, effectiveRisk, unsafeModel, heightCacheState) {
+                            buildRichRenderPlan(
+                                html = html,
+                                analysis = analysis,
+                                risk = effectiveRisk,
+                                model = unsafeModel,
+                                heightCacheState = heightCacheState,
+                            )
+                        }
+                        RecordRichRenderPlanEffect(
+                            unsafePlan.withRoute(
+                                route = RichRenderPlanRoute.DynamicPreview,
+                                reason = "UnsafeHtml",
+                            )
+                        )
+                        fallbackContent()
+                    }
                     model == null -> {
+                        RecordRichRenderPlanEffect(
+                            baseRenderPlan.withRoute(
+                                route = RichRenderPlanRoute.Lightweight,
+                                reason = "CompilePending",
+                            )
+                        )
                         PreparingRichHtmlPlaceholder(
                             previewText = analysis.previewText,
                             cachedHeightPx = cachedHeightPx,
@@ -210,12 +291,37 @@ internal fun RichHtmlBubbleBlock(
                     }
 
                     else -> {
+                        val compiledPlan = remember(html, analysis, effectiveRisk, model, heightCacheState) {
+                            buildRichRenderPlan(
+                                html = html,
+                                analysis = analysis,
+                                risk = effectiveRisk,
+                                model = model,
+                                heightCacheState = heightCacheState,
+                            )
+                        }
                         val snapshotDecision = remember(analysis, model) {
                             RichHtmlSnapshotPolicy.afterCompile(analysis, model)
                         }
                         when (snapshotDecision.route) {
-                            RichHtmlSnapshotRoute.DynamicPreview -> fallbackContent()
-                            RichHtmlSnapshotRoute.Snapshot -> SnapshotOrFallback(snapshotDecision.reason)
+                            RichHtmlSnapshotRoute.DynamicPreview -> {
+                                RecordRichRenderPlanEffect(
+                                    compiledPlan.withRoute(
+                                        route = RichRenderPlanRoute.DynamicPreview,
+                                        reason = snapshotDecision.reason.ifBlank { "AfterCompile:DynamicPreview" },
+                                    )
+                                )
+                                fallbackContent()
+                            }
+                            RichHtmlSnapshotRoute.Snapshot -> {
+                                RecordRichRenderPlanEffect(
+                                    compiledPlan.withRoute(
+                                        route = RichRenderPlanRoute.Snapshot,
+                                        reason = snapshotDecision.reason.ifBlank { "AfterCompile:Snapshot" },
+                                    )
+                                )
+                                SnapshotOrFallback(snapshotDecision.reason)
+                            }
                             RichHtmlSnapshotRoute.Native -> {
                                 val nativePresentationAllowed = rememberNativePresentationAllowed(
                                     renderId = renderId,
@@ -225,6 +331,12 @@ internal fun RichHtmlBubbleBlock(
                                     scrollState = scrollState,
                                 )
                                 if (!nativePresentationAllowed) {
+                                    RecordRichRenderPlanEffect(
+                                        compiledPlan.withRoute(
+                                            route = RichRenderPlanRoute.Lightweight,
+                                            reason = "NativePresentationDeferred",
+                                        )
+                                    )
                                     PreparingRichHtmlPlaceholder(
                                         previewText = analysis.previewText,
                                         cachedHeightPx = cachedHeightPx,
@@ -232,6 +344,7 @@ internal fun RichHtmlBubbleBlock(
                                     )
                                     return@BoxWithConstraints
                                 }
+                                RecordRichRenderPlanEffect(compiledPlan)
                                 val nativeFailureDecision = remember(analysis) {
                                     RichHtmlSnapshotPolicy.nativeFailure(analysis)
                                 }
@@ -263,6 +376,13 @@ internal fun RichHtmlBubbleBlock(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun RecordRichRenderPlanEffect(plan: RichRenderPlan) {
+    LaunchedEffect(plan) {
+        RichHtmlRenderTelemetry.recordRichRenderPlan(plan)
     }
 }
 
@@ -574,6 +694,12 @@ private fun RichHtmlSafetyReason?.isDangerousForSnapshot(): Boolean {
         RichHtmlSafetyReason.UnsafeUrl,
         RichHtmlSafetyReason.ParseFailure,
     )
+}
+
+private fun RichHtmlSnapshotRoute.toRichRenderPlanRoute(): RichRenderPlanRoute = when (this) {
+    RichHtmlSnapshotRoute.Native -> RichRenderPlanRoute.Native
+    RichHtmlSnapshotRoute.Snapshot -> RichRenderPlanRoute.Snapshot
+    RichHtmlSnapshotRoute.DynamicPreview -> RichRenderPlanRoute.DynamicPreview
 }
 
 private fun Throwable.isFatalRichHtmlThrowable(): Boolean {
