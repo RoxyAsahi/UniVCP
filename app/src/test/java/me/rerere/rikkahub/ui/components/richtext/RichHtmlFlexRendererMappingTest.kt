@@ -7,7 +7,11 @@ import androidx.compose.foundation.layout.FlexAlignSelf
 import androidx.compose.foundation.layout.FlexDirection
 import androidx.compose.foundation.layout.FlexJustifyContent
 import androidx.compose.foundation.layout.FlexWrap
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 @OptIn(ExperimentalFlexBoxApi::class)
@@ -34,5 +38,23 @@ class RichHtmlFlexRendererMappingTest {
         assertEquals(FlexAlignItems.Baseline, style.toFlexAlignItems())
         assertEquals(FlexAlignSelf.Baseline, RichAlign.Baseline.toFlexAlignSelf())
         assertEquals(FlexAlignContent.SpaceAround, style.toFlexAlignContent())
+    }
+
+    @Test
+    fun `single centered flex text child receives text alignment compensation`() {
+        val parent = ComputedStyle.Initial.copy(
+            display = RichDisplay.InlineFlex,
+            justifyContent = RichJustify.Center,
+            alignItems = RichAlign.Center,
+        )
+        val child = RichTextBlock(
+            blockId = "check",
+            style = ComputedStyle.Initial.copy(display = RichDisplay.Inline),
+            content = AnnotatedString("✓"),
+        )
+
+        assertEquals(TextAlign.Center, parent.flexTextAlignOverride(child, childCount = 1))
+        assertNull(parent.flexTextAlignOverride(child.copy(style = child.style.copy(width = RichSize.DpSize(24.dp))), 1))
+        assertNull(parent.flexTextAlignOverride(child, childCount = 2))
     }
 }

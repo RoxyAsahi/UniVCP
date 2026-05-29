@@ -148,6 +148,7 @@ private val LocalRichRenderColorDefaults = staticCompositionLocalOf { RichRender
 private val LocalRichEffectiveBackground = staticCompositionLocalOf<Color?> { null }
 private val LocalRichAnimationHostId = staticCompositionLocalOf { "rich-html" }
 private val LocalRichNativeAnimationsEnabled = staticCompositionLocalOf { true }
+private val LocalRichFlexTextAlignOverride = staticCompositionLocalOf<TextAlign?> { null }
 private val MAX_SAFE_CSS_BLUR_RADIUS = 12.dp
 
 @OptIn(ExperimentalLayoutApi::class, ExperimentalFlexBoxApi::class)
@@ -397,19 +398,23 @@ private fun RichFlexBoxChildren(
         },
     ) {
         children.forEach { child ->
-            RichBlockView(
-                block = child,
-                onSendInput = onSendInput,
-                modifier = Modifier
-                    .richFlexItemConstraints(child.style, parentStyle)
-                    .flex {
-                        order(child.style.order)
-                        grow(child.style.flexGrow.coerceAtLeast(0f))
-                        shrink(child.style.flexShrink.coerceAtLeast(0f))
-                        child.style.toEffectiveFlexBasis()?.let(::basis)
-                        child.style.alignSelf?.let { alignSelf(it.toFlexAlignSelf()) }
-                    },
-            )
+            CompositionLocalProvider(
+                LocalRichFlexTextAlignOverride provides parentStyle.flexTextAlignOverride(child, children.size),
+            ) {
+                RichBlockView(
+                    block = child,
+                    onSendInput = onSendInput,
+                    modifier = Modifier
+                        .richFlexItemConstraints(child.style, parentStyle)
+                        .flex {
+                            order(child.style.order)
+                            grow(child.style.flexGrow.coerceAtLeast(0f))
+                            shrink(child.style.flexShrink.coerceAtLeast(0f))
+                            child.style.toEffectiveFlexBasis()?.let(::basis)
+                            child.style.alignSelf?.let { alignSelf(it.toFlexAlignSelf()) }
+                        },
+                )
+            }
         }
     }
 }
@@ -477,9 +482,10 @@ private fun RichTextBlockView(
 ) {
     StyledContainer(block.style, modifier = modifier, root = false, animationKey = block.blockId, inline = inline) {
         val textClipBrush = block.style.textClipBrush()
+        val flexTextAlignOverride = LocalRichFlexTextAlignOverride.current
         val textStyle = LocalTextStyle.current.merge(
             block.style.toTextStyle(if (textClipBrush != null) Color.White else LocalContentColor.current)
-        )
+        ).withFlexTextAlignOverride(block.style, flexTextAlignOverride)
         val text = block.content
         val marker = block.listMarker
         val markerImage = block.style.listStyleImage
@@ -2149,6 +2155,19 @@ private fun RichFlexDirection.isRowAxis(): Boolean {
 
 private fun RichFlexDirection.isColumnAxis(): Boolean {
     return this == RichFlexDirection.Column || this == RichFlexDirection.ColumnReverse
+}
+
+internal fun ComputedStyle.flexTextAlignOverride(child: RichBlock, childCount: Int): TextAlign? {
+    if (childCount != 1 || justifyContent != RichJustify.Center) return null
+    val text = child as? RichTextBlock ?: return null
+    if (text.style.textAlign != TextAlign.Unspecified) return null
+    if (text.style.width != RichSize.Auto || text.style.flexBasis != RichSize.Auto || text.style.flexGrow > 0f) return null
+    return TextAlign.Center
+}
+
+private fun TextStyle.withFlexTextAlignOverride(style: ComputedStyle, override: TextAlign?): TextStyle {
+    if (override == null || style.textAlign != TextAlign.Unspecified || textAlign != TextAlign.Unspecified) return this
+    return copy(textAlign = override)
 }
 
 @OptIn(ExperimentalFlexBoxApi::class)

@@ -63,7 +63,9 @@ internal sealed interface ChatRenderCell {
         override val stableKey = "message:${meta.node.id}:part:$partIndex:${stableMessageTextBlockKey(
             meta.message.id.toString(),
             textBlockIndex,
-            MessageTextBlock.Markdown(text),
+            MessageTextBlock.Markdown(
+                if (meta.loading) "streaming-markdown-block-$textBlockIndex" else text,
+            ),
         )}"
         override val contentType = ChatRenderCellContentType.MarkdownCell
         override val messageId = meta.message.id
@@ -232,6 +234,12 @@ internal data class ChatRenderMessageMeta(
     val assistant: Assistant?,
 )
 
+internal data class ChatStreamingTextKey(
+    val nodeId: Uuid,
+    val messageId: Uuid,
+    val partIndex: Int,
+)
+
 internal fun ChatRenderCell.messageMetaOrNull(): ChatRenderMessageMeta? = when (this) {
     is ChatRenderCell.AvatarCell -> meta
     is ChatRenderCell.UserBubbleCell -> meta
@@ -365,6 +373,7 @@ internal fun buildChatRenderCells(
     conversation: Conversation,
     settings: Settings,
     loading: Boolean,
+    streamingTextOverrides: Map<ChatStreamingTextKey, String> = emptyMap(),
 ): List<ChatRenderCell> {
     val assistant = settings.getAssistantById(conversation.assistantId)
     val cells = mutableListOf<ChatRenderCell>()
@@ -379,13 +388,16 @@ internal fun buildChatRenderCells(
             model = message.modelId?.let { settings.findModelById(it) },
             assistant = assistant,
         )
-        cells += buildMessageCells(meta)
+        cells += buildMessageCells(meta, streamingTextOverrides)
     }
     cells += ChatRenderCell.BottomSpacerCell
     return cells
 }
 
-private fun buildMessageCells(meta: ChatRenderMessageMeta): List<ChatRenderCell> {
+private fun buildMessageCells(
+    meta: ChatRenderMessageMeta,
+    streamingTextOverrides: Map<ChatStreamingTextKey, String>,
+): List<ChatRenderCell> {
     val message = meta.message
     val cells = mutableListOf<ChatRenderCell>()
     if (!message.parts.isEmptyUIMessage()) {
@@ -410,6 +422,7 @@ private fun buildMessageCells(meta: ChatRenderMessageMeta): List<ChatRenderCell>
                     meta = meta,
                     part = block.part,
                     partIndex = block.index,
+                    streamingTextOverrides = streamingTextOverrides,
                 )
             }
         }
@@ -432,9 +445,10 @@ private fun buildContentCells(
     meta: ChatRenderMessageMeta,
     part: UIMessagePart,
     partIndex: Int,
+    streamingTextOverrides: Map<ChatStreamingTextKey, String>,
 ): List<ChatRenderCell> {
     return when (part) {
-        is UIMessagePart.Text -> buildTextCells(meta, part, partIndex)
+        is UIMessagePart.Text -> buildTextCells(meta, part, partIndex, streamingTextOverrides)
         is UIMessagePart.Image,
         is UIMessagePart.Video,
         is UIMessagePart.Audio,
@@ -448,6 +462,7 @@ private fun buildTextCells(
     meta: ChatRenderMessageMeta,
     part: UIMessagePart.Text,
     partIndex: Int,
+    streamingTextOverrides: Map<ChatStreamingTextKey, String>,
 ): List<ChatRenderCell> {
     if (meta.message.role == MessageRole.USER) {
         val text = part.text.replaceRegexes(
@@ -458,7 +473,14 @@ private fun buildTextCells(
         return listOf(ChatRenderCell.UserBubbleCell(meta = meta, partIndex = partIndex, text = text))
     }
 
-    val assistantContent = part.text.replaceRegexes(
+    val sourceText = streamingTextOverrides[
+        ChatStreamingTextKey(
+            nodeId = meta.node.id,
+            messageId = meta.message.id,
+            partIndex = partIndex,
+        )
+    ] ?: part.text
+    val assistantContent = sourceText.replaceRegexes(
         assistant = meta.assistant,
         scope = AssistantAffectScope.ASSISTANT,
         visual = true,

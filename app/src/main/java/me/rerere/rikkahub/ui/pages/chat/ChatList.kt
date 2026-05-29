@@ -129,6 +129,11 @@ private const val LoadingIndicatorKey = "LoadingIndicator"
 private const val ScrollBottomKey = "ScrollBottomKey"
 private val ChatListContentPadding = 16.dp
 
+private data class ChatAutoScrollSnapshot(
+    val totalItemsCount: Int,
+    val alreadyAtBottom: Boolean,
+)
+
 @Composable
 internal fun ChatList(
     innerPadding: PaddingValues,
@@ -298,14 +303,24 @@ private fun ChatListNormal(
     ) {
         // 自动滚动到底部
         if (settings.displaySetting.enableAutoScroll) {
-            LaunchedEffect(state) {
-                snapshotFlow { state.layoutInfo.visibleItemsInfo }.collect { visibleItemsInfo ->
-                    // println("is bottom = ${visibleItemsInfo.isAtBottom()}, scroll = ${state.isScrollInProgress}, can_scroll = ${state.canScrollForward}, loading = $loading")
-                    if (!state.isScrollInProgress && loadingState) {
-                        if (visibleItemsInfo.isAtBottom()) {
-                            state.requestScrollToItem((state.layoutInfo.totalItemsCount - 1).coerceAtLeast(0))
-                            // Log.i(TAG, "ChatList: scroll to ${conversationUpdated.messageNodes.lastIndex}")
-                        }
+            LaunchedEffect(state, loading) {
+                if (!loading) return@LaunchedEffect
+                var requestedItemCount = -1
+                snapshotFlow {
+                    val visibleItemsInfo = state.layoutInfo.visibleItemsInfo
+                    ChatAutoScrollSnapshot(
+                        totalItemsCount = state.layoutInfo.totalItemsCount,
+                        alreadyAtBottom = visibleItemsInfo.isAtBottom(),
+                    )
+                }.distinctUntilChanged().collect { snapshot ->
+                    if (
+                        !state.isScrollInProgress &&
+                        snapshot.alreadyAtBottom &&
+                        snapshot.totalItemsCount > 0 &&
+                        snapshot.totalItemsCount != requestedItemCount
+                    ) {
+                        state.requestScrollToItem((snapshot.totalItemsCount - 1).coerceAtLeast(0))
+                        requestedItemCount = snapshot.totalItemsCount
                     }
                 }
             }

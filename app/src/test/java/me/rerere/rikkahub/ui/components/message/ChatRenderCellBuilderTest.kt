@@ -101,6 +101,60 @@ class ChatRenderCellBuilderTest {
         assertEquals(RichContentRoute.Snapshot, cell.renderRisk.route)
     }
 
+    @Test
+    fun `streaming markdown cell key stays stable across text increments`() {
+        val message = UIMessage.assistant("hello")
+        val node = MessageNode.of(message)
+        val first = Conversation.ofId(
+            id = Uuid.random(),
+            messages = listOf(node),
+        )
+        val second = first.copy(
+            messageNodes = listOf(
+                node.copy(
+                    messages = listOf(
+                        message.copy(parts = listOf(UIMessagePart.Text("hello world"))),
+                    ),
+                ),
+            ),
+        )
+
+        val firstKey = buildChatRenderCells(first, Settings(), loading = true)
+            .filterIsInstance<ChatRenderCell.MarkdownCell>()
+            .single()
+            .stableKey
+        val secondKey = buildChatRenderCells(second, Settings(), loading = true)
+            .filterIsInstance<ChatRenderCell.MarkdownCell>()
+            .single()
+            .stableKey
+
+        assertEquals(firstKey, secondKey)
+    }
+
+    @Test
+    fun `streaming text override feeds stable content into active assistant cell`() {
+        val message = UIMessage.assistant("hello world")
+        val node = MessageNode.of(message)
+        val conversation = Conversation.ofId(
+            id = Uuid.random(),
+            messages = listOf(node),
+        )
+        val key = ChatStreamingTextKey(
+            nodeId = node.id,
+            messageId = message.id,
+            partIndex = 0,
+        )
+
+        val cell = buildChatRenderCells(
+            conversation = conversation,
+            settings = Settings(),
+            loading = true,
+            streamingTextOverrides = mapOf(key to "hello"),
+        ).filterIsInstance<ChatRenderCell.MarkdownCell>().single()
+
+        assertEquals("hello", cell.text)
+    }
+
     private fun conversationOf(message: UIMessage): Conversation {
         return Conversation.ofId(
             id = Uuid.random(),

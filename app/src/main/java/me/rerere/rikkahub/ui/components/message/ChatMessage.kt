@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -89,6 +90,7 @@ import me.rerere.rikkahub.data.model.MessageNode
 import me.rerere.rikkahub.data.model.replaceRegexes
 import me.rerere.rikkahub.ui.components.richtext.MarkdownBlock
 import me.rerere.rikkahub.ui.components.richtext.RichHtmlBubbleBlock
+import me.rerere.rikkahub.ui.components.richtext.SimpleHtmlBlock
 import me.rerere.rikkahub.ui.components.richtext.ZoomableAsyncImage
 import me.rerere.rikkahub.ui.components.richtext.buildMarkdownPreviewHtml
 import me.rerere.rikkahub.ui.components.ui.ChainOfThought
@@ -368,35 +370,10 @@ private fun AssistantTextBlocks(
                             val previewAnalysis = remember(previewHtml) {
                                 previewHtml?.let(::analyzeRichHtml)
                             }
-                            when (previewAnalysis?.kind) {
-                                RichHtmlRenderKind.NativeStatic,
-                                RichHtmlRenderKind.InteractiveStatic -> {
-                                    if (previewHtml != null) {
-                                        RichHtmlBubbleBlock(
-                                            html = previewHtml,
-                                            onSendInput = onBubbleInput,
-                                            transientCache = true,
-                                            enableSnapshot = false,
-                                            renderFallback = {
-                                                StreamingRichHtmlPlaceholder(
-                                                    previewText = previewAnalysis.previewText.ifBlank { analysis.previewText },
-                                                )
-                                            },
-                                        )
-                                    } else {
-                                        StreamingRichHtmlPlaceholder(
-                                            previewText = analysis.previewText,
-                                        )
-                                    }
-                                }
-
-                                RichHtmlRenderKind.ComplexDynamic,
-                                null -> {
-                                    StreamingRichHtmlPlaceholder(
-                                        previewText = previewAnalysis?.previewText ?: analysis.previewText,
-                                    )
-                                }
-                            }
+                            StreamingRichHtmlPlaceholder(
+                                previewText = previewAnalysis?.previewText ?: analysis.previewText,
+                                previewHtml = previewHtml,
+                            )
                         } else when (analysis.kind) {
                             RichHtmlRenderKind.NativeStatic,
                             RichHtmlRenderKind.InteractiveStatic -> {
@@ -599,40 +576,24 @@ private fun rememberStreamingRenderText(
 @Composable
 internal fun StreamingRichHtmlPlaceholder(
     previewText: String,
+    previewHtml: String? = null,
 ) {
-    Surface(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .height(156.dp),
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f),
-        border = androidx.compose.foundation.BorderStroke(
-            width = 1.dp,
-            color = MaterialTheme.colorScheme.outlineVariant,
-        ),
+            .heightIn(max = 360.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
+        val stablePreviewHtml = previewHtml?.takeIf { it.isNotBlank() }
+        if (stablePreviewHtml != null) {
+            SimpleHtmlBlock(html = stablePreviewHtml)
+        } else {
             Text(
-                text = "富 HTML 气泡生成中",
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.primary,
-            )
-            Text(
-                text = previewText.ifBlank { "正在等待完整容器闭合，完成后会切换为稳定渲染。" },
+                text = previewText.ifBlank { "正在接收富内容..." },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 3,
+                maxLines = 4,
                 overflow = TextOverflow.Ellipsis,
-            )
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(58.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .shimmer(isLoading = true),
             )
         }
     }

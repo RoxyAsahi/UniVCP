@@ -345,40 +345,10 @@ private fun RichHtmlCellContent(
         val previewAnalysis = remember(previewHtml) {
             previewHtml?.let(::analyzeRichHtml)
         }
-        when (previewAnalysis?.kind) {
-            RichHtmlRenderKind.NativeStatic,
-            RichHtmlRenderKind.InteractiveStatic -> {
-                if (previewHtml != null) {
-                    RichHtmlBubbleBlock(
-                        html = previewHtml,
-                        onSendInput = onBubbleInput,
-                        transientCache = true,
-                        enableSnapshot = false,
-                        renderCellIndex = cellIndex,
-                        renderRisk = cell.renderRisk,
-                        heightContentType = cell.contentType.name,
-                        renderPlan = buildRichRenderPlan(
-                            html = previewHtml,
-                            analysis = previewAnalysis,
-                            risk = RenderRiskScore.fromHtml(previewHtml, previewAnalysis),
-                            includeStructuralReport = false,
-                        ),
-                        renderFallback = {
-                            StreamingRichHtmlPlaceholder(
-                                previewText = previewAnalysis.previewText.ifBlank { analysis.previewText },
-                            )
-                        },
-                    )
-                } else {
-                    StreamingRichHtmlPlaceholder(previewText = analysis.previewText)
-                }
-            }
-
-            RichHtmlRenderKind.ComplexDynamic,
-            null -> StreamingRichHtmlPlaceholder(
-                previewText = previewAnalysis?.previewText ?: analysis.previewText,
-            )
-        }
+        StreamingRichHtmlPlaceholder(
+            previewText = previewAnalysis?.previewText ?: analysis.previewText,
+            previewHtml = previewHtml,
+        )
         return
     }
 

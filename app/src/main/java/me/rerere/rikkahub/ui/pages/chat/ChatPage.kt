@@ -31,6 +31,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -45,11 +46,13 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.dokar.sonner.ToastType
 import dev.chrisbanes.haze.rememberHazeState
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
+import me.rerere.ai.core.MessageRole
 import me.rerere.ai.provider.Model
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.hugeicons.HugeIcons
@@ -67,6 +70,9 @@ import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.service.ChatError
 import me.rerere.rikkahub.ui.components.ai.ChatInput
 import me.rerere.rikkahub.ui.components.message.ChatRenderCell
+import me.rerere.rikkahub.ui.components.message.ChatStreamingTextKey
+import me.rerere.rikkahub.ui.components.message.StreamRenderArbiter
+import me.rerere.rikkahub.ui.components.message.StreamRenderFrame
 import me.rerere.rikkahub.ui.components.message.buildChatRenderCells
 import me.rerere.rikkahub.ui.components.message.firstCellIndexForMessageIndex
 import me.rerere.rikkahub.ui.components.message.firstCellIndexForNodeId
@@ -102,11 +108,16 @@ fun ChatPage(id: Uuid, text: String?, files: List<Uri>, nodeId: Uuid? = null) {
     val enableWebSearch by vm.enableWebSearch.collectAsStateWithLifecycle()
     val errors by vm.errors.collectAsStateWithLifecycle()
     val loading = loadingJob != null
-    val chatRenderCells = remember(conversation, setting, loading) {
+    val streamingTextOverrides = rememberStreamingTextOverrides(
+        conversation = conversation,
+        loading = loading,
+    )
+    val chatRenderCells = remember(conversation, setting, loading, streamingTextOverrides) {
         buildChatRenderCells(
             conversation = conversation,
             settings = setting,
             loading = loading,
+            streamingTextOverrides = streamingTextOverrides,
         )
     }
 
@@ -475,6 +486,88 @@ private fun ChatPageContent(
             )
         }
     }
+}
+
+private data class StreamingTextTarget(
+    val key: ChatStreamingTextKey,
+    val text: String,
+)
+
+@Composable
+private fun rememberStreamingTextOverrides(
+    conversation: Conversation,
+    loading: Boolean,
+): Map<ChatStreamingTextKey, String> {
+    val activeTarget = remember(conversation, loading) {
+        conversation.findActiveStreamingTextTarget(loading)
+    }
+    val latestTarget by rememberUpdatedState(activeTarget)
+    var overrides by remember(activeTarget?.key) {
+        mutableStateOf(activeTarget?.let { mapOf(it.key to it.text) }.orEmpty())
+    }
+
+    LaunchedEffect(activeTarget?.key, loading) {
+        if (!loading || activeTarget == null) {
+            overrides = emptyMap()
+            return@LaunchedEffect
+        }
+
+        val arbiter = StreamRenderArbiter()
+        fun publish(target: StreamingTextTarget, streaming: Boolean) {
+            val decision = arbiter.onFrame(
+                StreamRenderFrame(
+                    content = target.text,
+                    streaming = streaming,
+                    nowMs = System.currentTimeMillis(),
+                )
+            )
+            if (decision.publishText) {
+                overrides = mapOf(target.key to target.text)
+            }
+        }
+
+        publish(activeTarget, streaming = true)
+        snapshotFlow { latestTarget }
+            .distinctUntilChanged()
+            .collect { target ->
+                if (target == null || target.key != activeTarget.key) return@collect
+                val decision = arbiter.onFrame(
+                    StreamRenderFrame(
+                        content = target.text,
+                        streaming = true,
+                        nowMs = System.currentTimeMillis(),
+                    )
+                )
+                if (decision.publishText) {
+                    overrides = mapOf(target.key to target.text)
+                }
+                val delayMs = decision.nextCheckDelayMs
+                if (delayMs != null) {
+                    delay(delayMs)
+                    latestTarget?.takeIf { it.key == activeTarget.key }?.let { publish(it, streaming = true) }
+                }
+            }
+    }
+
+    return overrides
+}
+
+private fun Conversation.findActiveStreamingTextTarget(loading: Boolean): StreamingTextTarget? {
+    if (!loading) return null
+    val node = messageNodes.lastOrNull() ?: return null
+    val message = node.currentMessage
+    if (message.role != MessageRole.ASSISTANT) return null
+    val partIndex = message.parts.indexOfLast { it is UIMessagePart.Text }
+    if (partIndex < 0) return null
+    val part = message.parts[partIndex] as? UIMessagePart.Text ?: return null
+    return StreamingTextTarget(
+        key = ChatStreamingTextKey(
+            nodeId = node.id,
+            messageId = message.id,
+            partIndex = partIndex,
+        ),
+        text = part.text,
+    )
 }
 
 @Composable
