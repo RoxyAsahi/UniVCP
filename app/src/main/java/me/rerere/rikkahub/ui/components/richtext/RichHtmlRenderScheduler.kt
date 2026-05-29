@@ -9,11 +9,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import me.rerere.rikkahub.ui.components.message.RenderRiskScore
+import me.rerere.rikkahub.ui.components.message.RichContentDocumentSchemaVersion
 import me.rerere.rikkahub.ui.components.message.RichContentRoute
 import me.rerere.rikkahub.ui.components.message.RichHtmlAnalysis
 import me.rerere.rikkahub.ui.components.message.RichHtmlRenderTelemetry
 import me.rerere.rikkahub.ui.components.message.RichHtmlRenderKind
-import me.rerere.rikkahub.ui.components.render.RenderLruCache
 import me.rerere.rikkahub.ui.components.render.renderTextCacheKey
 import kotlin.math.roundToInt
 
@@ -54,7 +54,7 @@ internal data class RichHtmlPrewarmTarget(
 internal object RichHtmlRenderScheduler {
     private const val MaxNativeFirstRenders = 2
     private const val MaxEntries = 512
-    private const val MaxPrewarmTargets = 6
+    private const val MaxPrewarmTargets = 1
     private val lock = Any()
     private val firstRendered = LinkedHashSet<String>()
     private val inFlightFirstRenders = LinkedHashSet<String>()
@@ -67,6 +67,8 @@ internal object RichHtmlRenderScheduler {
         scrollState: RichRenderScrollState,
         cellIndex: Int? = null,
         risk: RenderRiskScore? = null,
+        cachedModelAvailable: Boolean = false,
+        reserveFirstRenderSlot: Boolean = true,
     ): RichHtmlRenderAdmission = synchronized(lock) {
         fun decision(allowed: Boolean, reason: String): RichHtmlRenderAdmission {
             RichHtmlRenderTelemetry.recordNativeAdmission(
@@ -90,7 +92,7 @@ internal object RichHtmlRenderScheduler {
         if (risk?.route == RichContentRoute.Snapshot || risk?.route == RichContentRoute.DynamicPreview) {
             return@synchronized decision(allowed = false, reason = "risk-route:${risk.route.name}")
         }
-        if (inFlightFirstRenders.contains(key)) {
+        if (reserveFirstRenderSlot && inFlightFirstRenders.contains(key)) {
             return@synchronized decision(allowed = true, reason = "already-admitted")
         }
         if (cellIndex != null && scrollState.visibleCellRange.isNotEmptyRange() &&
@@ -110,11 +112,18 @@ internal object RichHtmlRenderScheduler {
         if (risky && scrollState.fastScrolling) {
             return@synchronized decision(allowed = false, reason = "fast-scroll-risk")
         }
-        if (expensive && scrollState.scrolling && inFlightFirstRenders.size >= MaxNativeFirstRenders) {
+        if (reserveFirstRenderSlot &&
+            expensive &&
+            scrollState.scrolling &&
+            inFlightFirstRenders.size >= MaxNativeFirstRenders
+        ) {
             return@synchronized decision(allowed = false, reason = "scroll-queue-full")
         }
-        if (inFlightFirstRenders.size >= MaxNativeFirstRenders * 2) {
+        if (reserveFirstRenderSlot && inFlightFirstRenders.size >= MaxNativeFirstRenders * 2) {
             return@synchronized decision(allowed = false, reason = "queue-full")
+        }
+        if (!reserveFirstRenderSlot) {
+            return@synchronized decision(allowed = true, reason = "compile-admitted")
         }
         inFlightFirstRenders += key
         decision(allowed = true, reason = "admitted")
@@ -156,14 +165,26 @@ internal object RichHtmlRenderScheduler {
             }
             .take(activeBudget)
             .toList()
+        val admittedKeys = admittedTargets.mapTo(linkedSetOf()) { it.key }
+        val staleJobs = mutableListOf<Job>()
         synchronized(lock) {
-            if (activeBudget == 0) return
-            admittedTargets.forEach { target ->
-                if (prewarmJobs.size < activeBudget && prewarmJobs[target.key] == null) {
-                    prewarmJobs[target.key] = launchPrewarm(target)
+            val iterator = prewarmJobs.entries.iterator()
+            while (iterator.hasNext()) {
+                val (key, job) = iterator.next()
+                if (key !in admittedKeys || activeBudget == 0) {
+                    staleJobs += job
+                    iterator.remove()
+                }
+            }
+            if (activeBudget > 0) {
+                admittedTargets.forEach { target ->
+                    if (prewarmJobs.size < activeBudget && prewarmJobs[target.key] == null) {
+                        prewarmJobs[target.key] = launchPrewarm(target)
+                    }
                 }
             }
         }
+        staleJobs.forEach { it.cancel() }
     }
 
     suspend fun drainPrewarmForTest() {
@@ -240,34 +261,74 @@ internal data class RichHtmlHeightKey(
     val id: String,
     val widthDp: Int,
     val fontScaleBucket: Int,
+    val densityBucket: Int = 100,
+    val themeBucket: String = "default",
     val contentType: String = "rich-html",
+    val rendererVersion: Int = RichRenderHeightCache.RendererVersion,
+    val documentSchemaVersion: Int = RichContentDocumentSchemaVersion,
 )
 
 internal object RichHtmlHeightCache {
-    private val cache = RenderLruCache<RichHtmlHeightKey, Int>(maxEntries = 384)
-
     fun key(
         id: String,
         viewportWidthDp: Float,
         fontScale: Float,
+        density: Float = 1f,
+        themeBucket: String = "default",
         contentType: String = "rich-html",
     ): RichHtmlHeightKey {
-        return RichHtmlHeightKey(
+        val key = RichRenderHeightCache.key(
             id = id,
-            widthDp = viewportWidthDp.roundToInt(),
-            fontScaleBucket = (fontScale * 100).roundToInt(),
+            viewportWidthDp = viewportWidthDp,
+            fontScale = fontScale,
+            density = density,
+            themeBucket = themeBucket,
             contentType = contentType,
         )
+        return key.toRichHtmlHeightKey()
     }
 
-    fun get(key: RichHtmlHeightKey): Int? = cache.get(key)
+    fun get(key: RichHtmlHeightKey): Int? = getEntry(key)?.heightPx
 
-    fun put(key: RichHtmlHeightKey, heightPx: Int) {
-        if (heightPx > 0) cache.putIfAbsent(key, heightPx)
-    }
+    fun getEntry(key: RichHtmlHeightKey): RichRenderHeightCacheEntry? =
+        RichRenderHeightCache.getEntry(key.toRichRenderHeightCacheKey())
 
-    fun resetForTest() = cache.clear()
+    fun put(
+        key: RichHtmlHeightKey,
+        heightPx: Int,
+        confidence: RichRenderHeightConfidence = RichRenderHeightConfidence.MeasuredNative,
+    ) = RichRenderHeightCache.put(
+        key = key.toRichRenderHeightCacheKey(),
+        heightPx = heightPx,
+        confidence = confidence,
+    )
+
+    fun resetForTest() = RichRenderHeightCache.resetForTest()
+
+    fun initialize(context: android.content.Context) = RichRenderHeightCache.initialize(context)
 }
+
+private fun RichRenderHeightCacheKey.toRichHtmlHeightKey(): RichHtmlHeightKey = RichHtmlHeightKey(
+    id = id,
+    widthDp = widthDp,
+    fontScaleBucket = fontScaleBucket,
+    densityBucket = densityBucket,
+    themeBucket = themeBucket,
+    contentType = contentType,
+    rendererVersion = rendererVersion,
+    documentSchemaVersion = documentSchemaVersion,
+)
+
+private fun RichHtmlHeightKey.toRichRenderHeightCacheKey(): RichRenderHeightCacheKey = RichRenderHeightCacheKey(
+    id = id,
+    widthDp = widthDp,
+    fontScaleBucket = fontScaleBucket,
+    densityBucket = densityBucket,
+    themeBucket = themeBucket,
+    contentType = contentType,
+    rendererVersion = rendererVersion,
+    documentSchemaVersion = documentSchemaVersion,
+)
 
 internal fun RichHtmlAnalysis.estimatedHeightDp(): Int {
     val textCost = (previewText.length / 28).coerceIn(2, 18) * 22

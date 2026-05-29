@@ -21,14 +21,27 @@ import androidx.compose.ui.unit.sp
 import me.rerere.rikkahub.ui.components.message.RichHtmlBudget
 import me.rerere.rikkahub.ui.components.message.RichHtmlFallbackStage
 import me.rerere.rikkahub.ui.components.message.RichHtmlRenderTelemetry
+import me.rerere.rikkahub.ui.components.message.analyzeRichHtml
+import me.rerere.rikkahub.ui.components.message.buildRichContentDocumentFromHtml
+import me.rerere.rikkahub.ui.components.message.buildRichContentDocumentFromParsedHtml
+import me.rerere.rikkahub.ui.components.message.buildRichContentTextFlowPlanFromHtml
+import me.rerere.rikkahub.ui.components.message.subtreeRoutePlan
+import me.rerere.rikkahub.ui.components.message.textFlowPlan
 import me.rerere.rikkahub.ui.components.message.extractInputActionFromElement
 import me.rerere.rikkahub.ui.components.message.inspectRichHtmlSafety
 import me.rerere.rikkahub.ui.components.message.isDangerousRichHtmlTag
 import me.rerere.rikkahub.ui.components.message.isSafeRichHtmlHref
-import me.rerere.rikkahub.ui.components.message.isSafeRichHtmlImageSource
 import me.rerere.rikkahub.ui.components.render.RenderLruCache
 import me.rerere.rikkahub.ui.components.render.RenderLruCacheStats
 import me.rerere.rikkahub.ui.components.render.renderTextCacheKey
+import me.rerere.rikkahub.ui.components.richtext.compiler.RichCssCascade
+import me.rerere.rikkahub.ui.components.richtext.compiler.RichHtmlAstCompiler
+import me.rerere.rikkahub.ui.components.richtext.compiler.RichCssParser
+import me.rerere.rikkahub.ui.components.richtext.compiler.RichCssRule
+import me.rerere.rikkahub.ui.components.richtext.compiler.RichCssRuleIndex
+import me.rerere.rikkahub.ui.components.richtext.compiler.RichCssSelectorIndexKey
+import me.rerere.rikkahub.ui.components.richtext.compiler.RichCssSelectorMatcher
+import me.rerere.rikkahub.ui.components.richtext.compiler.RichVisualHintAnalyzer
 import com.helger.css.reader.CSSReaderDeclarationList
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineDispatcher
@@ -41,7 +54,6 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withTimeout
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.Node
@@ -164,10 +176,12 @@ internal object RichHtmlCompiler {
             synchronized(inFlightLock) {
                 flight.waiters -= 1
                 if (inFlightCompiles[inFlightKey] === flight && flight.waiters <= 0) {
-                    if (!flight.deferred.isCompleted) {
+                    if (cacheMode == RichHtmlCompileCacheMode.Transient && !flight.deferred.isCompleted) {
                         flight.deferred.cancel()
+                        inFlightCompiles.remove(inFlightKey)
+                    } else if (flight.deferred.isCompleted) {
+                        inFlightCompiles.remove(inFlightKey)
                     }
-                    inFlightCompiles.remove(inFlightKey)
                 }
             }
         }
@@ -195,9 +209,16 @@ internal object RichHtmlCompiler {
         options: RichHtmlCompileOptions,
         cancellationCheck: () -> Unit = {},
     ): RichHtmlRenderModel {
+        val totalStartNanos = System.nanoTime()
+        var parseMs = 0L
+        var cascadeMs = 0L
+        var domCompileMs = 0L
+        var renderModelMs = 0L
+        var optimizerMs = 0L
         cancellationCheck()
         val safety = inspectRichHtmlSafety(html, options.budget)
         if (!safety.safeForNative) {
+            recordCompileMediaSafetyReport(html)
             RichHtmlRenderTelemetry.recordFallback(
                 stage = RichHtmlFallbackStage.Compile,
                 reason = safety.reason?.name ?: "UnsafeHtml",
@@ -213,10 +234,11 @@ internal object RichHtmlCompiler {
                     )
                 ),
                 unsupported = listOf(RichUnsupportedReason.UnsafeHtml),
-            )
-        }
+                )
+            }
 
-        val document = runCatching { Jsoup.parseBodyFragment(html) }
+        val parseStartNanos = System.nanoTime()
+        val document = runCatching { RichHtmlAstCompiler.parseBody(html) }
             .getOrElse {
                 RichHtmlRenderTelemetry.recordFallback(
                     stage = RichHtmlFallbackStage.Compile,
@@ -235,10 +257,14 @@ internal object RichHtmlCompiler {
                     unsupported = listOf(RichUnsupportedReason.Unknown),
                 )
             }
+        parseMs = (System.nanoTime() - parseStartNanos) / 1_000_000
 
         cancellationCheck()
+        val cascadeStartNanos = System.nanoTime()
         val resolver = StyleResolver.from(document, options, cancellationCheck)
+        cascadeMs = (System.nanoTime() - cascadeStartNanos) / 1_000_000
         val compiler = CompilerRun(resolver, cancellationCheck)
+        val domStartNanos = System.nanoTime()
         val roots = document.body().children()
             .filterNot { it.tagName().equals("style", ignoreCase = true) || isDangerousRichHtmlTag(it.tagName()) }
         val blocks = roots.mapIndexedNotNull { index, root ->
@@ -251,16 +277,89 @@ internal object RichHtmlCompiler {
                 forceContainer = true,
             )
         }
+        domCompileMs = (System.nanoTime() - domStartNanos) / 1_000_000
 
+        val renderModelStartNanos = System.nanoTime()
         val animationBudget = applyAnimationBudget(blocks, options.budget.maxNativeAnimatedElements)
-
-        return RichHtmlRenderModel(
+        val sourceStyleHtml = if (compiler.sourceHtmlByBlockId.isNotEmpty()) {
+            document.select("style").joinToString("\n") { styleElement -> styleElement.outerHtml() }
+        } else {
+            ""
+        }
+        val baseModel = RichHtmlRenderModel(
             id = renderTextCacheKey(html),
             blocks = animationBudget.blocks,
             unsupported = compiler.unsupported.toList(),
             visualHints = (resolver.visualHints + compiler.visualHints + animationBudget.visualHints).distinct(),
             animationStats = animationBudget.stats,
+            sourceHtmlByBlockId = compiler.sourceHtmlByBlockId.toMap(),
+            sourceStyleHtml = sourceStyleHtml,
         )
+        renderModelMs = (System.nanoTime() - renderModelStartNanos) / 1_000_000
+
+        val selectorStats = resolver.telemetryStats()
+        RichHtmlRenderTelemetry.recordCssCascadeStats(
+            id = baseModel.id,
+            ruleCount = selectorStats.ruleCount,
+            idRuleCount = selectorStats.idRuleCount,
+            classRuleCount = selectorStats.classRuleCount,
+            tagRuleCount = selectorStats.tagRuleCount,
+            attrRuleCount = selectorStats.attrRuleCount,
+            pseudoRuleCount = selectorStats.pseudoRuleCount,
+            universalRuleCount = selectorStats.universalRuleCount,
+            complexRuleCount = selectorStats.complexRuleCount,
+            unsupportedSelectorCount = selectorStats.unsupportedSelectorCount,
+            elementCount = selectorStats.elementCount,
+            averageCandidateRules = selectorStats.averageCandidateRules,
+            p95CandidateRules = selectorStats.p95CandidateRules,
+            legacyScanCount = selectorStats.legacyScanCount,
+            legacyVerificationSkippedCount = selectorStats.legacyVerificationSkippedCount,
+            indexMismatchCount = selectorStats.indexMismatchCount,
+            parserFallbackCount = selectorStats.parserFallbackCount,
+            selectorMatchMs = selectorStats.selectorMatchMs,
+            highCostSelectorCategories = selectorStats.highCostSelectorCategories,
+        )
+
+        val optimizerStartNanos = System.nanoTime()
+        val richContentDocument = runCatching {
+            buildRichContentDocumentFromParsedHtml(html, document, analyzeRichHtml(html))
+        }.recoverCatching {
+            buildRichContentDocumentFromHtml(html)
+        }.getOrNull()
+        val astSubtreePlan = richContentDocument?.subtreeRoutePlan()
+        val subtreePlan = if (astSubtreePlan?.allowsSnapshotIslandOptimization == true) {
+            RichSubtreeRoutePlanner.plan(baseModel)
+        } else {
+            RichSubtreeRoutePlanner.skippedByAst(baseModel, astSubtreePlan)
+        }
+        val islandModel = RichSnapshotIslandOptimizer.optimize(baseModel, subtreePlan, astSubtreePlan)
+        RichHtmlRenderTelemetry.recordSnapshotIslandPlan(
+            id = baseModel.id,
+            plan = subtreePlan,
+            appliedCount = islandModel.snapshotIslandStats.appliedCount,
+        )
+
+        val astTextFlowPlan = richContentDocument?.textFlowPlan() ?: runCatching {
+            buildRichContentTextFlowPlanFromHtml(html)
+        }.getOrNull()
+        val astDirectDocument = richContentDocument ?: runCatching {
+            buildRichContentDocumentFromHtml(html)
+        }.getOrNull()
+        val optimized = astDirectDocument
+            ?.let { RichTextFlowAstLowerer.lower(it, islandModel, html, parsedHtml = document) }
+            ?: RichTextFlowOptimizer.optimize(islandModel, astTextFlowPlan)
+        optimizerMs = (System.nanoTime() - optimizerStartNanos) / 1_000_000
+        RichHtmlRenderTelemetry.recordCompilePhases(
+            id = optimized.id,
+            viewportWidthDp = options.viewportWidthDp,
+            parseMs = parseMs,
+            cascadeMs = cascadeMs,
+            domCompileMs = domCompileMs,
+            renderModelMs = renderModelMs,
+            optimizerMs = optimizerMs,
+            totalMs = (System.nanoTime() - totalStartNanos) / 1_000_000,
+        )
+        return optimized
     }
 
     private fun cacheKey(
@@ -340,6 +439,7 @@ private class AnimationBudgetRun(
                 children = block.children.map(::visit),
             )
             is RichTextBlock -> block.copy(style = style)
+            is RichTextFlowBlock -> block.copy(style = style)
             is RichImageBlock -> block.copy(style = style)
             is RichTableBlock -> block.copy(style = style)
             is RichSvgBlock -> block.copy(style = style)
@@ -352,6 +452,7 @@ private class AnimationBudgetRun(
                 style = style,
                 children = block.children.map(::visit),
             )
+            is RichSnapshotIslandBlock -> block.copy(style = style)
             is RichUnsupportedBlock -> block.copy(style = style)
         }
     }
@@ -416,6 +517,7 @@ private class CompilerRun(
 ) {
     val unsupported = linkedSetOf<RichUnsupportedReason>()
     val visualHints = linkedSetOf<RichVisualHint>()
+    val sourceHtmlByBlockId = linkedMapOf<String, String>()
 
     fun compileElement(
         element: Element,
@@ -433,7 +535,7 @@ private class CompilerRun(
         val style = resolved.style
         if (style.display == RichDisplay.None || style.visibility == RichVisibility.Hidden) return null
 
-        return when (tag) {
+        val block = when (tag) {
             "img" -> compileImage(element, style, blockId)
             "svg" -> compileSvg(element, style, blockId)
             "table" -> compileTable(element, style, blockId, resolved.variables)
@@ -446,9 +548,29 @@ private class CompilerRun(
             else -> {
                 if (isMathFormulaContainer(element)) {
                     val latex = extractLatex(element)
-                    if (latex.isNotBlank()) return RichMathBlock(blockId, style, latex, inline = false)
-                }
-                if (
+                    if (latex.isNotBlank()) {
+                        RichMathBlock(blockId, style, latex, inline = false)
+                    } else if (
+                        !forceContainer &&
+                        !style.display.isFlexContainer() &&
+                        !style.display.isGridContainer() &&
+                        !style.display.needsInlineContainerDisplay() &&
+                        isInlineOnly(element) &&
+                        element.hasInlineRenderableContent(style) &&
+                        !hasInlineChildRequiringOwnBlock(element, style, resolved.variables)
+                    ) {
+                        compileTextBlock(element, style, blockId, resolved.variables)
+                    } else {
+                        val children = compileChildren(element, style, resolved.variables, blockId)
+                        if (children.isEmpty() && element.ownText().isNotBlank()) {
+                            compileTextBlock(element, style, blockId, resolved.variables)
+                        } else if (children.isEmpty() && !style.hasVisualBox()) {
+                            null
+                        } else {
+                            RichContainerBlock(blockId, style, children, tag)
+                        }
+                    }
+                } else if (
                     !forceContainer &&
                     !style.display.isFlexContainer() &&
                     !style.display.isGridContainer() &&
@@ -470,6 +592,40 @@ private class CompilerRun(
                 }
             }
         }
+        return block?.also {
+            if (it.mayNeedSnapshotIslandSource()) {
+                sourceHtmlByBlockId[blockId] = element.outerHtml()
+            }
+        }
+    }
+
+    private fun RichBlock.mayNeedSnapshotIslandSource(): Boolean {
+        if (style.hasSnapshotIslandStyle()) return true
+        return when (this) {
+            is RichSvgBlock -> model.visualHints.isNotEmpty() || model.commands.size > 96
+            is RichUnsupportedBlock -> reason == RichUnsupportedReason.SvgTooComplex
+            is RichContainerBlock,
+            is RichTextBlock,
+            is RichTextFlowBlock,
+            is RichImageBlock,
+            is RichTableBlock,
+            is RichMathBlock,
+            is RichButtonBlock,
+            is RichDetailsBlock,
+            is RichSnapshotIslandBlock -> false
+        }
+    }
+
+    private fun ComputedStyle.hasSnapshotIslandStyle(): Boolean {
+        return maskImage != null ||
+            clipPath != null ||
+            backdropFilter != RichCssFilter.None ||
+            cssFilter.requiresVisualApproximation ||
+            mixBlendMode ||
+            backgroundLayers.size > 1 ||
+            extraBackgroundLayers > 0 ||
+            backgroundUrl != null ||
+            backgroundImage is RichBackgroundImage.ConicGradient
     }
 
     private fun compileChildren(
@@ -552,8 +708,8 @@ private class CompilerRun(
 
     private fun compileImage(element: Element, style: ComputedStyle, blockId: String): RichBlock? {
         val src = element.attr("src")
-        if (!isSafeRichHtmlImageSource(src)) return null
-        return RichImageBlock(blockId, style, src, element.attr("alt").takeIf { it.isNotBlank() })
+        val safeSrc = safeRichMediaSource(src, RichMediaKind.Image) ?: return null
+        return RichImageBlock(blockId, style, safeSrc, element.attr("alt").takeIf { it.isNotBlank() })
     }
 
     private fun compileButton(
@@ -780,6 +936,23 @@ private class CompilerRun(
     }
 
     private fun compileSvg(element: Element, style: ComputedStyle, blockId: String): RichBlock {
+        val svgSource = element.outerHtml()
+        if (RichSvgFallbackPolicy.containsRuntimeSvg(svgSource)) {
+            RichHtmlRenderTelemetry.recordSvgRoute(
+                id = renderTextCacheKey(svgSource),
+                route = RichSvgRoute.DynamicPreview.name,
+                reason = "runtime-svg",
+                commandCount = 0,
+                visualHintCount = 0,
+                androidSvgAvailable = RichAndroidSvgSpike.Available,
+            )
+            RichHtmlRenderTelemetry.recordFallback(
+                stage = RichHtmlFallbackStage.Compile,
+                reason = RichUnsupportedReason.DynamicRuntime.name,
+            )
+            unsupported += RichUnsupportedReason.DynamicRuntime
+            return RichUnsupportedBlock(blockId, style, RichUnsupportedReason.DynamicRuntime, "SVG")
+        }
         val svg = RichSvgCompiler.compile(element, cancellationCheck)
         return if (svg == null) {
             RichHtmlRenderTelemetry.recordFallback(
@@ -790,7 +963,29 @@ private class CompilerRun(
             RichUnsupportedBlock(blockId, style, RichUnsupportedReason.SvgTooComplex, element.text().ifBlank { "SVG" })
         } else {
             visualHints += svg.visualHints
-            RichSvgBlock(blockId, style, svg)
+            val svgReport = RichSvgFallbackPolicy.decide(svg, svgSource)
+            RichHtmlRenderTelemetry.recordSvgRoute(
+                id = renderTextCacheKey(svgSource),
+                route = svgReport.route.name,
+                reason = svgReport.reason,
+                commandCount = svgReport.commandCount,
+                visualHintCount = svgReport.visualHintCount,
+                androidSvgAvailable = svgReport.androidSvgAvailable,
+            )
+            when (svgReport.route) {
+                RichSvgRoute.DynamicPreview -> {
+                    RichHtmlRenderTelemetry.recordFallback(
+                        stage = RichHtmlFallbackStage.Compile,
+                        reason = RichUnsupportedReason.DynamicRuntime.name,
+                    )
+                    unsupported += RichUnsupportedReason.DynamicRuntime
+                    RichUnsupportedBlock(blockId, style, RichUnsupportedReason.DynamicRuntime, "SVG")
+                }
+
+                RichSvgRoute.NativeIr,
+                RichSvgRoute.SnapshotIsland,
+                RichSvgRoute.AndroidSvgSpike -> RichSvgBlock(blockId, style, svg)
+            }
         }
     }
 
@@ -973,19 +1168,61 @@ internal class StyleResolver private constructor(
     private val options: RichHtmlCompileOptions,
     private val cancellationCheck: () -> Unit,
     val visualHints: List<RichVisualHint>,
+    private val parserFallbackCount: Int,
 ) {
+    private val legacyVerificationRuleBudget = 64
+    private val ruleIndex = CssRuleIndex.from(rules)
+    private val selectorStats = CssSelectorTelemetryAccumulator(
+        ruleCount = rules.size,
+        idRuleCount = ruleIndex.idRules.values.sumOf { it.size },
+        classRuleCount = ruleIndex.classRules.values.sumOf { it.size },
+        tagRuleCount = ruleIndex.tagRules.values.sumOf { it.size },
+        attrRuleCount = ruleIndex.attrRules.values.sumOf { it.size },
+        pseudoRuleCount = ruleIndex.pseudoRules.values.sumOf { it.size },
+        universalRuleCount = ruleIndex.universalRules.size,
+        complexRuleCount = ruleIndex.complexRules.size,
+        unsupportedSelectorCount = ruleIndex.unsupportedRules.size,
+        highCostSelectorCategories = rules
+            .flatMap { rule -> rule.highCostCategories }
+            .groupingBy { it }
+            .eachCount(),
+        parserFallbackCount = parserFallbackCount,
+    )
+
     fun resolve(
         element: Element,
         parentStyle: ComputedStyle,
         parentVars: Map<String, String>,
     ): ResolvedStyle {
         cancellationCheck()
-        val matched = rules
+        val matchStartNanos = System.nanoTime()
+        val indexedCandidates = ruleIndex.candidateRules(element)
+        val indexedMatched = indexedCandidates
             .filter { rule ->
                 cancellationCheck()
                 rule.selector.matches(element)
             }
             .sortedWith(compareBy<CssRule> { it.specificity }.thenBy { it.order })
+        val shouldVerifyLegacy = rules.size <= legacyVerificationRuleBudget
+        val legacyMatched = if (shouldVerifyLegacy) {
+            rules
+                .filter { rule ->
+                    cancellationCheck()
+                    rule.selector.matches(element)
+                }
+                .sortedWith(compareBy<CssRule> { it.specificity }.thenBy { it.order })
+        } else {
+            emptyList()
+        }
+        val indexMismatch = shouldVerifyLegacy && indexedMatched.map { it.order } != legacyMatched.map { it.order }
+        selectorStats.record(
+            candidateCount = indexedCandidates.size,
+            legacyScanCount = if (shouldVerifyLegacy) rules.size else 0,
+            legacyVerificationSkipped = !shouldVerifyLegacy,
+            indexMismatch = indexMismatch,
+            selectorMatchNanos = System.nanoTime() - matchStartNanos,
+        )
+        val matched = if (indexMismatch) legacyMatched else indexedMatched
         val declarations = linkedMapOf<String, String>()
         val variables = parentVars.toMutableMap()
 
@@ -1017,6 +1254,8 @@ internal class StyleResolver private constructor(
         return ResolvedStyle(style = style, variables = variables, visualHints = visualHintsForDeclarations(declarations).toList())
     }
 
+    fun telemetryStats(): CssSelectorTelemetryStats = selectorStats.snapshot()
+
     companion object {
         fun from(
             document: Document,
@@ -1037,7 +1276,15 @@ internal class StyleResolver private constructor(
                     if (key.startsWith("--")) rootVars[key] = value
                 }
             }
-            return StyleResolver(parsed.rules, parsed.keyframes, rootVars, options, cancellationCheck, parsed.visualHints)
+            return StyleResolver(
+                rules = parsed.rules,
+                keyframes = parsed.keyframes,
+                rootVariables = rootVars,
+                options = options,
+                cancellationCheck = cancellationCheck,
+                visualHints = parsed.visualHints,
+                parserFallbackCount = parsed.parserFallbackCount,
+            )
         }
     }
 }
@@ -1080,7 +1327,7 @@ private fun MutableMap<String, String>.removeAll(vararg keys: String) {
 }
 
 private fun visualHintsForDeclarations(declarations: Map<String, String>): Set<RichVisualHint> {
-    val hints = linkedSetOf<RichVisualHint>()
+    val hints = RichVisualHintAnalyzer.analyzeDeclarations(declarations).toMutableSet()
     val background = declarations["background-image"] ?: declarations["background"]
     if (background != null && countExtraBackgroundLayers(background) > 0) hints += RichVisualHint.BackgroundExtraLayer
     val colorDeclarations = listOf(
@@ -1145,12 +1392,165 @@ private data class CssRule(
     val declarations: Map<String, String>,
     val specificity: Int,
     val order: Int,
+) {
+    val highCostCategories: Set<String> =
+        RichCssSelectorMatcher.highCostCategories(selector.raw).mapTo(linkedSetOf()) { it.name }
+}
+
+private data class CssRuleIndex(
+    private val sharedIndex: RichCssRuleIndex,
+    private val rulesByOrder: Map<Int, CssRule>,
+    val idRules: Map<String, List<CssRule>>,
+    val classRules: Map<String, List<CssRule>>,
+    val tagRules: Map<String, List<CssRule>>,
+    val attrRules: Map<String, List<CssRule>>,
+    val pseudoRules: Map<String, List<CssRule>>,
+    val universalRules: List<CssRule>,
+    val complexRules: List<CssRule>,
+    val unsupportedRules: List<CssRule>,
+) {
+    fun candidateRules(element: Element): List<CssRule> {
+        val result = linkedSetOf<CssRule>()
+        sharedIndex.candidateRules(element)
+            .mapNotNull { rule -> rulesByOrder[rule.order] }
+            .forEach(result::add)
+        // Keep the pre-V5 conservative semantics for complex selectors: the shared cascade module may
+        // prefilter them with Jsoup, while the compiler's custom matcher is still the render authority.
+        result += complexRules
+        return result.sortedBy { it.order }
+    }
+
+    companion object {
+        fun from(rules: List<CssRule>): CssRuleIndex {
+            val sharedIndex = RichCssCascade.index(
+                rules.map { rule ->
+                    RichCssRule(
+                        selector = rule.selector.raw,
+                        declarations = emptyMap(),
+                        order = rule.order,
+                    )
+                }
+            )
+            val idRules = linkedMapOf<String, MutableList<CssRule>>()
+            val classRules = linkedMapOf<String, MutableList<CssRule>>()
+            val tagRules = linkedMapOf<String, MutableList<CssRule>>()
+            val attrRules = linkedMapOf<String, MutableList<CssRule>>()
+            val pseudoRules = linkedMapOf<String, MutableList<CssRule>>()
+            val universalRules = mutableListOf<CssRule>()
+            val complexRules = mutableListOf<CssRule>()
+            val unsupportedRules = mutableListOf<CssRule>()
+            rules.forEach { rule ->
+                when (val key = RichCssSelectorMatcher.indexKey(rule.selector.raw)) {
+                    is RichCssSelectorIndexKey.Id -> idRules.getOrPut(key.value) { mutableListOf() } += rule
+                    is RichCssSelectorIndexKey.ClassName -> classRules.getOrPut(key.value) { mutableListOf() } += rule
+                    is RichCssSelectorIndexKey.TagName -> tagRules.getOrPut(key.value) { mutableListOf() } += rule
+                    is RichCssSelectorIndexKey.AttributeName -> attrRules.getOrPut(key.value) { mutableListOf() } += rule
+                    is RichCssSelectorIndexKey.Pseudo -> pseudoRules.getOrPut(key.value) { mutableListOf() } += rule
+                    RichCssSelectorIndexKey.Universal -> universalRules += rule
+                    RichCssSelectorIndexKey.Complex -> complexRules += rule
+                    RichCssSelectorIndexKey.Unsupported -> unsupportedRules += rule
+                }
+            }
+            return CssRuleIndex(
+                sharedIndex = sharedIndex,
+                rulesByOrder = rules.associateBy { it.order },
+                idRules = idRules,
+                classRules = classRules,
+                tagRules = tagRules,
+                attrRules = attrRules,
+                pseudoRules = pseudoRules,
+                universalRules = universalRules,
+                complexRules = complexRules,
+                unsupportedRules = unsupportedRules,
+            )
+        }
+    }
+}
+
+internal data class CssSelectorTelemetryStats(
+    val ruleCount: Int,
+    val idRuleCount: Int,
+    val classRuleCount: Int,
+    val tagRuleCount: Int,
+    val attrRuleCount: Int,
+    val pseudoRuleCount: Int,
+    val universalRuleCount: Int,
+    val complexRuleCount: Int,
+    val unsupportedSelectorCount: Int,
+    val elementCount: Int,
+    val averageCandidateRules: Float,
+    val p95CandidateRules: Int,
+    val legacyScanCount: Int,
+    val legacyVerificationSkippedCount: Int,
+    val indexMismatchCount: Int,
+    val parserFallbackCount: Int,
+    val selectorMatchMs: Long,
+    val highCostSelectorCategories: Map<String, Int>,
 )
+
+private class CssSelectorTelemetryAccumulator(
+    private val ruleCount: Int,
+    private val idRuleCount: Int,
+    private val classRuleCount: Int,
+    private val tagRuleCount: Int,
+    private val attrRuleCount: Int,
+    private val pseudoRuleCount: Int,
+    private val universalRuleCount: Int,
+    private val complexRuleCount: Int,
+    private val unsupportedSelectorCount: Int,
+    private val highCostSelectorCategories: Map<String, Int>,
+    private val parserFallbackCount: Int,
+) {
+    private val candidateCounts = mutableListOf<Int>()
+    private var legacyScanCount = 0
+    private var legacyVerificationSkippedCount = 0
+    private var indexMismatchCount = 0
+    private var selectorMatchNanos = 0L
+
+    fun record(
+        candidateCount: Int,
+        legacyScanCount: Int,
+        legacyVerificationSkipped: Boolean,
+        indexMismatch: Boolean,
+        selectorMatchNanos: Long,
+    ) {
+        candidateCounts += candidateCount
+        this.legacyScanCount += legacyScanCount
+        if (legacyVerificationSkipped) legacyVerificationSkippedCount += 1
+        if (indexMismatch) indexMismatchCount += 1
+        this.selectorMatchNanos += selectorMatchNanos
+    }
+
+    fun snapshot(): CssSelectorTelemetryStats {
+        val sorted = candidateCounts.sorted()
+        return CssSelectorTelemetryStats(
+            ruleCount = ruleCount,
+            idRuleCount = idRuleCount,
+            classRuleCount = classRuleCount,
+            tagRuleCount = tagRuleCount,
+            attrRuleCount = attrRuleCount,
+            pseudoRuleCount = pseudoRuleCount,
+            universalRuleCount = universalRuleCount,
+            complexRuleCount = complexRuleCount,
+            unsupportedSelectorCount = unsupportedSelectorCount,
+            elementCount = candidateCounts.size,
+            averageCandidateRules = candidateCounts.average().takeIf { !it.isNaN() }?.toFloat() ?: 0f,
+            p95CandidateRules = if (sorted.isEmpty()) 0 else sorted[((sorted.size - 1) * 0.95f).toInt()],
+            legacyScanCount = legacyScanCount,
+            legacyVerificationSkippedCount = legacyVerificationSkippedCount,
+            indexMismatchCount = indexMismatchCount,
+            parserFallbackCount = parserFallbackCount,
+            selectorMatchMs = selectorMatchNanos / 1_000_000,
+            highCostSelectorCategories = highCostSelectorCategories,
+        )
+    }
+}
 
 private data class CssParseResult(
     val rules: List<CssRule>,
     val keyframes: Map<String, RichKeyframesSummary>,
     val visualHints: List<RichVisualHint>,
+    val parserFallbackCount: Int,
 )
 
 private data class RichKeyframesSummary(
@@ -1195,8 +1595,14 @@ private object CssParser {
         val rules = mutableListOf<CssRule>()
         val keyframes = linkedMapOf<String, RichKeyframesSummary>()
         val hints = linkedSetOf<RichVisualHint>()
-        parseInto(css.removeCssComments(), options, rules, keyframes, hints, cancellationCheck)
-        return CssParseResult(rules = rules, keyframes = keyframes, visualHints = hints.toList())
+        val parserFallbackCount = intArrayOf(0)
+        parseInto(css.removeCssComments(), options, rules, keyframes, hints, parserFallbackCount, cancellationCheck)
+        return CssParseResult(
+            rules = rules,
+            keyframes = keyframes,
+            visualHints = hints.toList(),
+            parserFallbackCount = parserFallbackCount[0],
+        )
     }
 
     private fun parseInto(
@@ -1205,6 +1611,7 @@ private object CssParser {
         output: MutableList<CssRule>,
         keyframes: MutableMap<String, RichKeyframesSummary>,
         visualHints: MutableSet<RichVisualHint>,
+        parserFallbackCount: IntArray,
         cancellationCheck: () -> Unit,
     ) {
         var cursor = 0
@@ -1218,7 +1625,9 @@ private object CssParser {
             val body = css.substring(start + 1, end)
             when {
                 selector.startsWith("@media", ignoreCase = true) -> {
-                    if (mediaMatches(selector, options)) parseInto(body, options, output, keyframes, visualHints, cancellationCheck)
+                    if (mediaMatches(selector, options)) {
+                        parseInto(body, options, output, keyframes, visualHints, parserFallbackCount, cancellationCheck)
+                    }
                 }
                 selector.startsWith("@font-face", ignoreCase = true) -> Unit
                 selector.startsWith("@keyframes", ignoreCase = true) -> {
@@ -1231,7 +1640,9 @@ private object CssParser {
                 }
                 selector.startsWith("@") -> Unit
                 else -> {
-                    val declarations = parseCssDeclarations(body)
+                    val declarationResult = RichCssParser.parseDeclarationMapWithReport(body)
+                    if (declarationResult.report.fallbackUsed) parserFallbackCount[0] += 1
+                    val declarations = declarationResult.declarations
                     visualHints += visualHintsForDeclarations(declarations)
                     selector.split(",").map { it.trim() }.filter { it.isNotBlank() }.forEach { raw ->
                         cancellationCheck()
@@ -1367,9 +1778,11 @@ private fun computeStyle(
             ?: backgroundShorthand?.image
             ?: declarations["background"]?.let(::parseBackgroundImage)
             ?: inherited.backgroundImage,
-        backgroundUrl = declarations["background-image"]?.let(::parseBackgroundUrl)
+        backgroundUrl = declarations["background-image"]?.let {
+            parseSafeBackgroundUrl(it, RichMediaKind.BackgroundImage)
+        }
             ?: backgroundShorthand?.url
-            ?: declarations["background"]?.let(::parseBackgroundUrl)
+            ?: declarations["background"]?.let { parseSafeBackgroundUrl(it, RichMediaKind.BackgroundImage) }
             ?: inherited.backgroundUrl,
         backgroundLayers = parseSafeBackgroundLayers(
             imageValue = declarations["background-image"] ?: declarations["background"],
@@ -1421,6 +1834,9 @@ private fun computeStyle(
         transition = transition,
         cssFilter = declarations["filter"]?.let { parseCssFilter(it, lengthContext) } ?: inherited.cssFilter,
         backdropFilter = declarations["backdrop-filter"]?.let { parseCssFilter(it, lengthContext) } ?: inherited.backdropFilter,
+        mixBlendMode = declarations["mix-blend-mode"]
+            ?.let { it.isNotBlank() && !it.equals("normal", ignoreCase = true) }
+            ?: inherited.mixBlendMode,
         clipPath = declarations["clip-path"]?.let { parseClipPath(it, lengthContext) } ?: inherited.clipPath,
         maskImage = (declarations["mask-image"]
             ?: declarations["-webkit-mask-image"]
@@ -1687,6 +2103,7 @@ private fun RichBlock.withInlineFallbackDisplay(): RichBlock {
     val inlineStyle = style.copy(display = RichDisplay.Inline)
     return when (this) {
         is RichTextBlock -> copy(style = inlineStyle)
+        is RichTextFlowBlock -> copy(style = inlineStyle)
         is RichContainerBlock -> copy(style = inlineStyle)
         is RichImageBlock -> copy(style = inlineStyle)
         is RichTableBlock -> copy(style = inlineStyle)
@@ -1694,6 +2111,7 @@ private fun RichBlock.withInlineFallbackDisplay(): RichBlock {
         is RichMathBlock -> copy(style = inlineStyle)
         is RichButtonBlock -> copy(style = inlineStyle)
         is RichDetailsBlock -> copy(style = inlineStyle)
+        is RichSnapshotIslandBlock -> copy(style = inlineStyle)
         is RichUnsupportedBlock -> copy(style = inlineStyle)
     }
 }
@@ -1847,11 +2265,17 @@ internal object RichCssDeclarationParser {
     var forceFallbackForTest: Boolean = false
 
     fun parse(style: String): Map<String, String> {
-        if (style.isBlank()) return emptyMap()
+        return parseWithReport(style).declarations
+    }
+
+    fun parseWithReport(style: String): RichCssDeclarationParseResult {
+        if (style.isBlank()) return RichCssDeclarationParseResult(emptyMap(), fallbackUsed = false)
         if (!forceFallbackForTest && !requiresManualParser(style)) {
-            parseWithPhCss(style)?.let { return it }
+            parseWithPhCss(style)?.let {
+                return RichCssDeclarationParseResult(declarations = it, fallbackUsed = false)
+            }
         }
-        return parseManually(style)
+        return RichCssDeclarationParseResult(declarations = parseManually(style), fallbackUsed = true)
     }
 
     private fun requiresManualParser(style: String): Boolean {
@@ -1887,7 +2311,12 @@ internal object RichCssDeclarationParser {
     }
 }
 
-private fun parseCssDeclarations(style: String): Map<String, String> = RichCssDeclarationParser.parse(style)
+internal data class RichCssDeclarationParseResult(
+    val declarations: Map<String, String>,
+    val fallbackUsed: Boolean,
+)
+
+private fun parseCssDeclarations(style: String): Map<String, String> = RichCssParser.parseDeclarationMap(style)
 
 private fun splitCssTopLevel(value: String, delimiter: Char): List<String> {
     val parts = mutableListOf<String>()
@@ -3052,6 +3481,56 @@ private fun parseBackgroundUrl(value: String): String? {
         .find(value)?.groupValues?.getOrNull(2)?.takeIf { it.isNotBlank() }
 }
 
+private fun parseSafeBackgroundUrl(value: String, kind: RichMediaKind): String? {
+    return parseBackgroundUrl(value)?.let { safeRichMediaSource(it, kind) }
+}
+
+private fun safeRichMediaSource(source: String, kind: RichMediaKind): String? {
+    val request = RichMediaRequest.fromSource(source, kind = kind)
+    val safety = RichMediaLoader.safety(request)
+    val accepted = safety == RichMediaSafety.Safe
+    RichHtmlRenderTelemetry.recordMediaRequest(
+        id = request.sourceDigest,
+        kind = kind.name,
+        safety = safety.name,
+        outcome = if (accepted) "compile-accepted" else "compile-rejected",
+        oversizedRejected = false,
+    )
+    return source.takeIf { accepted }
+}
+
+private fun recordCompileMediaSafetyReport(html: String) {
+    val document = runCatching { RichHtmlAstCompiler.parseBody(html) }.getOrNull() ?: return
+    document.select("img[src]").forEach { element ->
+        safeRichMediaSource(element.attr("src"), RichMediaKind.Image)
+    }
+    document.select("[style]").forEach { element ->
+        recordCompileStyleMediaSafety(element.attr("style"))
+    }
+    document.select("style").forEach { style ->
+        CSS_RULE_BODY.findAll(style.data().ifBlank { style.html() }).forEach { match ->
+            recordCompileStyleMediaSafety(match.groupValues.getOrNull(1).orEmpty())
+        }
+    }
+}
+
+private fun recordCompileStyleMediaSafety(declarations: String) {
+    BACKGROUND_DECLARATION.findAll(declarations).forEach { match ->
+        parseBackgroundUrl(match.value)?.let { source ->
+            safeRichMediaSource(source, RichMediaKind.BackgroundImage)
+        }
+    }
+    LIST_STYLE_IMAGE_DECLARATION.findAll(declarations).forEach { match ->
+        parseBackgroundUrl(match.value)?.let { source ->
+            safeRichMediaSource(source, RichMediaKind.ListStyleImage)
+        }
+    }
+}
+
+private val BACKGROUND_DECLARATION = Regex("""background(?:-image)?\s*:[^;]*""", RegexOption.IGNORE_CASE)
+private val LIST_STYLE_IMAGE_DECLARATION = Regex("""list-style-image\s*:[^;]*""", RegexOption.IGNORE_CASE)
+private val CSS_RULE_BODY = Regex("""\{([^{}]*)\}""")
+
 private data class ParsedBackgroundShorthand(
     val color: Color? = null,
     val declaredColor: RichCssColor? = null,
@@ -3093,7 +3572,7 @@ private fun parseBackgroundLayerShorthand(value: String, context: CssLengthConte
         color = resolveRichCssColor(declaredColor, null),
         declaredColor = declaredColor,
         image = parseBackgroundImage(value),
-        url = parseBackgroundUrl(value),
+        url = parseSafeBackgroundUrl(value, RichMediaKind.BackgroundImage),
         size = sizeTokens.takeIf { it.isNotEmpty() }?.joinToString(" ")?.let { parseBackgroundSize(it, context) },
         position = positionTokens.takeIf { it.isNotEmpty() }?.joinToString(" ")?.let { parseBackgroundPosition(it, context) },
         repeat = repeat,
@@ -3127,7 +3606,7 @@ private fun parseSafeBackgroundLayers(
     val parsed = sourceLayers.mapIndexedNotNull { index, rawLayer ->
         val shorthand = parseBackgroundLayerShorthand(rawLayer, context)
         val image = parseBackgroundImage(rawLayer)
-        val url = parseBackgroundUrl(rawLayer)?.takeIf(::isSafeRichHtmlImageSource)
+        val url = parseSafeBackgroundUrl(rawLayer, RichMediaKind.BackgroundImage)
         if (image == null && url == null) {
             null
         } else {
@@ -3322,7 +3801,7 @@ private fun parseListStyleImage(value: String): String? {
     val normalized = value.trim()
     if (normalized.equals("none", ignoreCase = true)) return null
     return parseBackgroundUrl(normalized)
-        ?.takeIf(::isSafeRichHtmlImageSource)
+        ?.let { safeRichMediaSource(it, RichMediaKind.ListStyleImage) }
 }
 
 private fun parsePseudoContent(value: String, element: Element): String? {

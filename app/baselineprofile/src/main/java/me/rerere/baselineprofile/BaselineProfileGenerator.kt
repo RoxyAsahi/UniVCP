@@ -56,6 +56,7 @@ class BaselineProfileGenerator {
             startActivityAndWait()
 
             scrollRichChatJourney(repetitions = 3)
+            scrollRichChatHistoryJourney(repetitions = 3)
 
             // Check UiAutomator documentation for more information how to interact with the app.
             // https://d.android.com/training/testing/other-components/ui-automator

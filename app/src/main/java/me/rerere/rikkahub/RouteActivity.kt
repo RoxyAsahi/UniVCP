@@ -105,10 +105,16 @@ import me.rerere.rikkahub.ui.pages.setting.SettingFilesPage
 import me.rerere.rikkahub.ui.pages.setting.SettingMcpPage
 import me.rerere.rikkahub.ui.pages.setting.SettingModelPage
 import me.rerere.rikkahub.ui.pages.setting.SettingPage
+import me.rerere.rikkahub.ui.pages.setting.SettingPreferencesGeneralPage
+import me.rerere.rikkahub.ui.pages.setting.SettingPreferencesNotificationPage
+import me.rerere.rikkahub.ui.pages.setting.SettingPreferencesPage
+import me.rerere.rikkahub.ui.pages.setting.SettingPreferencesThemePage
+import me.rerere.rikkahub.ui.pages.setting.SettingPreferencesUIPage
 import me.rerere.rikkahub.ui.pages.setting.SettingProviderDetailPage
 import me.rerere.rikkahub.ui.pages.setting.SettingProviderPage
 import me.rerere.rikkahub.ui.pages.setting.SettingSearchPage
 import me.rerere.rikkahub.ui.pages.setting.SettingSpeechPage
+import me.rerere.rikkahub.ui.pages.setting.SettingThemePage
 import me.rerere.rikkahub.ui.pages.setting.SettingWebPage
 import me.rerere.rikkahub.ui.pages.share.handler.ShareHandlerPage
 import me.rerere.rikkahub.ui.pages.stats.StatsPage
@@ -385,6 +391,30 @@ class RouteActivity : ComponentActivity() {
                                 SettingDisplayPage()
                             }
 
+                            entry<Screen.SettingTheme> {
+                                SettingThemePage()
+                            }
+
+                            entry<Screen.SettingPreferences> {
+                                SettingPreferencesPage()
+                            }
+
+                            entry<Screen.SettingPreferencesTheme> {
+                                SettingPreferencesThemePage()
+                            }
+
+                            entry<Screen.SettingPreferencesNotification> {
+                                SettingPreferencesNotificationPage()
+                            }
+
+                            entry<Screen.SettingPreferencesGeneral> {
+                                SettingPreferencesGeneralPage()
+                            }
+
+                            entry<Screen.SettingPreferencesUI> {
+                                SettingPreferencesUIPage()
+                            }
+
                             entry<Screen.SettingProvider> {
                                 SettingProviderPage()
                             }
@@ -577,6 +607,24 @@ sealed interface Screen : NavKey {
 
     @Serializable
     data object SettingDisplay : Screen
+
+    @Serializable
+    data object SettingTheme : Screen
+
+    @Serializable
+    data object SettingPreferences : Screen
+
+    @Serializable
+    data object SettingPreferencesTheme : Screen
+
+    @Serializable
+    data object SettingPreferencesNotification : Screen
+
+    @Serializable
+    data object SettingPreferencesGeneral : Screen
+
+    @Serializable
+    data object SettingPreferencesUI : Screen
 
     @Serializable
     data object SettingProvider : Screen

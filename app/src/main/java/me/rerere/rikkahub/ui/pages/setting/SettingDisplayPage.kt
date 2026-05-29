@@ -371,6 +371,7 @@ fun SettingDisplayPage(vm: SettingVM = koinViewModel()) {
                                                     ChatFontFamily.DEFAULT -> FontFamily.Default
                                                     ChatFontFamily.SERIF -> FontFamily.Serif
                                                     ChatFontFamily.MONOSPACE -> FontFamily.Monospace
+                                                    ChatFontFamily.CUSTOM -> FontFamily.Default
                                                 }
                                             )
                                         }
@@ -407,6 +408,7 @@ fun SettingDisplayPage(vm: SettingVM = koinViewModel()) {
                                                 ChatFontFamily.DEFAULT -> FontFamily.Default
                                                 ChatFontFamily.SERIF -> FontFamily.Serif
                                                 ChatFontFamily.MONOSPACE -> FontFamily.Monospace
+                                                ChatFontFamily.CUSTOM -> FontFamily.Default
                                             }
                                         )
                                     )

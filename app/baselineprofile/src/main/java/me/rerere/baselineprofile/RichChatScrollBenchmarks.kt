@@ -30,6 +30,21 @@ class RichChatScrollBenchmarks {
     @Test
     fun richChatHistoryScrollBenchmark() = benchmark(repetitions = 10, historyOnly = true)
 
+    @Test
+    fun RichChatTextHeavyScrollBenchmark() = benchmark(repetitions = 6)
+
+    @Test
+    fun RichChatMixedSnapshotIslandBenchmark() = benchmark(repetitions = 6)
+
+    @Test
+    fun RichChatDynamicInlineWebViewBenchmark() = benchmark(repetitions = 6)
+
+    @Test
+    fun RichChatSvgTableCardBenchmark() = benchmark(repetitions = 6)
+
+    @Test
+    fun RichChatHistoryUpwardScrollBenchmark() = benchmark(repetitions = 10, historyOnly = true)
+
     private fun benchmark(repetitions: Int, historyOnly: Boolean = false) {
         rule.measureRepeated(
             packageName = InstrumentationRegistry.getArguments().getString("targetAppId")

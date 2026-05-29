@@ -8,12 +8,18 @@ import me.rerere.rikkahub.ui.components.richtext.RichDetailsBlock
 import me.rerere.rikkahub.ui.components.richtext.RichHtmlRenderModel
 import me.rerere.rikkahub.ui.components.richtext.RichImageBlock
 import me.rerere.rikkahub.ui.components.richtext.RichMathBlock
+import me.rerere.rikkahub.ui.components.richtext.RichSnapshotIslandBlock
+import me.rerere.rikkahub.ui.components.richtext.RichTextFlowBlock
 import me.rerere.rikkahub.ui.components.richtext.RichSvgBlock
 import me.rerere.rikkahub.ui.components.richtext.RichTableBlock
 import me.rerere.rikkahub.ui.components.richtext.RichTextBlock
 import me.rerere.rikkahub.ui.components.richtext.RichUnsupportedBlock
 import me.rerere.rikkahub.ui.components.richtext.RichUnsupportedReason
+import me.rerere.rikkahub.ui.components.richtext.RichTextFlowOptimizer
 import me.rerere.rikkahub.ui.components.richtext.RichVisualHint
+import me.rerere.rikkahub.ui.components.render.RenderLruCache
+
+internal const val RichRenderPlanVersion: Int = 1
 
 internal data class RichRenderPlan(
     val id: String,
@@ -31,6 +37,19 @@ internal data class RichRenderPlan(
     val riskScore: Int,
     val riskReasons: Set<String>,
     val heightCache: RichRenderHeightCacheState,
+    val astStats: RichContentAstStats? = null,
+    val documentId: String = "",
+    val documentSchemaVersion: Int = 0,
+    val documentSourceKind: RichContentSourceKind? = null,
+    val documentStats: RichContentDocumentStats? = null,
+    val documentRoute: RichContentDocumentRoute? = null,
+    val documentRouteReason: String = "",
+    val transformReport: RichContentTransformPipelineReport? = null,
+    val textFlowAppliedCount: Int = 0,
+    val textFlowInlineFeaturePreservedCount: Int = 0,
+    val renderNodeReductionEstimate: Int = 0,
+    val textFlowBlockedReasons: Set<String> = emptySet(),
+    val version: Int = RichRenderPlanVersion,
 ) {
     fun withRoute(route: RichRenderPlanRoute, reason: String): RichRenderPlan = copy(
         route = route,
@@ -50,6 +69,7 @@ internal data class RichRenderPlan(
 
     fun toMetadataLine(): String = listOf(
         "id=$id",
+        "planVersion=$version",
         "route=${route.name}",
         "confidence=${nativeConfidence.name}",
         "reason=$reason",
@@ -64,6 +84,45 @@ internal data class RichRenderPlan(
         "riskScore=$riskScore",
         "riskReasons=${riskReasons.sorted()}",
         "heightCache=${heightCache.name}",
+        "astNodeCount=${astStats?.astNodeCount ?: 0}",
+        "astTextRuns=${astStats?.textRunCount ?: 0}",
+        "astParagraphs=${astStats?.paragraphCount ?: 0}",
+        "astBlockedTextFlow=${astStats?.blockedTextFlowCount ?: 0}",
+        "documentId=$documentId",
+        "documentSchema=$documentSchemaVersion",
+        "documentSourceKind=${documentSourceKind?.name.orEmpty()}",
+        "documentNodes=${documentStats?.canonicalNodeCount ?: 0}",
+        "documentTextFlowEligible=${documentStats?.textFlowEligibleSubtreeCount ?: 0}",
+        "documentSnapshotEligible=${documentStats?.snapshotIslandEligibleSubtreeCount ?: 0}",
+        "documentInlineRequired=${documentStats?.inlineWebViewRequiredCount ?: 0}",
+        "documentRoute=${documentRoute?.name.orEmpty()}",
+        "documentRouteReason=$documentRouteReason",
+        "transformPipeline=${transformReport?.pipelineVersion ?: 0}",
+        "transformPasses=${transformReport?.passOrder?.map { it.name }.orEmpty()}",
+        "transformPassDurationsMs=${transformReport?.passDurationsMs?.mapKeys { it.key.name }.orEmpty()}",
+        "transformPassDurationTotalMs=${transformReport?.totalPassDurationMs ?: 0L}",
+        "transformRouteMismatch=${transformReport?.routeMismatchReason?.name.orEmpty()}",
+        "transformTextFlowSource=${transformReport?.textFlowDecisionSource?.name.orEmpty()}",
+        "transformTextFlowLowering=${transformReport?.textFlowLoweringMode?.name.orEmpty()}",
+        "transformSubtreeRouteSource=${transformReport?.subtreeRouteDecisionSource?.name.orEmpty()}",
+        "transformSubtreeRouteLowering=${transformReport?.subtreeRouteLoweringMode?.name.orEmpty()}",
+        "transformImportLoss=${transformReport?.importConversionLossCount ?: 0}",
+        "transformWarnings=${transformReport?.normalizationWarnings.orEmpty()}",
+        "transformTextFlowHardStops=${transformReport?.textFlowHardStopNodeCount ?: 0}",
+        "transformTextFlowHardStopReasons=${transformReport?.textFlowHardStopReasons?.sorted().orEmpty()}",
+        "transformSubtreeCandidates=${transformReport?.subtreeRouteCandidateNodeCount ?: 0}",
+        "transformSubtreeRejected=${transformReport?.subtreeRouteRejectedNodeCount ?: 0}",
+        "transformSubtreeRejectReasons=${transformReport?.subtreeRouteRejectReasons?.sorted().orEmpty()}",
+        "transformSubtreeNativeActions=${transformReport?.subtreeRouteNativePreservedActionCount ?: 0}",
+        "transformSubtreeInlineRequired=${transformReport?.subtreeRouteInlineWebViewRequiredCount ?: 0}",
+        "transformSubtreeWholeSnapshotLikely=${transformReport?.subtreeRouteWholeSnapshotLikely ?: false}",
+        "transformSubtreeCacheHits=${transformReport?.subtreeCacheHitCount ?: 0}",
+        "transformSubtreeCacheMisses=${transformReport?.subtreeCacheMissCount ?: 0}",
+        "transformSubtreeCacheHitRate=${transformReport?.subtreeCacheHitRate ?: 0f}",
+        "textFlowApplied=$textFlowAppliedCount",
+        "textFlowInlineFeaturesPreserved=$textFlowInlineFeaturePreservedCount",
+        "renderNodeReductionEstimate=$renderNodeReductionEstimate",
+        "textFlowBlockedReasons=${textFlowBlockedReasons.sorted()}",
     ).joinToString(" ")
 }
 
@@ -94,6 +153,7 @@ internal fun buildRichRenderPlan(
     risk: RenderRiskScore = RenderRiskScore.fromHtml(html, analysis),
     model: RichHtmlRenderModel? = null,
     heightCacheState: RichRenderHeightCacheState = RichRenderHeightCacheState.Unknown,
+    includeStructuralReport: Boolean = true,
 ): RichRenderPlan {
     val metrics = inspectRichRenderEstimatorMetrics(html)
     val beforeCompile = RichHtmlSnapshotPolicy.beforeCompile(analysis)
@@ -102,6 +162,18 @@ internal fun buildRichRenderPlan(
     val inferredHints = metrics.inferVisualHints()
     val visualHints = model?.visualHints?.toSet() ?: inferredHints
     val unsupported = model?.unsupported?.toSet().orEmpty()
+    val structuralReport = if (includeStructuralReport) {
+        RichRenderPlanStructuralReportCache.get(html, analysis)
+    } else {
+        RichRenderPlanStructuralReport.Empty
+    }
+    val actualRenderBlockCount = model?.blocks?.sumOf(::countRichRenderBlocks)
+    val estimatedRenderBlockCount = actualRenderBlockCount ?: metrics.estimatedRenderBlockCount()
+    val textFlowInspection = model?.let(RichTextFlowOptimizer::inspect)
+    val textFlowAppliedCount = textFlowInspection?.appliedCount ?: 0
+    val documentId = structuralReport.document?.documentId ?: renderTextCacheKey(html)
+    val documentSchemaVersion = structuralReport.document?.schemaVersion ?: RichContentDocumentSchemaVersion
+    val documentSourceKind = structuralReport.document?.sourceKind ?: RichContentSourceKind.Html
     val route = when {
         analysis.kind == RichHtmlRenderKind.ComplexDynamic -> RichRenderPlanRoute.DynamicPreview
         risk.route == RichContentRoute.DynamicPreview -> RichRenderPlanRoute.DynamicPreview
@@ -128,8 +200,7 @@ internal fun buildRichRenderPlan(
         reason = reason,
         htmlLength = html.length,
         sourceNodeCount = metrics.sourceNodeCount,
-        estimatedRenderBlockCount = model?.blocks?.sumOf(::countRichRenderBlocks)
-            ?: metrics.estimatedRenderBlockCount(),
+        estimatedRenderBlockCount = estimatedRenderBlockCount,
         textFlowCandidateCount = metrics.textFlowCandidateCount(),
         snapshotIslandCandidateCount = metrics.snapshotIslandCandidateCount(),
         interactiveActionCount = metrics.interactiveActionCount,
@@ -138,7 +209,82 @@ internal fun buildRichRenderPlan(
         riskScore = risk.score,
         riskReasons = risk.reasons,
         heightCache = heightCacheState,
+        astStats = structuralReport.astStats,
+        documentId = documentId,
+        documentSchemaVersion = documentSchemaVersion,
+        documentSourceKind = documentSourceKind,
+        documentStats = structuralReport.documentStats,
+        documentRoute = structuralReport.documentRoute,
+        documentRouteReason = structuralReport.documentRouteReason,
+        transformReport = structuralReport.transformReport(model)?.withCurrentRoute(route),
+        textFlowAppliedCount = textFlowAppliedCount,
+        textFlowInlineFeaturePreservedCount = textFlowInspection?.inlineFeaturePreservedCount ?: 0,
+        renderNodeReductionEstimate = actualRenderBlockCount
+            ?.let { (metrics.estimatedRenderBlockCount() - it).coerceAtLeast(0) }
+            ?: textFlowInspection?.renderNodeReductionEstimate
+            ?: 0,
+        textFlowBlockedReasons = textFlowInspection?.blockedReasons?.mapTo(linkedSetOf()) { it.name }.orEmpty(),
     )
+}
+
+private data class RichRenderPlanStructuralReport(
+    val document: RichContentDocument?,
+    val astStats: RichContentAstStats?,
+    val documentStats: RichContentDocumentStats?,
+    val documentRoute: RichContentDocumentRoute?,
+    val documentRouteReason: String,
+    val transformReport: RichContentTransformPipelineReport?,
+) {
+    companion object {
+        val Empty = RichRenderPlanStructuralReport(
+            document = null,
+            astStats = null,
+            documentStats = null,
+            documentRoute = null,
+            documentRouteReason = "",
+            transformReport = null,
+        )
+    }
+}
+
+private object RichRenderPlanStructuralReportCache {
+    private val cache = RenderLruCache<String, RichRenderPlanStructuralReport>(maxEntries = 128)
+
+    fun get(html: String, analysis: RichHtmlAnalysis): RichRenderPlanStructuralReport {
+        val key = renderTextCacheKey(html)
+        return cache.getOrPut(key) {
+            runCatching {
+                val ast = buildRichContentAstFromHtml(html, analysis)
+                val document = buildRichContentDocumentFromAst(
+                    source = html,
+                    sourceKind = RichContentSourceKind.Html,
+                    legacyAst = ast,
+                )
+                val routeReport = document.routeReport()
+                val transformReport = RichContentTransformPipeline.report(document)
+                RichRenderPlanStructuralReport(
+                    document = document,
+                    astStats = ast.stats,
+                    documentStats = document.stats,
+                    documentRoute = routeReport.route,
+                    documentRouteReason = routeReport.reason,
+                    transformReport = transformReport,
+                )
+            }.getOrElse {
+                RichRenderPlanStructuralReport.Empty
+            }
+        }
+    }
+}
+
+private fun RichRenderPlanStructuralReport.transformReport(
+    model: RichHtmlRenderModel?,
+): RichContentTransformPipelineReport? {
+    val document = document
+    if (model != null && document != null) {
+        return RichContentTransformPipeline.report(document = document, model = model)
+    }
+    return transformReport
 }
 
 internal fun inspectRichRenderEstimatorMetrics(html: String): RichRenderEstimatorMetrics {
@@ -247,11 +393,30 @@ internal fun countRichRenderBlocks(block: RichBlock): Int {
             block.inlineBoxes.sumOf { countRichRenderBlocks(it.block) }
         is RichDetailsBlock -> 1 + block.children.sumOf(::countRichRenderBlocks)
         is RichTextBlock -> 1 + block.inlineBoxes.sumOf { countRichRenderBlocks(it.block) }
+        is RichTextFlowBlock -> 1
+        is RichSnapshotIslandBlock -> 1
         is RichSvgBlock -> 1 + block.model.commands.size
         is RichImageBlock,
         is RichTableBlock,
         is RichMathBlock,
         is RichUnsupportedBlock -> 1
+    }
+}
+
+internal fun countRichTextFlowBlocks(block: RichBlock): Int {
+    return when (block) {
+        is RichContainerBlock -> block.children.sumOf(::countRichTextFlowBlocks)
+        is RichButtonBlock -> block.children.sumOf(::countRichTextFlowBlocks) +
+            block.inlineBoxes.sumOf { countRichTextFlowBlocks(it.block) }
+        is RichDetailsBlock -> block.children.sumOf(::countRichTextFlowBlocks)
+        is RichTextBlock -> block.inlineBoxes.sumOf { countRichTextFlowBlocks(it.block) }
+        is RichTextFlowBlock -> 1
+        is RichSnapshotIslandBlock -> 0
+        is RichImageBlock,
+        is RichMathBlock,
+        is RichSvgBlock,
+        is RichTableBlock,
+        is RichUnsupportedBlock -> 0
     }
 }
 

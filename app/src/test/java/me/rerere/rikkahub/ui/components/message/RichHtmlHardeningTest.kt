@@ -12,10 +12,12 @@ import me.rerere.rikkahub.ui.components.render.renderTextCacheKey
 import me.rerere.rikkahub.ui.components.richtext.RichContainerBlock
 import me.rerere.rikkahub.ui.components.richtext.ComputedStyle
 import me.rerere.rikkahub.ui.components.richtext.RichCssDeclarationParser
+import me.rerere.rikkahub.ui.components.richtext.RichBlock
 import me.rerere.rikkahub.ui.components.richtext.RichButtonBlock
 import me.rerere.rikkahub.ui.components.richtext.RichHtmlCompileOptions
 import me.rerere.rikkahub.ui.components.richtext.RichHtmlCompiler
 import me.rerere.rikkahub.ui.components.richtext.RichTextBlock
+import me.rerere.rikkahub.ui.components.richtext.RichTextFlowBlock
 import me.rerere.rikkahub.ui.components.richtext.StyleResolver
 import org.jsoup.Jsoup
 import org.junit.Assert.assertEquals
@@ -64,7 +66,7 @@ class RichHtmlHardeningTest {
         val model = RichHtmlCompiler.compileAsync(html)
         val cached = RichHtmlCompiler.compileAsync(html)
 
-        assertTrue(model.blocks.single() is RichContainerBlock)
+        assertTrue(model.blocks.single() is RichContainerBlock || model.blocks.single() is RichTextFlowBlock)
         assertEquals(model, cached)
         assertEquals(1, RichHtmlCompiler.cacheStats().size)
         assertTrue(RichHtmlCompiler.cacheStats().hits >= 1)
@@ -111,6 +113,26 @@ class RichHtmlHardeningTest {
     }
 
     @Test
+    fun `route closure telemetry tracks mismatch reasons decision sources and planned pairs`() {
+        RichHtmlRenderTelemetry.resetForTest()
+        RichHtmlRenderTelemetry.recordRouteClosure(
+            id = "route-closure",
+            report = buildRichRouteClosureReport(
+                plannedRoute = RichRenderPlanRoute.Native.name,
+                actualRoute = RichRenderPlanRoute.Snapshot.name,
+                actualDecisionSource = RichActualDecisionSource.SnapshotPolicy,
+            ),
+        )
+
+        val summary = RichHtmlRenderTelemetry.routeClosureSummary()
+
+        assertEquals(1, summary.sampleCount)
+        assertEquals(1, summary.mismatches["PlanNativeActualSnapshot"])
+        assertEquals(1, summary.decisionSources["SnapshotPolicy"])
+        assertEquals(1, summary.plannedActualPairs["Native->Snapshot"])
+    }
+
+    @Test
     fun `font shorthand resolves size line height weight style and fallback family`() {
         RichHtmlCompiler.clearCacheForTest()
         val declarations = RichCssDeclarationParser.parse("font: italic 700 0.75rem/1.6 'Fira Code', monospace; margin:0;")
@@ -131,8 +153,7 @@ class RichHtmlHardeningTest {
             .style
         assertEquals(resolved.toString(), 12f, resolved.fontSize.value, 0.01f)
 
-        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
-        val text = root.children.single() as RichTextBlock
+        val text = RichHtmlCompiler.compile(html).blocks.textLike("compact code card")
 
         assertEquals(text.style.toString(), 12f, text.style.fontSize.value, 0.01f)
         assertEquals(19.2f, text.style.lineHeight.value, 0.01f)
@@ -151,14 +172,40 @@ class RichHtmlHardeningTest {
             </div>
         """.trimIndent()
 
-        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
-        val label = root.children[0] as RichTextBlock
-        val button = root.children[1] as RichButtonBlock
+        val blocks = RichHtmlCompiler.compile(html).blocks.flatMap(::flattenRichBlocks)
+        val label = blocks.textLike("GLASSMORPHISM")
+        val button = blocks.filterIsInstance<RichButtonBlock>().singleOrNull()
+            ?: error(blocks.joinToString { "${it::class.simpleName}:${it.style.fontSize}" })
 
         assertEquals(12f, label.style.fontSize.value, 0.01f)
         assertEquals(19.2f, label.style.lineHeight.value, 0.01f)
-        assertEquals("GLASSMORPHISM", label.content.text)
+        assertEquals("GLASSMORPHISM", label.text)
         assertEquals(14.4f, button.style.fontSize.value, 0.01f)
         assertEquals(17.28f, button.style.lineHeight.value, 0.01f)
+    }
+
+    private data class TextLikeBlock(
+        val text: String,
+        val style: ComputedStyle,
+    )
+
+    private fun List<RichBlock>.textLike(expected: String): TextLikeBlock =
+        flatMap(::textLikeBlocks)
+            .first { it.text == expected }
+
+    private fun textLikeBlocks(block: RichBlock): List<TextLikeBlock> = when (block) {
+        is RichTextBlock -> listOf(TextLikeBlock(block.content.text, block.style)) +
+            block.inlineBoxes.flatMap { textLikeBlocks(it.block) }
+        is RichTextFlowBlock -> block.paragraphs.map { TextLikeBlock(it.content.text, it.style) }
+        is RichContainerBlock -> block.children.flatMap(::textLikeBlocks)
+        is RichButtonBlock -> block.children.flatMap(::textLikeBlocks) + TextLikeBlock(block.label.text, block.style)
+        else -> emptyList()
+    }
+
+    private fun flattenRichBlocks(block: RichBlock): List<RichBlock> = when (block) {
+        is RichContainerBlock -> listOf(block) + block.children.flatMap(::flattenRichBlocks)
+        is RichButtonBlock -> listOf(block) + block.children.flatMap(::flattenRichBlocks)
+        is RichTextBlock -> listOf(block) + block.inlineBoxes.flatMap { flattenRichBlocks(it.block) }
+        else -> listOf(block)
     }
 }

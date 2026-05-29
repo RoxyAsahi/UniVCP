@@ -50,6 +50,8 @@ internal fun RichHtmlSnapshotBlock(
     previewText: String,
     reason: String,
     modifier: Modifier = Modifier,
+    placeholderHeightPx: Int? = null,
+    heightCacheKey: RichHtmlHeightKey? = null,
     onOpenPreview: (() -> Unit)? = null,
     fallback: @Composable () -> Unit,
 ) {
@@ -143,6 +145,13 @@ internal fun RichHtmlSnapshotBlock(
         LaunchedEffect(cacheKey, shouldRenderSnapshot) {
             RichHtmlSnapshotCache.get(cacheKey)?.let {
                 entry = it
+                heightCacheKey?.let { key ->
+                    RichHtmlHeightCache.put(
+                        key = key,
+                        heightPx = it.heightPx,
+                        confidence = RichRenderHeightConfidence.MeasuredSnapshot,
+                    )
+                }
                 RichHtmlRenderTelemetry.recordSnapshotSuccess(
                     id = telemetryId,
                     widthPx = it.widthPx,
@@ -213,6 +222,13 @@ internal fun RichHtmlSnapshotBlock(
                 failed = true
             } else {
                 entry = nextEntry
+                heightCacheKey?.let { key ->
+                    RichHtmlHeightCache.put(
+                        key = key,
+                        heightPx = nextEntry.heightPx,
+                        confidence = RichRenderHeightConfidence.MeasuredSnapshot,
+                    )
+                }
                 RichHtmlRenderTelemetry.recordSnapshotSuccess(
                     id = telemetryId,
                     widthPx = nextEntry.widthPx,
@@ -230,7 +246,11 @@ internal fun RichHtmlSnapshotBlock(
 
         when {
             failed -> fallback()
-            entry == null -> SnapshotLoadingPreview(previewText = previewText, onOpenPreview = onOpenPreview)
+            entry == null -> SnapshotLoadingPreview(
+                previewText = previewText,
+                placeholderHeightPx = placeholderHeightPx,
+                onOpenPreview = onOpenPreview,
+            )
             else -> SnapshotImage(entry = entry!!, onOpenPreview = onOpenPreview)
         }
     }
@@ -260,12 +280,21 @@ private fun SnapshotImage(
 @Composable
 private fun SnapshotLoadingPreview(
     previewText: String,
+    placeholderHeightPx: Int?,
     onOpenPreview: (() -> Unit)?,
 ) {
+    val density = LocalDensity.current
+    val minHeight = remember(placeholderHeightPx, density.density) {
+        placeholderHeightPx
+            ?.takeIf { it > 0 }
+            ?.let { with(density) { it.toDp() } }
+            ?.coerceIn(144.dp, 1_200.dp)
+            ?: 144.dp
+    }
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 144.dp)
+            .heightIn(min = minHeight)
             .testTag("rich-html-snapshot-loading")
             .then(if (onOpenPreview != null) Modifier.clickable(onClick = onOpenPreview) else Modifier),
         shape = RoundedCornerShape(12.dp),

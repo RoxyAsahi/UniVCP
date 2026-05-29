@@ -375,6 +375,9 @@ private fun ChatPageContent(
                             )
                         )
                     },
+                    onUpdateConversation = {
+                        vm.updateConversation(it)
+                    },
                     onUpdateSearchService = { index ->
                         vm.updateSettings(
                             setting.copy(

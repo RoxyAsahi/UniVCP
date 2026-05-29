@@ -8,6 +8,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -45,10 +46,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.Dp
@@ -69,9 +70,12 @@ import me.rerere.hugeicons.stroke.MusicNote03
 import me.rerere.hugeicons.stroke.Video01
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.Screen
-import me.rerere.rikkahub.data.datastore.ChatFontFamily
+import me.rerere.rikkahub.ui.components.richtext.LocalRichRenderScrollState
 import me.rerere.rikkahub.ui.components.richtext.MarkdownBlock
 import me.rerere.rikkahub.ui.components.richtext.RichHtmlBubbleBlock
+import me.rerere.rikkahub.ui.components.richtext.RichRenderDecisionInput
+import me.rerere.rikkahub.ui.components.richtext.RichRenderHeightCache
+import me.rerere.rikkahub.ui.components.richtext.RichRenderOrchestrator
 import me.rerere.rikkahub.ui.components.richtext.ZoomableAsyncImage
 import me.rerere.rikkahub.ui.components.richtext.buildMarkdownPreviewHtml
 import me.rerere.rikkahub.ui.components.ui.ChainOfThought
@@ -79,6 +83,7 @@ import me.rerere.rikkahub.ui.components.ui.Favicon
 import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.ui.context.LocalSettings
 import me.rerere.rikkahub.ui.modifier.shimmer
+import me.rerere.rikkahub.ui.theme.rememberChatFontFamily
 import me.rerere.rikkahub.ui.theme.extendColors
 import me.rerere.rikkahub.utils.JsonInstant
 import me.rerere.rikkahub.utils.base64Encode
@@ -218,16 +223,13 @@ private fun ChatMessageTextStyleProvider(
     content: @Composable () -> Unit,
 ) {
     val settings = LocalSettings.current.displaySetting
+    val chatFontFamily = rememberChatFontFamily(settings)
     val textStyle = LocalTextStyle.current.copy(
         fontSize = LocalTextStyle.current.fontSize * settings.fontSizeRatio,
         lineHeight = LocalTextStyle.current.lineHeight * settings.fontSizeRatio,
-        fontFamily = when (settings.chatFontFamily) {
-            ChatFontFamily.DEFAULT -> FontFamily.Default
-            ChatFontFamily.SERIF -> FontFamily.Serif
-            ChatFontFamily.MONOSPACE -> FontFamily.Monospace
-        },
+        fontFamily = chatFontFamily,
     )
-    key(meta.message.id, settings.fontSizeRatio, settings.chatFontFamily) {
+    key(meta.message.id, settings.fontSizeRatio, settings.chatFontFamily, settings.chatCustomFontPath) {
         ProvideTextStyle(textStyle) {
             content()
         }
@@ -359,6 +361,7 @@ private fun RichHtmlCellContent(
                             html = previewHtml,
                             analysis = previewAnalysis,
                             risk = RenderRiskScore.fromHtml(previewHtml, previewAnalysis),
+                            includeStructuralReport = false,
                         ),
                         renderFallback = {
                             StreamingRichHtmlPlaceholder(
@@ -423,12 +426,86 @@ private fun RichHtmlCellContent(
                     },
                 )
             } else {
-                LaunchedEffect(cell.renderPlan) {
-                    RichHtmlRenderTelemetry.recordRichRenderPlan(
-                        cell.renderPlan.withRoute(
-                            route = RichRenderPlanRoute.InlineWebView,
-                            reason = "ComplexDynamicInlineWebView",
+                val scrollState = LocalRichRenderScrollState.current
+                val density = LocalDensity.current
+                val context = LocalContext.current
+                val dark = isSystemInDarkTheme()
+                remember(context) {
+                    RichRenderHeightCache.initialize(context.applicationContext)
+                    true
+                }
+                val inlineHeightKey = remember(
+                    block.html,
+                    scrollState.viewportWidthDp,
+                    density.fontScale,
+                    density.density,
+                    dark,
+                ) {
+                    RichRenderHeightCache.key(
+                        id = cell.renderPlan.id,
+                        viewportWidthDp = scrollState.viewportWidthDp,
+                        fontScale = density.fontScale,
+                        density = density.density,
+                        themeBucket = if (dark) "dark" else "light",
+                        contentType = "InlineDynamicWebView",
+                    )
+                }
+                val inlineHeightEntry = remember(inlineHeightKey) {
+                    RichRenderHeightCache.getEntry(inlineHeightKey)
+                }
+                val inlinePlan = remember(cell.renderPlan) {
+                    cell.renderPlan.withRoute(
+                        route = RichRenderPlanRoute.InlineWebView,
+                        reason = "ComplexDynamicInlineWebView",
+                    )
+                }
+                val inlineDecision = remember(
+                    inlinePlan,
+                    analysis,
+                    cell.renderRisk,
+                    scrollState,
+                    cellIndex,
+                    inlineHeightEntry,
+                ) {
+                    RichRenderOrchestrator.decide(
+                        RichRenderDecisionInput(
+                            plan = inlinePlan,
+                            analysis = analysis,
+                            risk = cell.renderRisk,
+                            scrollState = scrollState,
+                            cellIndex = cellIndex,
+                            cachedModelAvailable = false,
+                            heightEntry = inlineHeightEntry,
+                            alreadyRendered = false,
+                            transient = false,
                         )
+                    )
+                }
+                LaunchedEffect(inlinePlan, inlineDecision) {
+                    RichHtmlRenderTelemetry.recordRichRenderPlan(
+                        inlinePlan
+                    )
+                    RichHtmlRenderTelemetry.recordOrchestratorDecision(
+                        id = inlinePlan.id,
+                        route = inlineDecision.route.name,
+                        reason = inlineDecision.reason,
+                        placeholderHeightPx = inlineDecision.placeholderHeightPx,
+                        placeholderSource = inlineHeightEntry?.let { "Cache:${it.confidence.name}" }
+                            ?: "InlineDeferred",
+                        nativeAdmissionAllowed = inlineDecision.nativeAdmissionAllowed,
+                        shouldPrewarm = inlineDecision.shouldPrewarm,
+                        alreadyRendered = false,
+                        cachedModelAvailable = false,
+                        transient = false,
+                        heightConfidence = inlineHeightEntry?.confidence?.name,
+                    )
+                    RichHtmlRenderTelemetry.recordRouteClosure(
+                        id = inlinePlan.id,
+                        report = buildRichRouteClosureReport(
+                            plannedRoute = cell.renderPlan.route.name,
+                            actualRoute = RichRenderPlanRoute.InlineWebView.name,
+                            actualDecisionSource = RichActualDecisionSource.Orchestrator,
+                        ),
                     )
                 }
                 InlineDynamicWebViewBlock(

@@ -6,6 +6,8 @@ This document records the long-term native Compose rich-rendering architecture p
 
 The goal is not to replace the current path. The goal is to make the current path more systematic, testable, and closer to large IM/feed rendering architecture.
 
+Architecture overview: `docs/rich-render-target-architecture.md`.
+
 ## Product Goal
 
 The user-facing goal is:
@@ -354,6 +356,8 @@ Goal:
 
 Make upward history scrolling height-stable and move route/admission out of leaf Composables.
 
+Detailed implementation requirements: `docs/rich-render-v3-height-orchestrator-requirements.md`.
+
 Requirements:
 
 - Add versioned persistent native height cache.
@@ -385,6 +389,8 @@ Goal:
 
 Improve visual fidelity without turning whole interactive cards into static images.
 
+Detailed implementation requirements: `docs/rich-render-v4-snapshot-islands-requirements.md`.
+
 Requirements:
 
 - Add subtree capability analysis.
@@ -409,11 +415,35 @@ Acceptance:
 - Whole-bubble snapshot count decreases for mixed interactive cards.
 - Visual fidelity improves for browser-only visual islands.
 
+### V4.1: Stability Closure
+
+Goal:
+
+Close V3/V4 stability risks before parser and fidelity-platform work.
+
+Detailed implementation requirements: `docs/rich-render-v4_1-stability-requirements.md`.
+
+Requirements:
+
+- Release inline WebView admission after render-process-gone/crash.
+- Ensure cached compiled models still respect scheduler/orchestrator policy.
+- Make snapshot island style boundaries explicit and tested.
+- Improve island queue, fallback, and height telemetry.
+
+Acceptance:
+
+- Inline WebView crash cannot exhaust global live WebView slots.
+- Cached model hits still obey fast-scroll first-render gates.
+- Snapshot islands do not double-apply padding/border/background.
+- V1-V4 regression tests continue passing.
+
 ### V5: Parser, Safety, Media, And SVG Hardening
 
 Goal:
 
 Reduce hand-written parser fragility and use proven libraries in bounded roles.
+
+Detailed implementation requirements: `docs/rich-render-v5-parser-safety-media-svg-requirements.md`.
 
 Requirements:
 
@@ -449,6 +479,8 @@ Acceptance:
 Goal:
 
 Make fidelity measurable and turn UniVCP rich rendering into a stable platform.
+
+Detailed implementation requirements: `docs/rich-render-v6-fidelity-platform-requirements.md`.
 
 Requirements:
 

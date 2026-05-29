@@ -25,10 +25,24 @@ class RichHtmlFidelityReportTest {
         assertTrue("Expected compiled blocks", reports.sumOf { it.blockCount } > 0)
         assertTrue("Expected plan source nodes", reports.sumOf { it.planSourceNodeCount } > 0)
         assertTrue("Expected plan route field", reports.any { it.planRoute.isNotBlank() })
+        assertTrue("Expected AST nodes", reports.sumOf { it.astNodeCount } > 0)
 
         val serialized = reports.joinToString("\n") { it.toMetadataLine() }
         assertTrue("Report should include plan route", serialized.contains("planRoute="))
         assertTrue("Report should include plan estimated render blocks", serialized.contains("planEstimatedRenderBlocks="))
+        assertTrue("Report should include AST nodes", serialized.contains("astNodes="))
+        assertTrue("Report should include canonical document nodes", serialized.contains("documentNodes="))
+        assertTrue("Report should include AST route", serialized.contains("documentRoute="))
+        assertTrue("Report should include transform pipeline version", serialized.contains("transformPipeline="))
+        assertTrue("Report should include transform route mismatch", serialized.contains("transformRouteMismatch="))
+        assertTrue("Report should include route closure", serialized.contains("routeMismatch="))
+        assertTrue("Report should include decision source", serialized.contains("actualDecisionSource="))
+        assertTrue("Report should include TextFlow blocked reason count", serialized.contains("textFlowBlockedReasonCount="))
+        assertTrue("Report should include sanitizer summary", serialized.contains("sanitizerRemovedTags="))
+        assertTrue("Report should include compile phase summary", serialized.contains("compilePhaseSamples="))
+        assertTrue("Report should include CSS cascade summary", serialized.contains("cssRuleCount="))
+        assertTrue("Report should include SVG route summary", serialized.contains("svgRouteCount="))
+        assertTrue("Report should include media source summary", serialized.contains("mediaSourceCount="))
         loadRenderSeedAssistantTexts().forEach { sourceText ->
             sourceText.lineSequence()
                 .map { it.trim() }
@@ -79,16 +93,29 @@ class RichHtmlFidelityReportTest {
     }
 
     private fun buildReport(index: Int, html: String): FidelityReport {
+        RichHtmlRenderTelemetry.resetForTest()
         val start = System.nanoTime()
         val analysis = analyzeRichHtml(html)
         val risk = RenderRiskScore.fromHtml(html, analysis)
         val model = RichHtmlCompiler.compile(html)
+        val sanitizer = RichHtmlSanitizer.inspect(html)
+        val compilePhaseSummary = RichHtmlRenderTelemetry.compilePhaseSummary()
+        val cssSummary = RichHtmlRenderTelemetry.cssCascadeSummary()
+        val svgRouteSummary = RichHtmlRenderTelemetry.svgRouteSummary()
         val plan = buildRichRenderPlan(
             html = html,
             analysis = analysis,
             risk = risk,
             model = model,
         )
+        val actualDecision = RichHtmlSnapshotPolicy.afterCompile(analysis, model)
+        val actualRoute = actualDecision.route.toPlanRouteName()
+        val routeClosure = buildRichRouteClosureReport(
+            plannedRoute = plan.route.name,
+            actualRoute = actualRoute,
+            actualDecisionSource = RichActualDecisionSource.SnapshotPolicy,
+        )
+        RichHtmlRenderTelemetry.recordRouteClosure(plan.id, routeClosure)
         val compileMs = (System.nanoTime() - start) / 1_000_000
         val document = Jsoup.parseBodyFragment(html)
         val tags = document.body().select("*")
@@ -104,6 +131,10 @@ class RichHtmlFidelityReportTest {
             .map { it.tagName().lowercase() }
             .groupingBy { "svg:$it" }
             .eachCount()
+        val mediaSourceCount = document.select("img[src], [style]").count { element ->
+            element.tagName().equals("img", ignoreCase = true) ||
+                element.attr("style").contains("url(", ignoreCase = true)
+        }
         return FidelityReport(
             sampleId = "seed-$index:${model.id}",
             tags = tags,
@@ -129,6 +160,9 @@ class RichHtmlFidelityReportTest {
             compileMs = compileMs,
             blockCount = model.blocks.sumOf(::countRichRenderBlocks),
             planRoute = plan.route.name,
+            actualRoute = routeClosure.actualRoute,
+            routeMismatchReason = routeClosure.mismatchReason.name,
+            actualDecisionSource = routeClosure.actualDecisionSource.name,
             planConfidence = plan.nativeConfidence.name,
             planReason = plan.reason,
             planSourceNodeCount = plan.sourceNodeCount,
@@ -138,6 +172,40 @@ class RichHtmlFidelityReportTest {
             planInteractiveActionCount = plan.interactiveActionCount,
             planVisualHintCount = plan.visualHints.size,
             planUnsupportedCount = plan.unsupported.size,
+            astNodeCount = plan.astStats?.astNodeCount ?: 0,
+            astTextRunCount = plan.astStats?.textRunCount ?: 0,
+            astParagraphCount = plan.astStats?.paragraphCount ?: 0,
+            astTextFlowCandidateCount = plan.astStats?.textFlowCandidateCount ?: 0,
+            astBlockedTextFlowCount = plan.astStats?.blockedTextFlowCount ?: 0,
+            documentNodeCount = plan.documentStats?.canonicalNodeCount ?: 0,
+            documentTextFlowEligibleCount = plan.documentStats?.textFlowEligibleSubtreeCount ?: 0,
+            documentSnapshotEligibleCount = plan.documentStats?.snapshotIslandEligibleSubtreeCount ?: 0,
+            documentInlineRequiredCount = plan.documentStats?.inlineWebViewRequiredCount ?: 0,
+            documentRoute = plan.documentRoute?.name.orEmpty(),
+            documentRouteReason = plan.documentRouteReason,
+            transformPipelineVersion = plan.transformReport?.pipelineVersion ?: 0,
+            transformPassCount = plan.transformReport?.passOrder?.size ?: 0,
+            transformRouteMismatchReason = plan.transformReport?.routeMismatchReason?.name.orEmpty(),
+            transformImportConversionLossCount = plan.transformReport?.importConversionLossCount ?: 0,
+            transformWarningCount = plan.transformReport?.normalizationWarnings?.values?.sum() ?: 0,
+            textFlowAppliedCount = plan.textFlowAppliedCount,
+            renderNodeReductionEstimate = plan.renderNodeReductionEstimate,
+            textFlowBlockedReasonCount = plan.textFlowBlockedReasons.size,
+            sanitizerRemovedTagCount = sanitizer.removedTagCount,
+            sanitizerRemovedAttributeCount = sanitizer.removedAttributeCount,
+            sanitizerDangerousProtocolCount = sanitizer.dangerousProtocolCount,
+            sanitizerEventHandlerCount = sanitizer.eventHandlerCount,
+            sanitizerRuntimeReason = sanitizer.runtimeReason.orEmpty(),
+            sanitizerExistingSafetyAgreed = sanitizer.existingSafetyAgreed,
+            compilePhaseSampleCount = compilePhaseSummary.sampleCount,
+            compilePhaseMaxTotalMs = compilePhaseSummary.maxTotalMs,
+            cssRuleCount = cssSummary.totalRules,
+            cssUnsupportedSelectorCount = cssSummary.unsupportedSelectors,
+            cssParserFallbackCount = cssSummary.parserFallbacks,
+            cssIndexMismatchCount = cssSummary.indexMismatches,
+            svgRouteCount = svgRouteSummary.sampleCount,
+            svgRoutes = svgRouteSummary.routes,
+            mediaSourceCount = mediaSourceCount,
         )
     }
 
@@ -171,6 +239,9 @@ private data class FidelityReport(
     val compileMs: Long,
     val blockCount: Int,
     val planRoute: String,
+    val actualRoute: String,
+    val routeMismatchReason: String,
+    val actualDecisionSource: String,
     val planConfidence: String,
     val planReason: String,
     val planSourceNodeCount: Int,
@@ -180,6 +251,40 @@ private data class FidelityReport(
     val planInteractiveActionCount: Int,
     val planVisualHintCount: Int,
     val planUnsupportedCount: Int,
+    val astNodeCount: Int,
+    val astTextRunCount: Int,
+    val astParagraphCount: Int,
+    val astTextFlowCandidateCount: Int,
+    val astBlockedTextFlowCount: Int,
+    val documentNodeCount: Int,
+    val documentTextFlowEligibleCount: Int,
+    val documentSnapshotEligibleCount: Int,
+    val documentInlineRequiredCount: Int,
+    val documentRoute: String,
+    val documentRouteReason: String,
+    val transformPipelineVersion: Int,
+    val transformPassCount: Int,
+    val transformRouteMismatchReason: String,
+    val transformImportConversionLossCount: Int,
+    val transformWarningCount: Int,
+    val textFlowAppliedCount: Int,
+    val renderNodeReductionEstimate: Int,
+    val textFlowBlockedReasonCount: Int,
+    val sanitizerRemovedTagCount: Int,
+    val sanitizerRemovedAttributeCount: Int,
+    val sanitizerDangerousProtocolCount: Int,
+    val sanitizerEventHandlerCount: Int,
+    val sanitizerRuntimeReason: String,
+    val sanitizerExistingSafetyAgreed: Boolean,
+    val compilePhaseSampleCount: Int,
+    val compilePhaseMaxTotalMs: Long,
+    val cssRuleCount: Int,
+    val cssUnsupportedSelectorCount: Int,
+    val cssParserFallbackCount: Int,
+    val cssIndexMismatchCount: Int,
+    val svgRouteCount: Int,
+    val svgRoutes: Map<String, Int>,
+    val mediaSourceCount: Int,
 ) {
     fun toMetadataLine(): String {
         return listOf(
@@ -194,6 +299,9 @@ private data class FidelityReport(
             "compileMs=$compileMs",
             "blocks=$blockCount",
             "planRoute=$planRoute",
+            "actualRoute=$actualRoute",
+            "routeMismatch=$routeMismatchReason",
+            "actualDecisionSource=$actualDecisionSource",
             "planConfidence=$planConfidence",
             "planReason=$planReason",
             "planSourceNodes=$planSourceNodeCount",
@@ -203,6 +311,46 @@ private data class FidelityReport(
             "planInteractiveActions=$planInteractiveActionCount",
             "planVisualHintCount=$planVisualHintCount",
             "planUnsupportedCount=$planUnsupportedCount",
+            "astNodes=$astNodeCount",
+            "astTextRuns=$astTextRunCount",
+            "astParagraphs=$astParagraphCount",
+            "astTextFlowCandidates=$astTextFlowCandidateCount",
+            "astBlockedTextFlow=$astBlockedTextFlowCount",
+            "documentNodes=$documentNodeCount",
+            "documentTextFlowEligible=$documentTextFlowEligibleCount",
+            "documentSnapshotEligible=$documentSnapshotEligibleCount",
+            "documentInlineRequired=$documentInlineRequiredCount",
+            "documentRoute=$documentRoute",
+            "documentRouteReason=$documentRouteReason",
+            "transformPipeline=$transformPipelineVersion",
+            "transformPasses=$transformPassCount",
+            "transformRouteMismatch=$transformRouteMismatchReason",
+            "transformImportLoss=$transformImportConversionLossCount",
+            "transformWarnings=$transformWarningCount",
+            "textFlowApplied=$textFlowAppliedCount",
+            "renderNodeReductionEstimate=$renderNodeReductionEstimate",
+            "textFlowBlockedReasonCount=$textFlowBlockedReasonCount",
+            "sanitizerRemovedTags=$sanitizerRemovedTagCount",
+            "sanitizerRemovedAttrs=$sanitizerRemovedAttributeCount",
+            "sanitizerDangerousProtocols=$sanitizerDangerousProtocolCount",
+            "sanitizerEventHandlers=$sanitizerEventHandlerCount",
+            "sanitizerRuntimeReason=$sanitizerRuntimeReason",
+            "sanitizerExistingSafetyAgreed=$sanitizerExistingSafetyAgreed",
+            "compilePhaseSamples=$compilePhaseSampleCount",
+            "compilePhaseMaxTotalMs=$compilePhaseMaxTotalMs",
+            "cssRuleCount=$cssRuleCount",
+            "cssUnsupportedSelectors=$cssUnsupportedSelectorCount",
+            "cssParserFallbacks=$cssParserFallbackCount",
+            "cssIndexMismatches=$cssIndexMismatchCount",
+            "svgRouteCount=$svgRouteCount",
+            "svgRoutes=${svgRoutes.toSortedMap()}",
+            "mediaSourceCount=$mediaSourceCount",
         ).joinToString(" ")
     }
+}
+
+private fun RichHtmlSnapshotRoute.toPlanRouteName(): String = when (this) {
+    RichHtmlSnapshotRoute.Native -> RichRenderPlanRoute.Native.name
+    RichHtmlSnapshotRoute.Snapshot -> RichRenderPlanRoute.Snapshot.name
+    RichHtmlSnapshotRoute.DynamicPreview -> RichRenderPlanRoute.DynamicPreview.name
 }

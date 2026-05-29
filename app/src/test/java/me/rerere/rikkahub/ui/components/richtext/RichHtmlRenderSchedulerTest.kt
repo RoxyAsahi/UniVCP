@@ -52,6 +52,201 @@ class RichHtmlRenderSchedulerTest {
     }
 
     @Test
+    fun `cached model still respects fast-scroll admission gate`() {
+        RichHtmlRenderScheduler.resetForTest()
+        val analysis = RichHtmlAnalysis(
+            kind = RichHtmlRenderKind.InteractiveStatic,
+            previewText = "cached risky card ".repeat(30),
+            nativeConfidence = NativeConfidence.Medium,
+            htmlLength = 3_600,
+        )
+
+        val admission = RichHtmlRenderScheduler.admission(
+            key = "cached-digest",
+            analysis = analysis,
+            scrollState = RichRenderScrollState(
+                scrolling = true,
+                fastScrolling = true,
+                visibleCellRange = 0..3,
+            ),
+            cellIndex = 1,
+            risk = RenderRiskScore.Medium,
+            cachedModelAvailable = true,
+        )
+
+        assertEquals(false, admission.nativeAllowed)
+        assertEquals("fast-scroll", admission.reason)
+    }
+
+    @Test
+    fun `already rendered cached model remains visible during fast scroll`() {
+        RichHtmlRenderScheduler.resetForTest()
+        val analysis = RichHtmlAnalysis(
+            kind = RichHtmlRenderKind.InteractiveStatic,
+            previewText = "already rendered card ".repeat(30),
+            nativeConfidence = NativeConfidence.Medium,
+            htmlLength = 3_600,
+        )
+        RichHtmlRenderScheduler.markRendered("cached-digest")
+
+        val admission = RichHtmlRenderScheduler.admission(
+            key = "cached-digest",
+            analysis = analysis,
+            scrollState = RichRenderScrollState(
+                scrolling = true,
+                fastScrolling = true,
+                visibleCellRange = 0..3,
+            ),
+            cellIndex = 1,
+            risk = RenderRiskScore.Medium,
+        )
+
+        assertEquals(true, admission.nativeAllowed)
+        assertEquals("already-rendered", admission.reason)
+    }
+
+    @Test
+    fun `cached model uses the same first render capacity gate`() {
+        RichHtmlRenderScheduler.resetForTest()
+        val analysis = RichHtmlAnalysis(
+            kind = RichHtmlRenderKind.InteractiveStatic,
+            previewText = "cached card",
+            nativeConfidence = NativeConfidence.Medium,
+            htmlLength = 1_200,
+        )
+        repeat(4) { index ->
+            val admission = RichHtmlRenderScheduler.admission(
+                key = "uncached-$index",
+                analysis = analysis,
+                scrollState = RichRenderScrollState(
+                    scrolling = false,
+                    fastScrolling = false,
+                    visibleCellRange = 0..6,
+                ),
+                cellIndex = index,
+                risk = RenderRiskScore.Low,
+            )
+            assertTrue(admission.nativeAllowed)
+        }
+
+        val queued = RichHtmlRenderScheduler.admission(
+            key = "uncached-overflow",
+            analysis = analysis,
+            scrollState = RichRenderScrollState(
+                scrolling = false,
+                fastScrolling = false,
+                visibleCellRange = 0..6,
+            ),
+            cellIndex = 5,
+            risk = RenderRiskScore.Low,
+        )
+        val cached = RichHtmlRenderScheduler.admission(
+            key = "cached-ready",
+            analysis = analysis,
+            scrollState = RichRenderScrollState(
+                scrolling = false,
+                fastScrolling = false,
+                visibleCellRange = 0..6,
+            ),
+            cellIndex = 6,
+            risk = RenderRiskScore.Low,
+            cachedModelAvailable = true,
+        )
+
+        assertEquals(false, queued.nativeAllowed)
+        assertEquals("queue-full", queued.reason)
+        assertEquals(false, cached.nativeAllowed)
+        assertEquals("queue-full", cached.reason)
+    }
+
+    @Test
+    fun `cached model still admits through normal scheduler when capacity is available`() {
+        RichHtmlRenderScheduler.resetForTest()
+        val analysis = RichHtmlAnalysis(
+            kind = RichHtmlRenderKind.InteractiveStatic,
+            previewText = "cached card",
+            nativeConfidence = NativeConfidence.Medium,
+            htmlLength = 1_200,
+        )
+
+        val admission = RichHtmlRenderScheduler.admission(
+            key = "cached-normal-admission",
+            analysis = analysis,
+            scrollState = RichRenderScrollState(
+                scrolling = false,
+                fastScrolling = false,
+                visibleCellRange = 0..3,
+            ),
+            cellIndex = 1,
+            risk = RenderRiskScore.Low,
+            cachedModelAvailable = true,
+        )
+
+        assertEquals(true, admission.nativeAllowed)
+        assertEquals("admitted", admission.reason)
+    }
+
+    @Test
+    fun `uncached first render admission consumes first render capacity`() {
+        RichHtmlRenderScheduler.resetForTest()
+        val analysis = RichHtmlAnalysis(
+            kind = RichHtmlRenderKind.InteractiveStatic,
+            previewText = "uncached card",
+            nativeConfidence = NativeConfidence.Medium,
+            htmlLength = 1_200,
+        )
+
+        repeat(4) { index ->
+            val admission = RichHtmlRenderScheduler.admission(
+                key = "compile-$index",
+                analysis = analysis,
+                scrollState = RichRenderScrollState(
+                    scrolling = false,
+                    fastScrolling = false,
+                    visibleCellRange = 0..12,
+                ),
+                cellIndex = index,
+                risk = RenderRiskScore.Low,
+                cachedModelAvailable = false,
+                reserveFirstRenderSlot = true,
+            )
+
+            assertEquals(true, admission.nativeAllowed)
+            assertEquals("admitted", admission.reason)
+        }
+
+        val queued = RichHtmlRenderScheduler.admission(
+            key = "compile-overflow",
+            analysis = analysis,
+            scrollState = RichRenderScrollState(
+                scrolling = false,
+                fastScrolling = false,
+                visibleCellRange = 0..12,
+            ),
+            cellIndex = 4,
+            risk = RenderRiskScore.Low,
+            cachedModelAvailable = false,
+            reserveFirstRenderSlot = true,
+        )
+
+        assertEquals(false, queued.nativeAllowed)
+        assertEquals("queue-full", queued.reason)
+    }
+
+    @Test
+    fun `cached compiled model presents immediately after scheduler admission`() {
+        assertEquals(
+            true,
+            shouldAllowNativePresentationImmediately(
+                transientCache = false,
+                alreadyRendered = false,
+                cachedModelAvailable = true,
+                deferForScroll = true,
+            ),
+        )
+    }
+
+    @Test
     fun `prewarm target compiles into persistent cache`() = runBlocking {
         RichHtmlCompiler.clearCacheForTest()
         RichHtmlRenderScheduler.resetForTest()
@@ -133,7 +328,7 @@ class RichHtmlRenderSchedulerTest {
     }
 
     @Test
-    fun `prewarm keeps started jobs when scroll target changes`() = runBlocking {
+    fun `prewarm cancels stale jobs when scroll target changes`() = runBlocking {
         RichHtmlCompiler.clearCacheForTest()
         RichHtmlRenderScheduler.resetForTest()
         val html = buildString {
@@ -159,12 +354,12 @@ class RichHtmlRenderSchedulerTest {
         RichHtmlRenderScheduler.updatePrewarmTargets(emptyList(), maxTargets = 1)
         RichHtmlRenderScheduler.drainPrewarmForTest()
 
-        assertNotNull(RichHtmlCompiler.getCached(html, options))
         assertEquals(0, RichHtmlRenderScheduler.prewarmJobCountForTest())
     }
 
     @Test
     fun `height cache separates content type buckets`() {
+        RichRenderHeightCache.useInMemoryStoreForTest()
         RichHtmlHeightCache.resetForTest()
         val richHtmlKey = RichHtmlHeightCache.key(
             id = "digest",
@@ -183,5 +378,41 @@ class RichHtmlRenderSchedulerTest {
 
         assertEquals(240, RichHtmlHeightCache.get(richHtmlKey))
         assertNull(RichHtmlHeightCache.get(snapshotKey))
+    }
+
+    @Test
+    fun `height cache wrapper separates density and theme buckets`() {
+        RichRenderHeightCache.useInMemoryStoreForTest()
+        RichHtmlHeightCache.resetForTest()
+        val lightDensity2 = RichHtmlHeightCache.key(
+            id = "digest",
+            viewportWidthDp = 360f,
+            fontScale = 1f,
+            density = 2f,
+            themeBucket = "light",
+            contentType = "RichHtmlCell",
+        )
+        val lightDensity3 = RichHtmlHeightCache.key(
+            id = "digest",
+            viewportWidthDp = 360f,
+            fontScale = 1f,
+            density = 3f,
+            themeBucket = "light",
+            contentType = "RichHtmlCell",
+        )
+        val darkDensity2 = RichHtmlHeightCache.key(
+            id = "digest",
+            viewportWidthDp = 360f,
+            fontScale = 1f,
+            density = 2f,
+            themeBucket = "dark",
+            contentType = "RichHtmlCell",
+        )
+
+        RichHtmlHeightCache.put(lightDensity2, 320)
+
+        assertEquals(320, RichHtmlHeightCache.get(lightDensity2))
+        assertNull(RichHtmlHeightCache.get(lightDensity3))
+        assertNull(RichHtmlHeightCache.get(darkDensity2))
     }
 }

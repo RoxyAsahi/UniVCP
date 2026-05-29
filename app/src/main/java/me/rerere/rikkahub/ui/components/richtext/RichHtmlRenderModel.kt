@@ -12,6 +12,9 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import me.rerere.rikkahub.ui.components.message.RichContentLoweringMode
+
+internal const val RichHtmlRenderModelVersion: Int = 4
 
 internal data class RichHtmlRenderModel(
     val id: String,
@@ -19,7 +22,25 @@ internal data class RichHtmlRenderModel(
     val unsupported: List<RichUnsupportedReason> = emptyList(),
     val visualHints: List<RichVisualHint> = emptyList(),
     val animationStats: RichAnimationStats = RichAnimationStats.Empty,
+    val sourceHtmlByBlockId: Map<String, String> = emptyMap(),
+    val sourceStyleHtml: String = "",
+    val snapshotIslandStats: RichSnapshotIslandStats = RichSnapshotIslandStats.Empty,
+    val version: Int = RichHtmlRenderModelVersion,
+    val textFlowLoweringMode: RichContentLoweringMode? = null,
+    val subtreeRouteLoweringMode: RichContentLoweringMode? = null,
 )
+
+internal data class RichSnapshotIslandStats(
+    val candidateCount: Int = 0,
+    val appliedCount: Int = 0,
+    val rejectedCount: Int = 0,
+    val wholeSnapshotAvoided: Boolean = false,
+    val rejectReasons: Map<String, Int> = emptyMap(),
+) {
+    companion object {
+        val Empty = RichSnapshotIslandStats()
+    }
+}
 
 internal enum class RichVisualHint {
     BackgroundExtraLayer,
@@ -90,6 +111,20 @@ internal data class RichTextBlock(
     val inlineBoxes: List<InlineRichBoxRun> = emptyList(),
     val listMarker: String? = null,
 ) : RichBlock
+
+internal data class RichTextFlowBlock(
+    override val blockId: String,
+    override val style: ComputedStyle,
+    val paragraphs: List<RichTextFlowParagraph>,
+) : RichBlock
+
+internal data class RichTextFlowParagraph(
+    val content: AnnotatedString,
+    val style: ComputedStyle,
+    val inlineMath: List<InlineMathRun> = emptyList(),
+    val inlinePaints: List<InlineTextPaintRun> = emptyList(),
+    val listMarker: String? = null,
+)
 
 internal data class RichContainerBlock(
     override val blockId: String,
@@ -166,6 +201,23 @@ internal data class RichDetailsBlock(
     val open: Boolean,
 ) : RichBlock
 
+internal data class RichSnapshotIslandBlock(
+    override val blockId: String,
+    override val style: ComputedStyle,
+    val sourceHtml: String,
+    val sourceDigest: String,
+    val reason: RichSnapshotIslandReason,
+    val styleBoundary: RichSnapshotIslandStyleBoundary = RichSnapshotIslandStyleBoundary.NeutralWrapper,
+    val estimatedHeightPx: Int?,
+    val fallbackBlock: RichBlock?,
+) : RichBlock
+
+internal enum class RichSnapshotIslandStyleBoundary(val telemetryName: String) {
+    NativeWrapper("native-wrapper"),
+    SnapshotSource("snapshot-source"),
+    NeutralWrapper("neutral-wrapper"),
+}
+
 internal data class RichUnsupportedBlock(
     override val blockId: String,
     override val style: ComputedStyle,
@@ -228,6 +280,7 @@ internal data class ComputedStyle(
     val transition: RichTransitionStyle = RichTransitionStyle.None,
     val cssFilter: RichCssFilter = RichCssFilter.None,
     val backdropFilter: RichCssFilter = RichCssFilter.None,
+    val mixBlendMode: Boolean = false,
     val clipPath: RichClipPath? = null,
     val maskImage: RichBackgroundImage? = null,
     val padding: RichSpacing = RichSpacing.Zero,

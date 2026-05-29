@@ -3,6 +3,7 @@ package me.rerere.rikkahub.ui.components.message
 import me.rerere.rikkahub.ui.components.richtext.RichHtmlCompiler
 import me.rerere.rikkahub.ui.components.richtext.RichUnsupportedReason
 import me.rerere.rikkahub.ui.components.richtext.RichVisualHint
+import me.rerere.rikkahub.ui.components.render.renderTextCacheKey
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -103,6 +104,42 @@ class RichRenderPlanTest {
     }
 
     @Test
+    fun `canonical document identity is deterministic and metadata only`() {
+        val secret = "canonical-document-secret"
+        val html = """<div id="vcp-root"><p>$secret</p><strong>bold</strong></div>"""
+
+        val first = buildRichRenderPlan(html)
+        val second = buildRichRenderPlan(html)
+        val serialized = first.toMetadataLine()
+
+        assertEquals(first.documentId, second.documentId)
+        assertEquals(renderTextCacheKey(html), first.documentId)
+        assertEquals(RichContentDocumentSchemaVersion, first.documentSchemaVersion)
+        assertEquals(RichContentSourceKind.Html, first.documentSourceKind)
+        assertTrue(serialized.contains("documentId=${first.documentId}"))
+        assertTrue(serialized.contains("documentSchema=$RichContentDocumentSchemaVersion"))
+        assertTrue(serialized.contains("documentSourceKind=Html"))
+        assertFalse(serialized.contains(secret))
+        assertFalse(serialized.contains("<strong>"))
+    }
+
+    @Test
+    fun `structural report can be skipped for transient preview plans`() {
+        val html = """<div id="vcp-root"><p><span>Streaming</span></p></div>"""
+
+        val plan = buildRichRenderPlan(html, includeStructuralReport = false)
+
+        assertEquals(RichRenderPlanRoute.Native, plan.route)
+        assertTrue(plan.sourceNodeCount > 0)
+        assertEquals(renderTextCacheKey(html), plan.documentId)
+        assertEquals(RichContentDocumentSchemaVersion, plan.documentSchemaVersion)
+        assertEquals(RichContentSourceKind.Html, plan.documentSourceKind)
+        assertEquals(null, plan.astStats)
+        assertEquals(null, plan.documentStats)
+        assertEquals(null, plan.transformReport)
+    }
+
+    @Test
     fun `telemetry and metadata do not contain raw html text`() {
         RichHtmlRenderTelemetry.resetForTest()
         val secret = "super-secret-plan-body"
@@ -117,6 +154,8 @@ class RichRenderPlanTest {
         assertFalse(serialized.contains(secret))
         assertFalse(serialized.contains("<p>"))
         assertTrue(serialized.contains(plan.id))
+        assertTrue(serialized.contains("documentId=${plan.documentId}"))
+        assertTrue(serialized.contains("documentSchemas="))
     }
 
     @Test
@@ -147,5 +186,36 @@ class RichRenderPlanTest {
 
         assertEquals(RichRenderHeightCacheState.Hit, hit.heightCache)
         assertEquals(RichRenderHeightCacheState.Miss, miss.heightCache)
+    }
+
+    @Test
+    fun `height cache telemetry is capped resettable and metadata only`() {
+        RichHtmlRenderTelemetry.resetForTest()
+        val secret = "height-cache-secret-body"
+        val id = renderTextCacheKey(secret)
+
+        repeat(110) { index ->
+            RichHtmlRenderTelemetry.recordHeightCache(
+                id = id,
+                contentType = "RichHtmlCell",
+                hit = index % 2 == 0,
+                heightPx = 200 + index,
+                confidence = "MeasuredNative",
+                rendererVersion = 1,
+                documentSchemaVersion = RichContentDocumentSchemaVersion,
+                persistent = true,
+            )
+        }
+
+        val snapshot = RichHtmlRenderTelemetry.heightCacheSnapshot()
+        val summary = RichHtmlRenderTelemetry.heightCacheDebugSummary()
+        assertEquals(96, snapshot.size)
+        assertTrue(summary.contains("MeasuredNative"))
+        assertTrue(summary.contains("documentSchemas="))
+        assertFalse(snapshot.joinToString("\n").contains(secret))
+        assertFalse(summary.contains(secret))
+
+        RichHtmlRenderTelemetry.resetForTest()
+        assertTrue(RichHtmlRenderTelemetry.heightCacheSnapshot().isEmpty())
     }
 }

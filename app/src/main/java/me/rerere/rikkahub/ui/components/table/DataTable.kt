@@ -7,6 +7,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.MaterialTheme
@@ -86,7 +87,7 @@ internal fun SpannedDataTable(
     val surfaceContainer = MaterialTheme.colorScheme.surfaceContainer
     val footerBackground = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
 
-    Box(
+    BoxWithConstraints(
         modifier = modifier
             .clip(MaterialTheme.shapes.small)
             .then(
@@ -95,10 +96,17 @@ internal fun SpannedDataTable(
                 } else {
                     Modifier.border(BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), MaterialTheme.shapes.small)
                 }
-            )
-            .horizontalScroll(hScroll)
+            ),
     ) {
-        SubcomposeLayout { constraints ->
+        val boundedWidth = maxWidth != Dp.Infinity
+        Box(
+            modifier = if (boundedWidth) {
+                Modifier.horizontalScroll(hScroll)
+            } else {
+                Modifier
+            }
+        ) {
+            SubcomposeLayout { constraints ->
             val headerSpecs = tableRowSpecs(
                 cellCount = headers.size,
                 colSpans = headerColSpans,
@@ -195,7 +203,7 @@ internal fun SpannedDataTable(
                 h
             }
             distributeRowspanHeights(rowHeights, bodySpecs, bodyP1, rowCount)
-            val headerHeight = headerP1.maxOf { it?.height ?: 0 }
+            val headerHeight = headerP1.maxOfOrNull { it?.height ?: 0 } ?: 0
 
             // ---------- 第二阶段：固定列宽 + 统一行高重新测量 ----------
             fun constraintsFor(spec: TableCellSpec, minH: Int): Constraints {
@@ -269,6 +277,7 @@ internal fun SpannedDataTable(
                     }
                     y += rowHeights[r]
                 }
+            }
             }
         }
     }

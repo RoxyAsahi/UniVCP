@@ -24,6 +24,7 @@ import android.webkit.WebViewClient
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -56,6 +57,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.delay
@@ -63,6 +65,10 @@ import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.FullScreen
 import me.rerere.rikkahub.ui.components.render.renderTextCacheKey
 import me.rerere.rikkahub.ui.components.richtext.LocalRichRenderScrollState
+import me.rerere.rikkahub.ui.components.richtext.RichRenderHeightCache
+import me.rerere.rikkahub.ui.components.richtext.RichRenderHeightCacheEntry
+import me.rerere.rikkahub.ui.components.richtext.RichRenderHeightCacheKey
+import me.rerere.rikkahub.ui.components.richtext.RichRenderHeightConfidence
 import me.rerere.rikkahub.ui.components.richtext.RichRenderScrollDirection
 import me.rerere.rikkahub.ui.components.richtext.RichRenderScrollState
 import me.rerere.rikkahub.ui.components.ui.Tooltip
@@ -83,7 +89,9 @@ private const val EARLY_HEIGHT_SPIKE_RATIO = 1.55f
 private const val LIVE_NEAR_RELEASE_DELAY_MS = 800L
 private const val LIVE_FAR_RELEASE_DELAY_MS = 320L
 private const val FRAME_PRESSURE_DEFER_WINDOW_MS = 900L
+private const val FRAME_PRESSURE_ADMISSION_COOLDOWN_MS = 360L
 private const val SCROLL_NEW_ADMISSION_STAGGER_MS = 180L
+private const val INLINE_DYNAMIC_WEBVIEW_CONTENT_TYPE = "InlineDynamicWebView"
 
 private object InlineDynamicWebViewSeenRegistry {
     private val seen = Collections.synchronizedSet(linkedSetOf<String>())
@@ -121,12 +129,38 @@ private object InlineWebViewAdmission {
         }
     }
 
+    fun resetForTest() {
+        synchronized(activeIds) {
+            activeIds.clear()
+            lastNewAcquireAtMs = 0L
+        }
+    }
+
+    fun acquireForTest(id: String): Boolean {
+        synchronized(activeIds) {
+            if (id in activeIds) return true
+            if (activeIds.size >= MAX_INLINE_WEBVIEWS) return false
+            activeIds += id
+            return true
+        }
+    }
+
     fun activeCount(): Int = synchronized(activeIds) {
         activeIds.size
     }
 }
 
 internal fun inlineDynamicWebViewActiveCount(): Int = InlineWebViewAdmission.activeCount()
+
+internal fun inlineDynamicWebViewAcquireForTest(id: String): Boolean = InlineWebViewAdmission.acquireForTest(id)
+
+internal fun inlineDynamicWebViewReleaseForTest(id: String) {
+    InlineWebViewAdmission.release(id)
+}
+
+internal fun inlineDynamicWebViewResetAdmissionForTest() {
+    InlineWebViewAdmission.resetForTest()
+}
 
 private data class InlineAcquireResult(
     val acquired: Boolean,
@@ -457,10 +491,12 @@ internal fun InlineDynamicWebViewBlock(
     val context = LocalContext.current
     remember(context) {
         InlineHeightCache.init(context.applicationContext)
+        RichRenderHeightCache.initialize(context.applicationContext)
         true
     }
     val scrollState = LocalRichRenderScrollState.current
     val density = LocalDensity.current
+    val dark = isSystemInDarkTheme()
     val inlineId = remember(html, scrollState.viewportWidthDp, density.fontScale) {
         inlineDynamicWebViewCacheId(
             html = html,
@@ -468,20 +504,56 @@ internal fun InlineDynamicWebViewBlock(
             fontScale = density.fontScale,
         )
     }
-    val cachedHeightCssPx = remember(inlineId) { InlineHeightCache.get(inlineId) }
-    LaunchedEffect(inlineId, cachedHeightCssPx) {
+    val heightCacheKey = remember(
+        html,
+        scrollState.viewportWidthDp,
+        density.fontScale,
+        density.density,
+        dark,
+    ) {
+        RichRenderHeightCache.key(
+            id = renderTextCacheKey(html),
+            viewportWidthDp = scrollState.viewportWidthDp,
+            fontScale = density.fontScale,
+            density = density.density,
+            themeBucket = if (dark) "dark" else "light",
+            contentType = INLINE_DYNAMIC_WEBVIEW_CONTENT_TYPE,
+        )
+    }
+    val cachedHeightEntry = remember(heightCacheKey) { RichRenderHeightCache.getEntry(heightCacheKey) }
+    val legacyCachedHeightCssPx = remember(inlineId) { InlineHeightCache.get(inlineId) }
+    val cachedHeightCssPx = remember(cachedHeightEntry, legacyCachedHeightCssPx, density.density) {
+        cachedHeightEntry?.toInlineCssPx(density) ?: legacyCachedHeightCssPx
+    }
+    LaunchedEffect(heightCacheKey, cachedHeightEntry, legacyCachedHeightCssPx) {
+        if (cachedHeightEntry == null && legacyCachedHeightCssPx != null) {
+            RichRenderHeightCache.put(
+                key = heightCacheKey,
+                heightPx = legacyCachedHeightCssPx.toInlinePhysicalHeightPx(density),
+                confidence = RichRenderHeightConfidence.MeasuredInlineWebView,
+            )
+        }
         RichHtmlRenderTelemetry.recordHeightCache(
-            id = inlineId,
-            contentType = "InlineDynamicWebView",
+            id = heightCacheKey.id,
+            contentType = INLINE_DYNAMIC_WEBVIEW_CONTENT_TYPE,
             hit = cachedHeightCssPx != null,
-            heightPx = cachedHeightCssPx,
+            heightPx = cachedHeightEntry?.heightPx ?: legacyCachedHeightCssPx?.toInlinePhysicalHeightPx(density),
+            confidence = cachedHeightEntry?.confidence?.name ?: legacyCachedHeightCssPx?.let {
+                RichRenderHeightConfidence.MeasuredInlineWebView.name
+            },
+            rendererVersion = heightCacheKey.rendererVersion,
+            documentSchemaVersion = heightCacheKey.documentSchemaVersion,
+            persistent = true,
         )
     }
     val estimatedHeightCssPx = remember(html, previewText) { estimateInlineHeightPx(html, previewText) }
     var admitted by remember(inlineId) { mutableStateOf(false) }
+    var renderProcessGone by remember(inlineId) { mutableStateOf(false) }
     var hasBeenLive by remember(inlineId) {
         mutableStateOf(InlineDynamicWebViewSeenRegistry.hasSeen(inlineId))
     }
+    var framePressureCooldownUntilMs by remember(inlineId) { mutableStateOf(0L) }
+    var admissionRetryTick by remember(inlineId) { mutableIntStateOf(0) }
     val visible = scrollState.visibleCellRange.first <= cellIndex &&
         cellIndex <= scrollState.visibleCellRange.last
     val nearViewport = scrollState.nearViewportRange.first <= cellIndex &&
@@ -499,14 +571,41 @@ internal fun InlineDynamicWebViewBlock(
         scrollState.fastScrolling,
         scrollState.scrollDirection,
         admitted,
+        renderProcessGone,
+        framePressureCooldownUntilMs,
+        admissionRetryTick,
     ) {
+        if (renderProcessGone) {
+            if (admitted) {
+                InlineWebViewAdmission.release(inlineId)
+                admitted = false
+            }
+            return@LaunchedEffect
+        }
         if (!admitted) {
             if (visible && !scrollState.fastScrolling) {
+                val nowMs = SystemClock.uptimeMillis()
+                if (!hasBeenLive &&
+                    scrollState.scrollDirection == RichRenderScrollDirection.Up &&
+                    nowMs < framePressureCooldownUntilMs
+                ) {
+                    RichHtmlRenderTelemetry.recordInlineDynamicWebView(
+                        id = inlineId,
+                        event = "defer",
+                        reason = "history-frame-pressure-cooldown",
+                        cellIndex = cellIndex,
+                        activeCount = InlineWebViewAdmission.activeCount(),
+                    )
+                    delay(framePressureCooldownUntilMs - nowMs)
+                    admissionRetryTick++
+                    return@LaunchedEffect
+                }
                 if (!hasBeenLive && shouldDeferNewInlineForFramePressure(scrollState)) {
                     val pressure = RichHtmlRenderTelemetry.recentFramePressureWindow(
                         windowMs = FRAME_PRESSURE_DEFER_WINDOW_MS,
                         direction = RichRenderScrollDirection.Up.name,
                     )
+                    framePressureCooldownUntilMs = SystemClock.uptimeMillis() + FRAME_PRESSURE_ADMISSION_COOLDOWN_MS
                     RichHtmlRenderTelemetry.recordInlineDynamicWebView(
                         id = inlineId,
                         event = "defer",
@@ -514,6 +613,8 @@ internal fun InlineDynamicWebViewBlock(
                         cellIndex = cellIndex,
                         activeCount = InlineWebViewAdmission.activeCount(),
                     )
+                    delay(FRAME_PRESSURE_ADMISSION_COOLDOWN_MS)
+                    admissionRetryTick++
                     return@LaunchedEffect
                 }
                 val wasSeen = hasBeenLive
@@ -573,14 +674,29 @@ internal fun InlineDynamicWebViewBlock(
         InlineWebViewSurface(
             html = html,
             inlineId = inlineId,
+            heightCacheKey = heightCacheKey,
+            cachedHeightEntry = cachedHeightEntry,
             previewText = previewText,
             cellIndex = cellIndex,
             onOpen = onOpen,
+            onRenderProcessGoneCallback = { reason ->
+                InlineWebViewAdmission.release(inlineId)
+                RichHtmlRenderTelemetry.recordInlineDynamicWebView(
+                    id = inlineId,
+                    event = "release",
+                    reason = reason,
+                    cellIndex = cellIndex,
+                    activeCount = InlineWebViewAdmission.activeCount(),
+                )
+                admitted = false
+                renderProcessGone = true
+            },
             modifier = modifier,
         )
     } else {
         InlineWebViewDeferredPreview(
             inlineId = inlineId,
+            cachedHeightEntry = cachedHeightEntry,
             estimatedHeightCssPx = estimatedHeightCssPx,
             previewText = previewText,
             onOpen = onOpen,
@@ -594,12 +710,16 @@ internal fun InlineDynamicWebViewBlock(
 private fun InlineWebViewSurface(
     html: String,
     inlineId: String,
+    heightCacheKey: RichRenderHeightCacheKey,
+    cachedHeightEntry: RichRenderHeightCacheEntry?,
     previewText: String,
     cellIndex: Int,
     onOpen: () -> Unit,
+    onRenderProcessGoneCallback: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    val density = LocalDensity.current
     val scrollState = LocalRichRenderScrollState.current
     val currentScrollState by rememberUpdatedState(scrollState)
     var progress by remember(inlineId) { mutableFloatStateOf(0f) }
@@ -607,8 +727,11 @@ private fun InlineWebViewSurface(
     var crashed by remember(inlineId) { mutableStateOf(false) }
     var phase by remember(inlineId) { mutableStateOf(InlineDynamicWebViewPhase.Acquiring) }
     var frozenEntry by remember(inlineId) { mutableStateOf(InlineFrozenBitmapCache.get(inlineId)) }
-    var heightCssPx by remember(inlineId) {
-        mutableIntStateOf(InlineHeightCache.get(inlineId) ?: estimateInlineHeightPx(html, previewText))
+    val cachedHeightCssPx = remember(cachedHeightEntry, inlineId, density.density) {
+        cachedHeightEntry?.toInlineCssPx(density) ?: InlineHeightCache.get(inlineId)
+    }
+    var heightCssPx by remember(inlineId, cachedHeightCssPx) {
+        mutableIntStateOf(cachedHeightCssPx ?: estimateInlineHeightPx(html, previewText))
     }
 
     fun transition(event: String, reason: String) {
@@ -657,6 +780,11 @@ private fun InlineWebViewSurface(
                         heightCssPx = px
                         InlineHeightCache.put(inlineId, px)
                     }
+                    RichRenderHeightCache.put(
+                        key = heightCacheKey,
+                        heightPx = px.toInlinePhysicalHeightPx(density),
+                        confidence = RichRenderHeightConfidence.MeasuredInlineWebView,
+                    )
                 }
                 if (acceptedHeight) {
                     transition("height", "bridge-height")
@@ -696,7 +824,11 @@ private fun InlineWebViewSurface(
             }
 
             override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
-                val message = "${consoleMessage.message()} @ ${consoleMessage.sourceId()}:${consoleMessage.lineNumber()}"
+                val message = inlineDynamicWebViewConsoleLogLine(
+                    inlineId = inlineId,
+                    level = consoleMessage.messageLevel().name,
+                    lineNumber = consoleMessage.lineNumber(),
+                )
                 if (consoleMessage.messageLevel() == ConsoleMessage.MessageLevel.ERROR) {
                     Log.e(TAG, message)
                 } else {
@@ -732,7 +864,9 @@ private fun InlineWebViewSurface(
                 detail: RenderProcessGoneDetail,
             ): Boolean {
                 crashed = true
-                transition("crash", if (detail.didCrash()) "render-process-crashed" else "render-process-gone")
+                val reason = if (detail.didCrash()) "render-process-crashed" else "render-process-gone"
+                transition("crash", reason)
+                onRenderProcessGoneCallback(reason)
                 InlineDynamicWebViewPool.discard(view)
                 return true
             }
@@ -767,6 +901,7 @@ private fun InlineWebViewSurface(
     if (crashed) {
         InlineWebViewDeferredPreview(
             inlineId = inlineId,
+            cachedHeightEntry = cachedHeightEntry,
             estimatedHeightCssPx = estimateInlineHeightPx(html, previewText),
             previewText = previewText,
             onOpen = onOpen,
@@ -848,6 +983,7 @@ private fun InlineWebViewSurface(
 @Composable
 private fun InlineWebViewDeferredPreview(
     inlineId: String,
+    cachedHeightEntry: RichRenderHeightCacheEntry?,
     estimatedHeightCssPx: Int,
     previewText: String,
     onOpen: () -> Unit,
@@ -865,8 +1001,11 @@ private fun InlineWebViewDeferredPreview(
     val frozenHeight = remember(frozenEntry, density.density) {
         frozenEntry?.let { with(density) { it.heightPx.toDp() } }
     }
+    val v3CachedHeightDp = remember(cachedHeightEntry, density.density) {
+        cachedHeightEntry?.let { with(density) { it.heightPx.toDp() } }
+    }
     val estimatedHeightDp = remember(estimatedHeightCssPx) { estimatedHeightCssPx.dp }
-    val placeholderHeight = frozenHeight ?: cachedHeightDp ?: estimatedHeightDp
+    val placeholderHeight = frozenHeight ?: v3CachedHeightDp ?: cachedHeightDp ?: estimatedHeightDp
 
     Surface(
         modifier = modifier
@@ -889,10 +1028,11 @@ private fun InlineWebViewDeferredPreview(
                     )
                 }
             } else {
-                if (cachedHeightDp != null) {
+                val measuredPlaceholderHeight = v3CachedHeightDp ?: cachedHeightDp
+                if (measuredPlaceholderHeight != null) {
                     InlineFrozenContentOrPlaceholder(
                         frozenEntry = null,
-                        heightDp = cachedHeightDp,
+                        heightDp = measuredPlaceholderHeight,
                     )
                     Box(modifier = Modifier.fillMaxWidth()) {
                         InlineOpenButton(
@@ -1066,6 +1206,15 @@ private fun estimateInlineHeightPx(html: String, previewText: String): Int {
         .coerceIn(280, MAX_HEIGHT_CSS_PX)
 }
 
+private fun RichRenderHeightCacheEntry.toInlineCssPx(density: Density): Int {
+    return with(density) { heightPx.toDp().value.roundToInt() }
+        .coerceIn(96, MAX_HEIGHT_CSS_PX)
+}
+
+private fun Int.toInlinePhysicalHeightPx(density: Density): Int {
+    return with(density) { coerceIn(96, MAX_HEIGHT_CSS_PX).dp.roundToPx() }
+}
+
 internal fun inlineDynamicWebViewCacheId(
     html: String,
     viewportWidthDp: Float,
@@ -1075,6 +1224,12 @@ internal fun inlineDynamicWebViewCacheId(
     val fontScaleBucket = (fontScale * 100).roundToInt().coerceAtLeast(1)
     return "inline:${renderTextCacheKey(html)}:w$widthBucket:fs$fontScaleBucket:hm3"
 }
+
+internal fun inlineDynamicWebViewConsoleLogLine(
+    inlineId: String,
+    level: String,
+    lineNumber: Int,
+): String = "console inline=${inlineId.takeLast(10)} level=$level line=$lineNumber"
 
 private val FULL_HTML_DOCUMENT = Regex("""<\s*html\b|<!doctype\s+html""", RegexOption.IGNORE_CASE)
 private val HEIGHT_STYLE_REGEX = Regex("""(?:^|[;\s])(?:min-)?height\s*:\s*(\d{2,4})px\b""", RegexOption.IGNORE_CASE)

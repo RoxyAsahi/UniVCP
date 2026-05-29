@@ -2,6 +2,10 @@ package me.rerere.rikkahub.ui.components.message
 
 import me.rerere.rikkahub.ui.components.render.RenderLruCache
 import me.rerere.rikkahub.ui.components.render.renderTextCacheKey
+import me.rerere.rikkahub.ui.components.richtext.RichMediaKind
+import me.rerere.rikkahub.ui.components.richtext.RichMediaLoader
+import me.rerere.rikkahub.ui.components.richtext.RichMediaRequest
+import me.rerere.rikkahub.ui.components.richtext.RichMediaSafety
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.Node
@@ -67,19 +71,8 @@ internal fun isDangerousRichHtmlTag(tagName: String): Boolean {
 }
 
 internal fun isSafeRichHtmlImageSource(src: String): Boolean {
-    val value = src.trim()
-    if (value.isBlank()) return false
-    val normalized = value.lowercase()
-    return when {
-        normalized.startsWith("https://") -> true
-        normalized.startsWith("http://") -> true
-        normalized.startsWith("content://") -> true
-        normalized.startsWith("file://") -> true
-        normalized.startsWith("android.resource://") -> true
-        normalized.startsWith("data:image/") -> true
-        ":" !in normalized.substringBefore("/", missingDelimiterValue = normalized) -> true
-        else -> false
-    }
+    val request = RichMediaRequest.fromSource(src, RichMediaKind.Image)
+    return RichMediaLoader.safety(request) == RichMediaSafety.Safe
 }
 
 internal fun isSafeRichHtmlHref(href: String): Boolean {

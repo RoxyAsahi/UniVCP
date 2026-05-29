@@ -311,6 +311,8 @@ private fun RenderImage(
                     .heightIn(max = 400.dp)
                     .clip(RoundedCornerShape(8.dp)),
                 contentScale = ContentScale.Fit,
+                enforceRichMediaSafety = true,
+                richMediaKind = RichMediaKind.Image,
             )
         }
     }

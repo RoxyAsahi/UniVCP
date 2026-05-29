@@ -39,12 +39,20 @@ internal class MyWebChromeClient(private val state: WebViewState) : WebChromeCli
         if (consoleMessage.messageLevel() == ConsoleMessage.MessageLevel.ERROR || consoleMessage.messageLevel() == ConsoleMessage.MessageLevel.WARNING) {
             Log.e(
                 TAG,
-                "onConsoleMessage:  ${consoleMessage.message()}  ${consoleMessage.lineNumber()}  ${consoleMessage.sourceId()}"
+                webViewConsoleLogLine(
+                    level = consoleMessage.messageLevel().name,
+                    lineNumber = consoleMessage.lineNumber(),
+                )
             )
         }
-        return super.onConsoleMessage(consoleMessage);
+        return super.onConsoleMessage(consoleMessage)
     }
 }
+
+internal fun webViewConsoleLogLine(
+    level: String,
+    lineNumber: Int,
+): String = "onConsoleMessage level=$level line=$lineNumber"
 
 internal class MyWebViewClient(private val state: WebViewState) : WebViewClient() {
     override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {

@@ -15,9 +15,11 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -82,6 +84,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
@@ -99,6 +102,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
@@ -122,8 +126,17 @@ import androidx.compose.ui.unit.takeOrElse
 import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
 import coil3.compose.rememberAsyncImagePainter
+import com.univcp.bubble.BubblePayload
+import com.univcp.bubble.BubbleRenderMode
+import com.univcp.bubble.BubbleSnapshotRenderer
+import com.univcp.bubble.BubbleSnapshotRequest
+import com.univcp.bubble.BubbleSnapshotResult
+import com.univcp.bubble.BubbleTheme
+import kotlinx.coroutines.delay
+import me.rerere.rikkahub.ui.components.message.RichHtmlRenderTelemetry
 import me.rerere.rikkahub.ui.components.table.DataTableCellStyle
 import me.rerere.rikkahub.ui.components.table.SpannedDataTable
+import me.rerere.rikkahub.utils.toCssHex
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
@@ -184,6 +197,7 @@ private fun RichBlockView(
 ) {
     when (block) {
         is RichTextBlock -> RichTextBlockView(block, modifier, onSendInput, inline)
+        is RichTextFlowBlock -> RichTextFlowBlockView(block, modifier, onSendInput)
         is RichContainerBlock -> RichContainerBlockView(block, modifier, onSendInput, root, inline)
         is RichImageBlock -> RichImageBlockView(block, modifier)
         is RichTableBlock -> RichTableBlockView(block, modifier)
@@ -191,6 +205,7 @@ private fun RichBlockView(
         is RichMathBlock -> RichMathBlockView(block, modifier)
         is RichButtonBlock -> RichButtonBlockView(block, modifier, onSendInput)
         is RichDetailsBlock -> RichDetailsBlockView(block, modifier, onSendInput)
+        is RichSnapshotIslandBlock -> RichSnapshotIslandBlockView(block, modifier, onSendInput)
         is RichUnsupportedBlock -> RichUnsupportedBlockView(block, modifier)
     }
 }
@@ -397,6 +412,60 @@ private fun RichFlexBoxChildren(
             )
         }
     }
+}
+
+@Composable
+private fun RichTextFlowBlockView(
+    block: RichTextFlowBlock,
+    modifier: Modifier,
+    onSendInput: (String) -> Unit,
+) {
+    StyledContainer(block.style, modifier = modifier, root = false, animationKey = block.blockId) {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(block.style.rowGap),
+        ) {
+            block.paragraphs.forEachIndexed { index, paragraph ->
+                androidx.compose.runtime.key("${block.blockId}-p$index") {
+                    RichTextFlowParagraphView(
+                        paragraph = paragraph,
+                        onSendInput = onSendInput,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RichTextFlowParagraphView(
+    paragraph: RichTextFlowParagraph,
+    onSendInput: (String) -> Unit,
+) {
+    val textClipBrush = paragraph.style.textClipBrush()
+    val textStyle = LocalTextStyle.current.merge(
+        paragraph.style.toTextStyle(if (textClipBrush != null) Color.White else LocalContentColor.current)
+    )
+    val inline = buildInlineRichText(paragraph.content, paragraph.inlineMath, emptyList(), textStyle, onSendInput)
+    val inlinePaints = if (paragraph.inlineMath.isEmpty()) paragraph.inlinePaints else emptyList()
+    var textLayout by remember(inline.text, inlinePaints) { mutableStateOf<TextLayoutResult?>(null) }
+    Text(
+        text = inline.text,
+        modifier = Modifier
+            .then(paragraph.style.marginModifier())
+            .padding(paragraph.style.padding.toPaddingValues(root = false))
+            .inlineTextPaints(inlinePaints, textLayout)
+            .textClipBrushMask(textClipBrush),
+        inlineContent = inline.inlineContent,
+        style = textStyle,
+        maxLines = if (paragraph.style.whiteSpace == RichWhiteSpace.NoWrap) 1 else Int.MAX_VALUE,
+        overflow = if (paragraph.style.textOverflow == RichTextOverflow.Ellipsis) {
+            TextOverflow.Ellipsis
+        } else {
+            TextOverflow.Clip
+        },
+        onTextLayout = { textLayout = it },
+    )
 }
 
 @Composable
@@ -620,7 +689,11 @@ private fun RichListImageMarker(
     textStyle: TextStyle,
 ) {
     var failed by remember(url) { mutableStateOf(false) }
-    if (failed) {
+    val mediaRequest = remember(url) {
+        RichMediaRequest.fromSource(url, kind = RichMediaKind.ListStyleImage, widthPx = 16, heightPx = 16)
+    }
+    val unsafe = RichMediaLoader.safety(mediaRequest) != RichMediaSafety.Safe
+    if (failed || unsafe) {
         Box(
             modifier = Modifier
                 .width(18.dp)
@@ -637,7 +710,7 @@ private fun RichListImageMarker(
             contentAlignment = Alignment.Center,
         ) {
             AsyncImage(
-                model = url,
+                model = RichMediaLoader.safeData(mediaRequest),
                 contentDescription = null,
                 modifier = Modifier.size(16.dp),
                 contentScale = ContentScale.Fit,
@@ -657,13 +730,20 @@ private fun RichImageBlockView(block: RichImageBlock, modifier: Modifier) {
                 .fillMaxWidth()
                 .heightIn(max = block.style.maxHeight ?: block.style.height.dpOrNull() ?: 420.dp),
             contentScale = block.style.objectFit.toContentScale(),
+            enforceRichMediaSafety = true,
+            richMediaKind = RichMediaKind.Image,
         )
     }
 }
 
 @Composable
 private fun RichTableBlockView(block: RichTableBlock, modifier: Modifier) {
-    StyledContainer(block.style, modifier = modifier, root = false, animationKey = block.blockId) {
+    StyledContainer(
+        block.style.withoutNestedTableScrollOverflow(),
+        modifier = modifier,
+        root = false,
+        animationKey = block.blockId,
+    ) {
         val defaults = LocalRichRenderColorDefaults.current
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             val caption: @Composable () -> Unit = {
@@ -719,6 +799,15 @@ private fun RichTableBlockView(block: RichTableBlock, modifier: Modifier) {
             }
             if (block.style.captionSide == RichCaptionSide.Bottom) caption()
         }
+    }
+}
+
+private fun ComputedStyle.withoutNestedTableScrollOverflow(): ComputedStyle {
+    return when (overflow) {
+        RichOverflow.Scroll,
+        RichOverflow.Auto -> copy(overflow = RichOverflow.Visible)
+        RichOverflow.Visible,
+        RichOverflow.Hidden -> this
     }
 }
 
@@ -813,6 +902,283 @@ private fun RichSvgBlockView(block: RichSvgBlock, modifier: Modifier) {
                 native.restore()
             }
         }
+    }
+}
+
+@Composable
+private fun RichSnapshotIslandBlockView(
+    block: RichSnapshotIslandBlock,
+    modifier: Modifier,
+    onSendInput: (String) -> Unit,
+) {
+    if (block.sourceHtml.isBlank()) {
+        block.fallbackBlock?.let {
+            RichBlockView(block = it, onSendInput = onSendInput, modifier = modifier)
+            return
+        }
+    }
+    val context = LocalContext.current
+    remember(context) {
+        RichRenderHeightCache.initialize(context.applicationContext)
+        true
+    }
+    val density = LocalDensity.current
+    val scrollState = LocalRichRenderScrollState.current
+    val dark = isSystemInDarkTheme()
+    val colorScheme = MaterialTheme.colorScheme
+    val theme = remember(colorScheme, dark) {
+        BubbleTheme(
+            dark = dark,
+            background = colorScheme.background.toCssHex(),
+            onBackground = colorScheme.onBackground.toCssHex(),
+            surface = colorScheme.surfaceVariant.toCssHex(),
+            onSurface = colorScheme.onSurface.toCssHex(),
+            primary = colorScheme.primary.toCssHex(),
+            outline = colorScheme.outlineVariant.toCssHex(),
+        )
+    }
+    val themeSignature = remember(theme) {
+        listOf(
+            theme.dark,
+            theme.background,
+            theme.onBackground,
+            theme.surface,
+            theme.onSurface,
+            theme.primary,
+            theme.outline,
+        ).joinToString("|")
+    }
+
+    var failed by remember(block.blockId, block.sourceDigest) { mutableStateOf(false) }
+    if (failed && block.fallbackBlock != null) {
+        RichBlockView(block = block.fallbackBlock, onSendInput = onSendInput, modifier = modifier)
+        return
+    }
+
+    StyledContainer(block.style, modifier = modifier, root = false, animationKey = block.blockId) {
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val widthPx = remember(maxWidth, density.density) {
+                val width = if (maxWidth != Dp.Infinity && maxWidth > 0.dp) maxWidth else 360.dp
+                with(density) { width.roundToPx() }.coerceAtLeast(1)
+            }
+            val cacheKey = remember(
+                block.sourceDigest,
+                widthPx,
+                density.density,
+                density.fontScale,
+                dark,
+                themeSignature,
+                block.reason,
+            ) {
+                RichHtmlSnapshotCacheKey(
+                    htmlKey = block.sourceDigest,
+                    widthPx = widthPx,
+                    densityBucket = (density.density * 100).roundToInt(),
+                    fontScaleBucket = (density.fontScale * 100).roundToInt(),
+                    dark = dark,
+                    themeHash = themeSignature.hashCode(),
+                    scope = "snapshot-island",
+                    reason = block.reason.name,
+                )
+            }
+            val heightCacheKey = remember(
+                block.sourceDigest,
+                widthPx,
+                density.fontScale,
+                density.density,
+                dark,
+            ) {
+                RichRenderHeightCache.key(
+                    id = block.sourceDigest,
+                    viewportWidthDp = with(density) { widthPx.toDp().value },
+                    fontScale = density.fontScale,
+                    density = density.density,
+                    themeBucket = if (dark) "dark" else "light",
+                    contentType = "snapshot-island",
+                )
+            }
+            val cachedHeightEntry = remember(heightCacheKey) { RichRenderHeightCache.getEntry(heightCacheKey) }
+            var entry by remember(cacheKey) { mutableStateOf(RichHtmlSnapshotCache.get(cacheKey)) }
+            val placeholderHeight = remember(block.estimatedHeightPx, cachedHeightEntry, density.density) {
+                val px = cachedHeightEntry?.heightPx ?: block.estimatedHeightPx ?: with(density) { 144.dp.roundToPx() }
+                with(density) { px.coerceIn(48, 1_800).toDp() }
+            }
+            LaunchedEffect(heightCacheKey, cachedHeightEntry) {
+                RichHtmlRenderTelemetry.recordHeightCache(
+                    id = heightCacheKey.id,
+                    contentType = "snapshot-island",
+                    hit = cachedHeightEntry != null,
+                    heightPx = cachedHeightEntry?.heightPx,
+                    confidence = cachedHeightEntry?.confidence?.name,
+                    rendererVersion = heightCacheKey.rendererVersion,
+                    documentSchemaVersion = heightCacheKey.documentSchemaVersion,
+                    persistent = true,
+                )
+            }
+            LaunchedEffect(
+                cacheKey,
+                scrollState.scrolling,
+                scrollState.scrollInProgress,
+                scrollState.fastScrolling,
+            ) {
+                RichHtmlSnapshotCache.get(cacheKey)?.let {
+                    entry = it
+                    RichRenderHeightCache.put(
+                        key = heightCacheKey,
+                        heightPx = it.heightPx,
+                        confidence = RichRenderHeightConfidence.MeasuredSnapshot,
+                    )
+                    RichHtmlRenderTelemetry.recordSnapshotIslandRender(
+                        id = block.sourceDigest,
+                        blockId = block.blockId,
+                        reason = block.reason.name,
+                        widthPx = it.widthPx,
+                        heightPx = it.heightPx,
+                        cacheHit = true,
+                        renderTimeMs = it.renderTimeMs,
+                        heightCacheHit = cachedHeightEntry != null,
+                        styleBoundary = block.styleBoundary.telemetryName,
+                        queueWaitMs = it.queueWaitMs,
+                    )
+                    return@LaunchedEffect
+                }
+                if (shouldSkipSnapshotIslandRenderForScroll(scrollState)) {
+                    RichHtmlRenderTelemetry.recordSnapshotIslandRender(
+                        id = block.sourceDigest,
+                        blockId = block.blockId,
+                        reason = block.reason.name,
+                        widthPx = widthPx,
+                        heightPx = null,
+                        cacheHit = false,
+                        renderTimeMs = null,
+                        heightCacheHit = cachedHeightEntry != null,
+                        fallbackReason = snapshotIslandScrollSkipReason(scrollState),
+                        styleBoundary = block.styleBoundary.telemetryName,
+                    )
+                    return@LaunchedEffect
+                }
+                if (entry == null) {
+                    delay(SNAPSHOT_ISLAND_RENDER_START_DELAY_MS)
+                    if (shouldSkipSnapshotIslandRenderForScroll(scrollState)) {
+                        RichHtmlRenderTelemetry.recordSnapshotIslandRender(
+                            id = block.sourceDigest,
+                            blockId = block.blockId,
+                            reason = block.reason.name,
+                            widthPx = widthPx,
+                            heightPx = null,
+                            cacheHit = false,
+                            renderTimeMs = null,
+                            heightCacheHit = cachedHeightEntry != null,
+                            fallbackReason = snapshotIslandScrollSkipReason(scrollState),
+                            styleBoundary = block.styleBoundary.telemetryName,
+                        )
+                        return@LaunchedEffect
+                    }
+                }
+                val payload = BubblePayload(
+                    id = "snapshot-island-${block.sourceDigest.replace(':', '-')}-${block.blockId}",
+                    rawContent = block.sourceHtml,
+                    renderMode = BubbleRenderMode.RICH_HTML,
+                    theme = theme,
+                    isStreaming = false,
+                    allowScript = false,
+                )
+                val result = runCatching {
+                    RichHtmlSnapshotCache.getOrRenderResult(cacheKey) {
+                        when (val snapshot = BubbleSnapshotRenderer.render(
+                            context,
+                            BubbleSnapshotRequest(payload, widthPx, maxHeightPx = 1_800),
+                        )) {
+                            is BubbleSnapshotResult.Success -> RichHtmlSnapshotEntry(
+                                bitmap = snapshot.bitmap,
+                                widthPx = snapshot.widthPx,
+                                heightPx = snapshot.heightPx,
+                                renderTimeMs = snapshot.renderTimeMs,
+                                queueWaitMs = snapshot.queueWaitMs,
+                                sessionReused = snapshot.sessionReused,
+                            )
+                            is BubbleSnapshotResult.Failure -> null
+                        }
+                    }
+                }.getOrNull()
+                val nextEntry = result?.entry
+                if (nextEntry == null) {
+                    failed = true
+                    RichHtmlRenderTelemetry.recordSnapshotIslandRender(
+                        id = block.sourceDigest,
+                        blockId = block.blockId,
+                        reason = block.reason.name,
+                        widthPx = widthPx,
+                        heightPx = null,
+                        cacheHit = false,
+                        renderTimeMs = null,
+                        heightCacheHit = cachedHeightEntry != null,
+                        fallbackReason = "snapshot-failed",
+                        styleBoundary = block.styleBoundary.telemetryName,
+                    )
+                } else {
+                    entry = nextEntry
+                    RichRenderHeightCache.put(
+                        key = heightCacheKey,
+                        heightPx = nextEntry.heightPx,
+                        confidence = RichRenderHeightConfidence.MeasuredSnapshot,
+                    )
+                    RichHtmlRenderTelemetry.recordSnapshotIslandRender(
+                        id = block.sourceDigest,
+                        blockId = block.blockId,
+                        reason = block.reason.name,
+                        widthPx = nextEntry.widthPx,
+                        heightPx = nextEntry.heightPx,
+                        cacheHit = result.cacheHit,
+                        renderTimeMs = nextEntry.renderTimeMs,
+                        heightCacheHit = cachedHeightEntry != null,
+                        styleBoundary = block.styleBoundary.telemetryName,
+                        queueWaitMs = nextEntry.queueWaitMs,
+                    )
+                }
+            }
+            val ready = entry
+            if (ready == null) {
+                SnapshotIslandPlaceholder(height = placeholderHeight)
+            } else {
+                Image(
+                    bitmap = ready.bitmap.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.FillWidth,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(with(density) { ready.heightPx.toDp() })
+                        .testTag("rich-html-snapshot-island"),
+                )
+            }
+        }
+    }
+}
+
+internal fun shouldSkipSnapshotIslandRenderForScroll(scrollState: RichRenderScrollState): Boolean =
+    scrollState.scrolling || scrollState.scrollInProgress || scrollState.fastScrolling
+
+internal fun snapshotIslandScrollSkipReason(scrollState: RichRenderScrollState): String =
+    when {
+        scrollState.fastScrolling -> "fast-scroll-skip"
+        scrollState.scrollInProgress -> "scroll-skip"
+        else -> "recent-scroll-skip"
+    }
+
+private const val SNAPSHOT_ISLAND_RENDER_START_DELAY_MS = 96L
+
+@Composable
+private fun SnapshotIslandPlaceholder(height: Dp) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(height)
+            .testTag("rich-html-snapshot-island-placeholder"),
+        shape = RoundedCornerShape(6.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
+    ) {
+        Box(Modifier.fillMaxSize())
     }
 }
 
@@ -1119,6 +1485,9 @@ private fun StyledContainer(
                             contentScale = style.backgroundSize.toContentScale(),
                             alignment = style.backgroundPosition.toAlignment(),
                             alpha = 0.45f,
+                            enforceRichMediaSafety = true,
+                            richMediaKind = RichMediaKind.BackgroundImage,
+                            zoomEnabled = false,
                         )
                     }
                     content()
@@ -2078,7 +2447,11 @@ private fun ComputedStyle.flowFlexItemModifier(parentStyle: ComputedStyle): Modi
 private fun ComputedStyle.repeatedBackgroundModifier(): Modifier {
     val url = backgroundUrl ?: return Modifier
     val style = this
-    val painter = rememberAsyncImagePainter(url)
+    val mediaRequest = remember(url) {
+        RichMediaRequest.fromSource(url, kind = RichMediaKind.BackgroundImage)
+    }
+    val safeUrl = RichMediaLoader.safeData(mediaRequest) ?: return Modifier
+    val painter = rememberAsyncImagePainter(safeUrl)
     return Modifier.drawWithContent {
         val paintArea = backgroundAreaRect(style, style.backgroundOrigin)
         val clipArea = backgroundAreaRect(style, style.backgroundClip)
@@ -2134,7 +2507,12 @@ private fun ComputedStyle.backgroundLayersModifier(
 ): Modifier {
     if (layers.isEmpty()) return Modifier
     val safeLayers = layers.take(MAX_SAFE_BACKGROUND_LAYERS)
-    val painters = safeLayers.map { layer -> layer.url?.let { rememberAsyncImagePainter(it) } }
+    val painters = safeLayers.map { layer ->
+        layer.url?.let { url ->
+            val request = RichMediaRequest.fromSource(url, kind = RichMediaKind.BackgroundImage)
+            RichMediaLoader.safeData(request)?.let { safeUrl -> rememberAsyncImagePainter(safeUrl) }
+        }
+    }
     val style = this
     return Modifier
         .clip(shape)
@@ -2570,8 +2948,14 @@ private fun DrawScope.borderPaint(side: RichBorderSide): Paint {
         color = side.color.toArgb()
         strokeCap = if (side.style == RichBorderStyle.Dotted) Paint.Cap.ROUND else Paint.Cap.SQUARE
         pathEffect = when (side.style) {
-            RichBorderStyle.Dashed -> DashPathEffect(floatArrayOf(strokeWidthPx * 3f, strokeWidthPx * 2f), 0f)
-            RichBorderStyle.Dotted -> DashPathEffect(floatArrayOf(0f, strokeWidthPx * 2f), 0f)
+            RichBorderStyle.Dashed -> DashPathEffect(
+                PreparedDrawCache.dashRecipe(listOf(strokeWidthPx * 3f, strokeWidthPx * 2f)).intervals.toFloatArray(),
+                0f,
+            )
+            RichBorderStyle.Dotted -> DashPathEffect(
+                PreparedDrawCache.dashRecipe(listOf(0f, strokeWidthPx * 2f)).intervals.toFloatArray(),
+                0f,
+            )
             else -> null
         }
     }
@@ -2584,6 +2968,7 @@ private fun ComputedStyle.backgroundBrush(): Brush? {
 private fun richBackgroundImageBrush(image: RichBackgroundImage, targetSize: Size? = null): Brush {
     return when (image) {
         is RichBackgroundImage.LinearGradient -> {
+            image.stops.recordPreparedGradientRecipe()
             val radians = Math.toRadians(image.angleDegrees.toDouble())
             val width = targetSize?.width?.coerceAtLeast(1f) ?: 1000f
             val height = targetSize?.height?.coerceAtLeast(1f) ?: 1000f
@@ -2600,12 +2985,14 @@ private fun richBackgroundImageBrush(image: RichBackgroundImage, targetSize: Siz
             } ?: Brush.linearGradient(colors = image.stops.colors(), start = start, end = end)
         }
         is RichBackgroundImage.RadialGradient -> {
+            image.stops.recordPreparedGradientRecipe()
             val center = targetSize?.let { Offset(it.width / 2f, it.height / 2f) } ?: Offset.Unspecified
             val radius = targetSize?.let { max(it.width, it.height).coerceAtLeast(1f) / 2f } ?: Float.POSITIVE_INFINITY
             image.stops.colorStopPairs()?.let { Brush.radialGradient(colorStops = it, center = center, radius = radius) }
                 ?: Brush.radialGradient(image.stops.colors(), center = center, radius = radius)
         }
         is RichBackgroundImage.ConicGradient -> {
+            image.stops.recordPreparedGradientRecipe()
             image.stops.colorStopPairs()?.let { Brush.sweepGradient(colorStops = it) }
                 ?: Brush.sweepGradient(image.stops.colors())
         }
@@ -2671,6 +3058,13 @@ private fun RichBackgroundPosition.toAlignment(): Alignment {
 }
 
 private fun List<RichColorStop>.colors(): List<Color> = map { it.color }
+
+private fun List<RichColorStop>.recordPreparedGradientRecipe() {
+    PreparedDrawCache.gradientRecipe(
+        colors = map { it.color.toArgb() },
+        stops = map { it.offset },
+    )
+}
 
 private fun List<RichColorStop>.colorStopPairs(): Array<Pair<Float, Color>>? {
     if (size < 2 || any { it.offset == null }) return null

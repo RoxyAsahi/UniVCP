@@ -135,6 +135,40 @@ class RichHtmlBubbleBlockComposeTest {
     }
 
     @Test
+    fun nativeTableWithoutHeaderMeasuresInBubble() {
+        composeRule.setContent {
+            MaterialTheme {
+                RichHtmlBubbleBlock(
+                    html = BodyOnlyTableHtml,
+                    modifier = Modifier
+                        .width(320.dp)
+                        .padding(12.dp),
+                )
+            }
+        }
+
+        composeRule.waitUntilNodeWithTagExists("rich-html-renderer")
+        composeRule.onNodeWithTag("rich-html-renderer").assertIsDisplayed()
+    }
+
+    @Test
+    fun nativeTableInsideOverflowScrollMeasuresInBubble() {
+        composeRule.setContent {
+            MaterialTheme {
+                RichHtmlBubbleBlock(
+                    html = OverflowTableHtml,
+                    modifier = Modifier
+                        .width(320.dp)
+                        .padding(12.dp),
+                )
+            }
+        }
+
+        composeRule.waitUntilNodeWithTagExists("rich-html-renderer")
+        composeRule.onNodeWithTag("rich-html-renderer").assertIsDisplayed()
+    }
+
+    @Test
     fun lazyColumnScrollsToOffscreenRichHtmlBubble() {
         var sentInput: String? = null
 
@@ -246,5 +280,23 @@ private val ExplicitGridHtml = """
       <div style="grid-column:1;grid-row:1;background:#dbeafe;padding:6px;">Grid A</div>
       <div style="grid-column:2 / span 3;grid-row:1 / span 2;min-height:56px;background:#dcfce7;padding:6px;">Grid B</div>
       <div style="grid-column:1;grid-row:2;background:#fee2e2;padding:6px;">Grid C</div>
+    </div>
+""".trimIndent()
+
+private val BodyOnlyTableHtml = """
+    <div id="vcp-root" style="padding:12px;color:#111827;">
+      <table>
+        <tr><td>Body only A</td><td>Body only B</td></tr>
+        <tr><td colspan="2">Body only footer</td></tr>
+      </table>
+    </div>
+""".trimIndent()
+
+private val OverflowTableHtml = """
+    <div id="vcp-root" style="padding:12px;color:#111827;">
+      <table style="overflow:auto; border-collapse:collapse;">
+        <tr><td>Overflow table A</td><td>Overflow table B</td><td>Overflow table C</td><td>Overflow table D</td></tr>
+        <tr><td colspan="4">Overflow table footer</td></tr>
+      </table>
     </div>
 """.trimIndent()

@@ -40,7 +40,9 @@ internal object RichHtmlRootDetector {
                             return RichHtmlRootCandidate(tagName = tagName, start = nextTag, startTagEnd = -1)
                         }
                         val attributes = text.substring(match.range.last + 1, startTagEnd)
-                        if (isRichRoot(tagName, attributes)) {
+                        if (isRichRoot(tagName, attributes) ||
+                            isRichRootStyledByAdjacentStylesheet(text, nextTag, tagName, attributes)
+                        ) {
                             return RichHtmlRootCandidate(
                                 tagName = tagName,
                                 start = nextTag,
@@ -59,14 +61,20 @@ internal object RichHtmlRootDetector {
 
     fun isRichRoot(tagName: String, attributes: String): Boolean {
         if (tagName.equals("details", ignoreCase = true)) return true
-        if (!tagName.equals("div", ignoreCase = true)) return false
+        if (tagName.lowercase() !in VISUAL_ROOT_TAGS) return false
 
         val id = extractAttribute(attributes, "id")
         if (id != null && RICH_ROOT_ID.matches(id)) return true
 
-        val className = extractAttribute(attributes, "class")
         val style = extractAttribute(attributes, "style")
-        if (className.isNullOrBlank() || style.isNullOrBlank()) return false
+        val className = extractAttribute(attributes, "class")
+        if (style.isNullOrBlank()) {
+            return className != null && VISUAL_CLASS_HINTS.any { it.containsMatchIn(className) }
+        }
+
+        if (className.isNullOrBlank()) {
+            return hasStrongStandaloneVisualStyle(style)
+        }
 
         return VISUAL_STYLE_HINTS.any { it.containsMatchIn(style) } ||
             VISUAL_CLASS_HINTS.any { it.containsMatchIn(className) }
@@ -145,6 +153,60 @@ internal object RichHtmlRootDetector {
         return match.groupValues.drop(1).firstOrNull { it.isNotEmpty() }
     }
 
+    private fun isRichRootStyledByAdjacentStylesheet(
+        text: String,
+        tagStart: Int,
+        tagName: String,
+        attributes: String,
+    ): Boolean {
+        if (tagName.lowercase() !in VISUAL_ROOT_TAGS) return false
+        val stylesheet = adjacentLeadingStylesheet(text, tagStart) ?: return false
+        val selectors = buildList {
+            extractAttribute(attributes, "id")?.takeIf { it.isNotBlank() }?.let { add("#$it") }
+            extractAttribute(attributes, "class")
+                ?.split(Regex("""\s+"""))
+                ?.filter { it.isNotBlank() }
+                ?.forEach { add(".$it") }
+        }
+        if (selectors.isEmpty()) return false
+
+        return selectors.any { selector ->
+            stylesheetHasVisualRuleForSelector(stylesheet, selector)
+        }
+    }
+
+    private fun adjacentLeadingStylesheet(text: String, tagStart: Int): String? {
+        val beforeStyleEnd = skipWhitespaceBackward(text, tagStart, 0)
+        val closeStart = text.lastIndexOf("</style", beforeStyleEnd - 1, ignoreCase = true)
+        if (closeStart < 0) return null
+        val closeEnd = findTagEnd(text, closeStart) ?: return null
+        if (closeEnd + 1 != beforeStyleEnd) return null
+        val openStart = text.lastIndexOf("<style", closeStart, ignoreCase = true)
+        if (openStart < 0) return null
+        val openEnd = findTagEnd(text, openStart) ?: return null
+        return text.substring(openEnd + 1, closeStart)
+    }
+
+    private fun skipWhitespaceBackward(text: String, fromExclusive: Int, lowerBound: Int): Int {
+        var cursor = fromExclusive
+        while (cursor > lowerBound && text[cursor - 1].isWhitespace()) {
+            cursor -= 1
+        }
+        return cursor
+    }
+
+    private fun stylesheetHasVisualRuleForSelector(stylesheet: String, selector: String): Boolean {
+        val escapedSelector = Regex.escape(selector)
+        val selectorRule = Regex("""(?s)(^|[},])\s*([^{}]*$escapedSelector[^{}]*)\{([^{}]*)\}""")
+        return selectorRule.findAll(stylesheet).any { match ->
+            val selectorList = match.groupValues[2]
+            val declarations = match.groupValues[3]
+            selectorList.split(",").any { selectorPart ->
+                selectorPart.trim().contains(selector)
+            } && hasStrongStandaloneVisualStyle(declarations)
+        }
+    }
+
     private fun skipElementContent(text: String, tagStart: Int, tagName: String): Int {
         val openEnd = findTagEnd(text, tagStart) ?: return text.length
         val closeStart = text.indexOf("</$tagName", openEnd + 1, ignoreCase = true)
@@ -165,12 +227,26 @@ internal object RichHtmlRootDetector {
         return char == null || char.isWhitespace() || char == '>' || char == '/'
     }
 
-    private val ROOT_TAG_OPEN = Regex("""<\s*(div|details)\b""", RegexOption.IGNORE_CASE)
+    private val ROOT_TAG_OPEN = Regex("""<\s*(div|section|article|main|aside|header|footer|details)\b""", RegexOption.IGNORE_CASE)
     private val RICH_ROOT_ID = Regex("""(?:vcp-root|response-root|vcp-[a-z0-9_-]+-widget)""", RegexOption.IGNORE_CASE)
+    private val VISUAL_ROOT_TAGS = setOf("div", "section", "article", "main", "aside", "header", "footer")
     private val VISUAL_STYLE_HINTS = listOf(
         Regex("""(?:^|;)\s*(background|background-color|border|border-radius|padding|display|font-family|color|width|min-height|box-shadow)\s*:""", RegexOption.IGNORE_CASE),
+    )
+    private val STANDALONE_STYLE_CATEGORIES = listOf(
+        Regex("""(?:^|;)\s*(background|background-color|background-image|box-shadow)\s*:""", RegexOption.IGNORE_CASE),
+        Regex("""(?:^|;)\s*(border|border-radius|border-left|border-top|border-right|border-bottom)\s*:""", RegexOption.IGNORE_CASE),
+        Regex("""(?:^|;)\s*(padding|padding-left|padding-top|padding-right|padding-bottom)\s*:""", RegexOption.IGNORE_CASE),
+        Regex("""(?:^|;)\s*(display|grid-template-columns|flex-direction|justify-content|align-items|gap)\s*:""", RegexOption.IGNORE_CASE),
+        Regex("""(?:^|;)\s*(width|min-width|max-width|height|min-height|max-height)\s*:""", RegexOption.IGNORE_CASE),
     )
     private val VISUAL_CLASS_HINTS = listOf(
         Regex("""\b(?:vcp|math|card|widget|panel|badge|tag|block)\b""", RegexOption.IGNORE_CASE),
     )
+
+    private fun hasStrongStandaloneVisualStyle(style: String): Boolean {
+        val matchedCategories = STANDALONE_STYLE_CATEGORIES.count { it.containsMatchIn(style) }
+        val hasSurfacePaint = STANDALONE_STYLE_CATEGORIES.take(2).any { it.containsMatchIn(style) }
+        return hasSurfacePaint && matchedCategories >= 2
+    }
 }

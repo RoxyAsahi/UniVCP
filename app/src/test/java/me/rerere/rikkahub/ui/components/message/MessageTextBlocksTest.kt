@@ -648,6 +648,113 @@ class MessageTextBlocksTest {
     }
 
     @Test
+    fun `classless styled visual root is treated as rich html block`() {
+        val text = """
+            # Synesthesial
+
+            <div style="background:#1d1730;color:#f8fafc;padding:28px 24px;border-radius:18px;">
+              <p>第五关的数学迷宫</p>
+              <div style="margin-top:15px;background:#eef2f7;border-radius:10px;padding:14px;">0.15 / 0.45</div>
+            </div>
+
+            after
+        """.trimIndent()
+
+        val blocks = parseMessageTextBlocks(text, streaming = false)
+
+        assertEquals(3, blocks.size)
+        assertTrue((blocks[0] as MessageTextBlock.Markdown).text.contains("Synesthesial"))
+        val html = blocks[1] as MessageTextBlock.VcpHtml
+        assertFalse(html.partial)
+        assertTrue(html.html.trimStart().startsWith("<div style=\"background:#1d1730"))
+        assertTrue(html.html.contains("0.15 / 0.45"))
+        assertTrue((blocks[2] as MessageTextBlock.Markdown).text.contains("after"))
+    }
+
+    @Test
+    fun `stylesheet styled class root is treated as rich html block`() {
+        val text = """
+            # Synesthesial
+
+            <style>
+              .syn-card {
+                background:#1d1730;
+                color:#f8fafc;
+                padding:28px 24px;
+                border-radius:18px;
+              }
+              .inner-note { border-left:4px solid #ff4f86; padding:12px; }
+            </style>
+            <div class="syn-card">
+              <h1>UvA 模拟实战训练营</h1>
+              <div class="inner-note">货币时间价值 (TVM)</div>
+            </div>
+
+            after
+        """.trimIndent()
+
+        val blocks = parseMessageTextBlocks(text, streaming = false)
+
+        assertEquals(3, blocks.size)
+        assertTrue((blocks[0] as MessageTextBlock.Markdown).text.contains("Synesthesial"))
+        val html = blocks[1] as MessageTextBlock.VcpHtml
+        assertTrue(html.html.trimStart().startsWith("<style>"))
+        assertTrue(html.html.contains("""<div class="syn-card">"""))
+        assertTrue(html.html.contains("TVM"))
+        val root = RichHtmlCompiler.compile(html.html).blocks.single() as RichContainerBlock
+        assertTrue(root.style.backgroundColor != null)
+        assertEquals(24f, root.style.padding.left.value, 0.01f)
+        assertTrue((blocks[2] as MessageTextBlock.Markdown).text.contains("after"))
+    }
+
+    @Test
+    fun `stylesheet styled semantic root keeps outer visual shell`() {
+        val text = """
+            # Synesthesial
+
+            <style>
+              .syn-shell {
+                background:#1d1730;
+                color:#f8fafc;
+                padding:28px 24px;
+                border-radius:18px;
+              }
+              .card-heading { color:#fde047; }
+              .inner-note { border-left:4px solid #ff4f86; padding:12px; }
+            </style>
+            <section class="syn-shell">
+              <div class="card-heading">FINANCE FOR QUANTITATIVE ECONOMICS</div>
+              <div class="inner-note">货币时间价值 (TVM)</div>
+            </section>
+
+            after
+        """.trimIndent()
+
+        val blocks = parseMessageTextBlocks(text, streaming = false)
+
+        assertEquals(3, blocks.size)
+        val html = blocks[1] as MessageTextBlock.VcpHtml
+        assertTrue(html.html.trimStart().startsWith("<style>"))
+        assertTrue(html.html.contains("""<section class="syn-shell">"""))
+        assertFalse(html.html.trimStart().startsWith("""<div class="card-heading""""))
+        val root = RichHtmlCompiler.compile(html.html).blocks.single() as RichContainerBlock
+        assertEquals("section", root.tagName)
+        assertTrue(root.style.backgroundColor != null)
+        assertEquals(24f, root.style.padding.left.value, 0.01f)
+        assertTrue((blocks[2] as MessageTextBlock.Markdown).text.contains("after"))
+    }
+
+    @Test
+    fun `plain color only classless div remains markdown`() {
+        val text = """before <div style="color:red;">inline note</div> after"""
+
+        val blocks = parseMessageTextBlocks(text, streaming = false)
+
+        assertEquals(1, blocks.size)
+        assertTrue((blocks.single() as MessageTextBlock.Markdown).text.contains("inline note"))
+    }
+
+    @Test
     fun `style rich html validates for native rendering`() {
         val html = """
             <style>

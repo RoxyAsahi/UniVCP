@@ -92,11 +92,14 @@ internal sealed interface ChatRenderCell {
         override val blockIndex = textBlockIndex
         override val renderRisk = RenderRiskScore.fromHtml(block.html, analysis)
         override val estimatedHeightClass = heightClassForRichHtml(analysis, renderRisk)
-        val renderPlan = buildRichRenderPlan(
-            html = block.html,
-            analysis = analysis,
-            risk = renderRisk,
-        )
+        val renderPlan: RichRenderPlan by lazy(LazyThreadSafetyMode.NONE) {
+            buildRichRenderPlan(
+                html = block.html,
+                analysis = analysis,
+                risk = renderRisk,
+                includeStructuralReport = false,
+            )
+        }
     }
 
     data class ProtocolCell(

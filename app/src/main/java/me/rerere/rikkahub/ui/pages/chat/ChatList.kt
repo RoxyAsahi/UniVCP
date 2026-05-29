@@ -78,7 +78,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalScrollCaptureInProgress
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -91,6 +94,7 @@ import dev.chrisbanes.haze.HazeState
 import dev.chrisbanes.haze.hazeSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import me.rerere.ai.ui.UIMessage
 import me.rerere.rikkahub.R
@@ -235,6 +239,13 @@ private fun ChatListNormal(
     val renderCells = remember(chatRenderCells) {
         chatRenderCells.filterNot { it is ChatRenderCell.BottomSpacerCell }
     }
+    val cellPipelineCounts = remember(renderCells) {
+        RichCellPipelineCounts(
+            totalCells = renderCells.size,
+            richCells = renderCells.count { it is ChatRenderCell.RichHtmlCell },
+            highRiskCells = renderCells.count { it.renderRisk.score >= 50 },
+        )
+    }
 
     DisposableEffect(Unit) {
         val listener: (Boolean) -> Boolean = { isVolumeUp ->
@@ -314,7 +325,7 @@ private fun ChatListNormal(
         }
 
         var richRenderScrollState by remember { mutableStateOf(RichRenderScrollState()) }
-        LaunchedEffect(state, renderCells.size, isRecentScroll) {
+        LaunchedEffect(state, renderCells.size) {
             var previousFirstVisible = state.firstVisibleItemIndex
             var previousFirstVisibleOffset = state.firstVisibleItemScrollOffset
             var previousSampleAtMs = SystemClock.elapsedRealtime()
@@ -380,17 +391,17 @@ private fun ChatListNormal(
                     scrollDirection = direction,
                     viewportWidthDp = viewportWidthDp,
                 )
-            }.collect {
+            }.distinctUntilChanged().collect {
                 richRenderScrollState = it
             }
         }
 
-        LaunchedEffect(renderCells, richRenderScrollState.visibleCellRange) {
+        LaunchedEffect(cellPipelineCounts, richRenderScrollState.visibleCellRange) {
             RichHtmlRenderTelemetry.recordCellPipeline(
-                totalCells = renderCells.size,
+                totalCells = cellPipelineCounts.totalCells,
                 visibleCellRange = richRenderScrollState.visibleCellRange,
-                richCells = renderCells.count { it is ChatRenderCell.RichHtmlCell },
-                highRiskCells = renderCells.count { it.renderRisk.score >= 50 },
+                richCells = cellPipelineCounts.richCells,
+                highRiskCells = cellPipelineCounts.highRiskCells,
             )
         }
 
@@ -422,13 +433,15 @@ private fun ChatListNormal(
                 modifier = Modifier
                     .fillMaxSize()
                     .hazeSource(state = hazeState)
-                    .padding(top = innerPadding.calculateTopPadding()),
+                    .padding(top = innerPadding.calculateTopPadding())
+                    .semantics { testTagsAsResourceId = true }
+                    .testTag("rich-chat-feed"),
             ) {
                 if (settings.displaySetting.enableChatCellPipeline) {
                     itemsIndexed(
                         items = renderCells,
                         key = { _, item -> item.stableKey },
-                        contentType = { _, item -> item.contentType },
+                        contentType = { _, item -> item.lazyReuseContentType() },
                     ) { cellIndex, cell ->
                         SelectableChatCellFrame(
                             cell = cell,
@@ -747,14 +760,12 @@ private fun buildRichHtmlPrewarmTargets(
     scrollState: RichRenderScrollState,
 ): List<RichHtmlPrewarmTarget> {
     if (scrollState.nearViewportRange.isEmptyRange()) return emptyList()
+    if (scrollState.fastScrolling) return emptyList()
     val visibleRange = scrollState.visibleCellRange
     val candidateIndexes = scrollState.nearViewportRange
         .asSequence()
         .filter { it in renderCells.indices }
         .toList()
-    val visibleIndexes = candidateIndexes
-        .filter { visibleRange.isNotEmptyRange() && it in visibleRange }
-        .sortedBy { distanceToRange(it, visibleRange) }
     val nearIndexes = candidateIndexes
         .filterNot { visibleRange.isNotEmptyRange() && it in visibleRange }
         .let { indexes ->
@@ -764,7 +775,7 @@ private fun buildRichHtmlPrewarmTargets(
                 RichRenderScrollDirection.Idle -> indexes.sortedBy { distanceToRange(it, visibleRange) }
             }
         }
-    val orderedIndexes = visibleIndexes + nearIndexes
+    val orderedIndexes = nearIndexes
     return orderedIndexes.mapNotNull { index ->
         val cell = renderCells[index] as? ChatRenderCell.RichHtmlCell ?: return@mapNotNull null
         if (cell.block.partial) return@mapNotNull null
@@ -790,6 +801,17 @@ private fun distanceToRange(index: Int, range: IntRange): Int {
 private fun IntRange.isEmptyRange(): Boolean = first > last
 
 private fun IntRange.isNotEmptyRange(): Boolean = first <= last
+
+private fun ChatRenderCell.lazyReuseContentType(): Any = when (this) {
+    is ChatRenderCell.RichHtmlCell -> contentType
+    else -> contentType
+}
+
+private data class RichCellPipelineCounts(
+    val totalCells: Int,
+    val richCells: Int,
+    val highRiskCells: Int,
+)
 
 @Composable
 private fun SelectableChatCellFrame(

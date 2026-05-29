@@ -55,14 +55,28 @@ internal object RichHtmlSnapshotPolicy {
         if (model.unsupported.contains(RichUnsupportedReason.UnsafeHtml)) {
             return RichHtmlSnapshotDecision(RichHtmlSnapshotRoute.DynamicPreview, "UnsafeHtml")
         }
+        val snapshotIslandsAvoidWholeSnapshot = model.snapshotIslandStats.wholeSnapshotAvoided &&
+            model.snapshotIslandStats.appliedCount > 0 &&
+            model.unsupported.none {
+                it == RichUnsupportedReason.UnsafeHtml || it == RichUnsupportedReason.DynamicRuntime
+            }
         model.unsupported.firstOrNull()?.let {
+            if (snapshotIslandsAvoidWholeSnapshot && it == RichUnsupportedReason.SvgTooComplex) {
+                return RichHtmlSnapshotDecision(RichHtmlSnapshotRoute.Native, "SnapshotIslandsAvoidedWholeSnapshot")
+            }
             return RichHtmlSnapshotDecision(RichHtmlSnapshotRoute.Snapshot, "Unsupported:${it.name}")
         }
         if (analysis.kind == RichHtmlRenderKind.NativeStatic) {
             if (model.animationStats.snapshotCandidateCount > 0) {
+                if (snapshotIslandsAvoidWholeSnapshot) {
+                    return RichHtmlSnapshotDecision(RichHtmlSnapshotRoute.Native, "SnapshotIslandsAvoidedWholeSnapshot")
+                }
                 return RichHtmlSnapshotDecision(RichHtmlSnapshotRoute.Snapshot, "AnimationSnapshotCandidate")
             }
             model.visualHints.firstOrNull { it in criticalHints }?.let {
+                if (snapshotIslandsAvoidWholeSnapshot) {
+                    return RichHtmlSnapshotDecision(RichHtmlSnapshotRoute.Native, "SnapshotIslandsAvoidedWholeSnapshot")
+                }
                 return RichHtmlSnapshotDecision(RichHtmlSnapshotRoute.Snapshot, "VisualHint:${it.name}")
             }
         }

@@ -30,26 +30,46 @@ fun ZoomableAsyncImage(
     alignment: Alignment = Alignment.Center,
     contentScale: ContentScale = ContentScale.Fit,
     alpha: Float = DefaultAlpha,
+    enforceRichMediaSafety: Boolean = false,
+    richMediaKind: RichMediaKind = RichMediaKind.Image,
+    zoomEnabled: Boolean = true,
 ) {
     var showImageViewer by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val placeholder = if(LocalDarkMode.current) R.drawable.placeholder_dark else R.drawable.placeholder
     val export = LocalExportContext.current
-    val coilModel = ImageRequest.Builder(context)
-        .data(model)
-        .placeholder(placeholder)
-        .crossfade(false)
-        .allowHardware(!export)
-        .build()
+    val richMediaRequest = remember(model, richMediaKind) {
+        RichMediaRequest.fromSource(model, kind = richMediaKind)
+    }
+    val coilModel = if (enforceRichMediaSafety) {
+        RichMediaLoader.imageRequest(
+            context = context,
+            request = richMediaRequest,
+            placeholder = placeholder,
+            allowHardware = !export,
+        )
+    } else {
+        ImageRequest.Builder(context)
+            .data(model)
+            .placeholder(placeholder)
+            .crossfade(false)
+            .allowHardware(!export)
+            .build()
+    }
+    val canOpenPreview = zoomEnabled && model != null && (!enforceRichMediaSafety || coilModel != null)
     var loading by remember { mutableStateOf(false) }
     AsyncImage(
         model = coilModel,
         contentDescription = contentDescription,
         modifier = modifier
             .shimmer(isLoading = loading)
-            .clickable {
-                showImageViewer = true
-            },
+            .then(
+                if (canOpenPreview) {
+                    Modifier.clickable { showImageViewer = true }
+                } else {
+                    Modifier
+                }
+            ),
         contentScale = contentScale,
         alpha = alpha,
         alignment = alignment,
@@ -63,8 +83,8 @@ fun ZoomableAsyncImage(
             loading = false
         },
     )
-    if (showImageViewer) {
-        ImagePreviewDialog(images = listOf(model ?: "")) {
+    if (showImageViewer && model != null) {
+        ImagePreviewDialog(images = listOf(model)) {
             showImageViewer = false
         }
     }

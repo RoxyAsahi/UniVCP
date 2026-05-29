@@ -20,6 +20,8 @@ internal data class RichHtmlSnapshotCacheKey(
     val dark: Boolean,
     val themeHash: Int,
     val rendererVersion: Int = RICH_HTML_SNAPSHOT_RENDERER_VERSION,
+    val scope: String = "bubble",
+    val reason: String = "",
 ) {
     companion object {
         fun create(
@@ -37,6 +39,8 @@ internal data class RichHtmlSnapshotCacheKey(
                 fontScaleBucket = (fontScale * 100).roundToInt(),
                 dark = dark,
                 themeHash = themeSignature.hashCode(),
+                scope = "bubble",
+                reason = "",
             )
         }
     }

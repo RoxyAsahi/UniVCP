@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.ui.components.message
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -76,5 +77,37 @@ class InlineDynamicWebViewBlockTest {
 
         phase = inlineDynamicWebViewNextPhase(phase, "page-finished")
         assertEquals(InlineDynamicWebViewPhase.Live, phase)
+    }
+
+    @Test
+    fun `inline webview admission releases slot after render process gone`() {
+        inlineDynamicWebViewResetAdmissionForTest()
+
+        assertTrue(inlineDynamicWebViewAcquireForTest("inline-a"))
+        assertTrue(inlineDynamicWebViewAcquireForTest("inline-b"))
+        assertEquals(2, inlineDynamicWebViewActiveCount())
+
+        inlineDynamicWebViewReleaseForTest("inline-a")
+
+        assertEquals(1, inlineDynamicWebViewActiveCount())
+        assertTrue(inlineDynamicWebViewAcquireForTest("inline-c"))
+        assertEquals(2, inlineDynamicWebViewActiveCount())
+
+        inlineDynamicWebViewResetAdmissionForTest()
+    }
+
+    @Test
+    fun `console log line is metadata only`() {
+        val secret = "inline-secret-message"
+        val line = inlineDynamicWebViewConsoleLogLine(
+            inlineId = "inline:1234567890abcdef",
+            level = "ERROR",
+            lineNumber = 42,
+        )
+
+        assertTrue(line.contains("level=ERROR"))
+        assertTrue(line.contains("line=42"))
+        assertFalse(line.contains(secret))
+        assertFalse(line.contains("sourceId"))
     }
 }
