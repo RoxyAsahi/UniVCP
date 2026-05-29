@@ -36,6 +36,7 @@ fun MathBlock(
     fontSize: TextUnit = TextUnit.Unspecified
 ) {
     val proceededLatex = latex
+    val hasHorizontalScrollAncestor = LocalRichHorizontalScrollAncestor.current
     Box(
         modifier = modifier.padding(8.dp)
     ) {
@@ -45,8 +46,12 @@ fun MathBlock(
             fontSize = fontSize.takeOrElse { MaterialTheme.typography.bodyLarge.fontSize },
             modifier = Modifier
                 .align(Alignment.Center)
-                .horizontalScroll(
-                    rememberScrollState()
+                .then(
+                    if (hasHorizontalScrollAncestor) {
+                        Modifier
+                    } else {
+                        Modifier.horizontalScroll(rememberScrollState())
+                    }
                 ),
         )
     }

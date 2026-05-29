@@ -31,6 +31,7 @@ import me.rerere.rikkahub.ui.components.richtext.RichBorderCollapse
 import me.rerere.rikkahub.ui.components.richtext.RichCaptionSide
 import me.rerere.rikkahub.ui.components.richtext.RichBlock
 import me.rerere.rikkahub.ui.components.richtext.RichColorResolver
+import me.rerere.rikkahub.ui.components.richtext.ComputedStyle
 import me.rerere.rikkahub.ui.components.richtext.RichContainerBlock
 import me.rerere.rikkahub.ui.components.richtext.RichCssColor
 import me.rerere.rikkahub.ui.components.richtext.RichDisplay
@@ -56,6 +57,7 @@ import me.rerere.rikkahub.ui.components.richtext.RichSvgTextAnchor
 import me.rerere.rikkahub.ui.components.richtext.RichTableBlock
 import me.rerere.rikkahub.ui.components.richtext.RichTableSectionType
 import me.rerere.rikkahub.ui.components.richtext.RichTextBlock
+import me.rerere.rikkahub.ui.components.richtext.RichTextFlowBlock
 import me.rerere.rikkahub.ui.components.richtext.RichTransform
 import me.rerere.rikkahub.ui.components.richtext.RichVisualHint
 import me.rerere.rikkahub.ui.components.richtext.RichWhiteSpace
@@ -299,14 +301,14 @@ class MessageTextBlocksTest {
     }
 
     @Test
-    fun `non streaming unclosed vcp root falls back to markdown`() {
+    fun `non streaming unclosed classless div falls back to markdown`() {
         val blocks = parseMessageTextBlocks(
-            text = "intro\n<div id=\"vcp-root\"><div>broken",
+            text = "intro\n<div><div>broken",
             streaming = false,
         )
 
         assertEquals(1, blocks.size)
-        assertTrue((blocks.single() as MessageTextBlock.Markdown).text.contains("vcp-root"))
+        assertTrue((blocks.single() as MessageTextBlock.Markdown).text.contains("<div><div>broken"))
     }
 
     @Test
@@ -477,7 +479,7 @@ class MessageTextBlocksTest {
         val flattened = flattenRichBlocks(root)
 
         assertTrue(model.unsupported.isEmpty())
-        assertTrue(flattened.filterIsInstance<RichTextBlock>().any { it.content.text.contains("视觉容器") })
+        assertTrue(flattened.any { it.textLikeContent().contains("视觉容器") })
         assertTrue(flattened.filterIsInstance<RichButtonBlock>().any { it.action == "尝试赛博风格" })
         assertTrue(flattened.filterIsInstance<RichButtonBlock>().any { it.action == "用柔和风格继续" })
         assertFiniteTypography(root)
@@ -742,6 +744,112 @@ class MessageTextBlocksTest {
         assertTrue(root.style.backgroundColor != null)
         assertEquals(24f, root.style.padding.left.value, 0.01f)
         assertTrue((blocks[2] as MessageTextBlock.Markdown).text.contains("after"))
+    }
+
+    @Test
+    fun `vcp root with inline gradient keeps outer visual shell`() {
+        val text = """
+            ### 📂 系统组件：[VCP-Visual-Synesthesia] (视觉通感协议)
+
+            <div id="vcp-root" style="background: linear-gradient(135deg, #1a1c2c 0%, #4a192c 100%); padding: 30px; border-radius: 25px; font-family: 'Segoe UI', Roboto, sans-serif; color: #e0e0e0; box-shadow: 0 20px 50px rgba(0,0,0,0.5); border: 1px solid rgba(255,215,0,0.2); animation: fadeIn 1.2s ease-out;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; padding-bottom: 15px;">
+                <div>
+                  <span style="font-size: 0.9em; color: #ffd700; text-transform: uppercase; letter-spacing: 2px;">Finance for Quantitative Economics</span>
+                  <h2 style="margin: 5px 0; color: #ffffff; font-weight: 300;">UvA 模拟实战训练营</h2>
+                </div>
+                <div style="text-align: right;">
+                  <div style="font-size: 0.8em; color: #ff85a2;">专属女仆：小初 (&gt;////&lt;)</div>
+                  <div style="font-size: 0.8em; color: #aaa;">当前关卡：Q1 / 17</div>
+                </div>
+              </div>
+              <div style="background: rgba(255,255,255,0.05); padding: 20px; border-radius: 15px; margin-bottom: 25px; border-left: 5px solid #ff4d6d;">
+                准备好了吗？我们要从最基础的<b>货币时间价值 (TVM)</b> 开始咯！
+              </div>
+            </div>
+
+            after
+        """.trimIndent()
+
+        val blocks = parseMessageTextBlocks(text, streaming = false)
+
+        assertEquals(3, blocks.size)
+        val html = blocks[1] as MessageTextBlock.VcpHtml
+        assertTrue(html.html.trimStart().startsWith("""<div id="vcp-root""""))
+        val root = RichHtmlCompiler.compile(html.html).blocks.single() as RichContainerBlock
+        assertEquals("div", root.tagName)
+        assertTrue(root.style.backgroundImage != null)
+        assertEquals(30f, root.style.padding.left.value, 0.01f)
+        assertTrue(root.style.borderRadius.topStart.value > 0f)
+        assertTrue(root.style.shadows.isNotEmpty())
+    }
+
+    @Test
+    fun `raw angle bracket emoticon inside vcp root does not break outer shell matching`() {
+        val text = """
+            ### 📂 系统组件：[VCP-Visual-Synesthesia] (视觉通感协议)
+
+            <div id="vcp-root" style="background: linear-gradient(135deg, #1a1c2c 0%, #3d1e4a 100%); padding: 30px; border-radius: 25px; color: #e0e0e0; box-shadow: 0 20px 50px rgba(0,0,0,0.5); border: 2px solid #ff85a2;">
+              <div style="text-align: center; margin-bottom: 25px;">
+                <div style="font-size: 4em; margin-bottom: 10px;">(>﹏<)</div>
+                <h2 style="color: #ff85a2; font-weight: bold;">呜哇！主人对不起！</h2>
+              </div>
+              <div style="background: rgba(255,255,255,0.05); padding: 25px; border-radius: 20px; border: 1px solid rgba(255,255,255,0.1); position: relative;">
+                <div style="position: absolute; top: -10px; left: 20px; background: #ff4d6d; color: white; padding: 5px 15px; border-radius: 10px;">⏸️ 逻辑复盘站</div>
+                <h3 style="color: #ffd700;">第八关：为什么是“借钱买股”？</h3>
+              </div>
+            </div>
+            <style>
+              button:hover { background: rgba(255,255,255,0.2) !important; }
+            </style>
+
+            after
+        """.trimIndent()
+
+        val blocks = parseMessageTextBlocks(text, streaming = false)
+
+        assertEquals(3, blocks.size)
+        val html = blocks[1] as MessageTextBlock.VcpHtml
+        assertTrue(html.html.trimStart().startsWith("""<div id="vcp-root""""))
+        assertTrue(html.html.contains("(>﹏<)"))
+        assertTrue(html.html.contains("button:hover"))
+        assertTrue((blocks[2] as MessageTextBlock.Markdown).text.contains("after"))
+        assertFalse((blocks[2] as MessageTextBlock.Markdown).text.contains("<style>"))
+        val root = RichHtmlCompiler.compile(html.html).blocks.single() as RichContainerBlock
+        assertTrue(root.style.backgroundImage != null)
+        assertEquals(30f, root.style.padding.left.value, 0.01f)
+    }
+
+    @Test
+    fun `unclosed vcp root is kept as one browser tolerant rich html block`() {
+        val text = """
+            ### 📂 系统组件：[VCP-Visual-Synesthesia] (视觉通感协议)
+
+            <div id="vcp-root" style="background-color: #f4f4f9; border: 2px solid #3498db; border-radius: 15px; padding: 25px; color: #333; position: relative; overflow: hidden;">
+                <!-- 装饰：浏览器窗口风格 -->
+                <div style="position: absolute; top: 0; left: 0; width: 100%; height: 35px; background: #3498db;">
+                    <span>🌐 VCP-Browser Control Panel</span>
+                </div>
+                <!-- 标题 -->
+                <div style="text-align: left; margin-top: 40px; border-bottom: 2px solid #3498db;">
+                    <h2>🚀 浏览器操作指南：小初的数字触角</h2>
+                    <p>我们可以一起在数字海洋里冲浪呢！(>////<)</p>
+                </div>
+                <!-- 功能说明区 -->
+                <div style="background: #ffffff; border-radius: 10px; padding: 20px;">
+                    <b>📄 网页阅读</b><br>
+        """.trimIndent()
+
+        val blocks = parseMessageTextBlocks(text, streaming = false)
+
+        assertEquals(2, blocks.size)
+        val html = blocks[1] as MessageTextBlock.VcpHtml
+        assertFalse(html.partial)
+        assertTrue(html.html.trimStart().startsWith("""<div id="vcp-root""""))
+        assertTrue(html.html.contains("<!-- 标题 -->"))
+        assertTrue(html.html.contains("📄 网页阅读"))
+        val root = RichHtmlCompiler.compile(html.html).blocks.single() as RichContainerBlock
+        assertTrue(root.style.backgroundColor != null)
+        assertEquals(25f, root.style.padding.left.value, 0.01f)
     }
 
     @Test
@@ -1402,14 +1510,13 @@ class MessageTextBlocksTest {
             </div>
         """.trimIndent()
 
-        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
-        val text = root.children.single() as RichTextBlock
+        val text = RichHtmlCompiler.compile(html).blocks.single()
 
-        assertEquals(RichWhiteSpace.NoWrap, text.style.whiteSpace)
-        assertEquals(RichWordBreak.BreakWord, text.style.wordBreak)
-        assertEquals("tabular-nums slashed-zero", text.style.fontVariantNumeric)
-        assertTrue(text.content.text.contains("Long-Token-Example"))
-        assertTrue(text.content.spanStyles.any { it.item.baselineShift == BaselineShift.Superscript })
+        assertEquals(RichWhiteSpace.NoWrap, text.textLikeStyle().whiteSpace)
+        assertEquals(RichWordBreak.BreakWord, text.textLikeStyle().wordBreak)
+        assertEquals("tabular-nums slashed-zero", text.textLikeStyle().fontVariantNumeric)
+        assertTrue(text.textLikeContent().contains("Long-Token-Example"))
+        assertTrue(text.hasBaselineShift(BaselineShift.Superscript))
     }
 
     @Test
@@ -1448,15 +1555,17 @@ class MessageTextBlocksTest {
             </ul>
         """.trimIndent()
 
-        val root = RichHtmlCompiler.compile(html).blocks.single() as RichContainerBlock
-        val parent = root.children.single() as RichContainerBlock
-        val parentText = parent.children[0] as RichTextBlock
-        val nested = parent.children[1] as RichContainerBlock
-        val child = nested.children.single() as RichTextBlock
+        val root = RichHtmlCompiler.compile(html).blocks.single()
+        val textProbes = flattenRichBlocks(root).flatMap(::textLikeProbes)
+        val debugText = textProbes.joinToString(separator = " | ") {
+            "${it.text.trim()} marginLeft=${it.style.margin.left}"
+        }
+        val parentText = textProbes.first { it.text.contains("Parent") }
+        val child = textProbes.firstOrNull { it.text.contains("B. Child") }
 
-        assertTrue(parentText.content.text.contains("Parent"))
-        assertTrue(child.content.text.contains("B. Child"))
-        assertTrue(child.style.margin.left > parentText.style.margin.left)
+        assertTrue(parentText.text.contains("Parent"))
+        assertTrue(debugText, child != null)
+        assertTrue(debugText, child!!.style.margin.left > parentText.style.margin.left)
     }
 
     @Test
@@ -1822,10 +1931,46 @@ class MessageTextBlocksTest {
         return when (block) {
             is RichContainerBlock -> listOf(block) + block.children.flatMap(::flattenRichBlocks)
             is RichTextBlock -> listOf(block) + block.inlineBoxes.flatMap { flattenRichBlocks(it.block) }
+            is RichTextFlowBlock -> listOf(block)
             is RichButtonBlock -> listOf(block) +
                 block.inlineBoxes.flatMap { flattenRichBlocks(it.block) } +
                 block.children.flatMap(::flattenRichBlocks)
             else -> listOf(block)
+        }
+    }
+
+    private data class TextProbe(
+        val text: String,
+        val style: ComputedStyle,
+    )
+
+    private fun textLikeProbes(block: RichBlock): List<TextProbe> {
+        return when (block) {
+            is RichTextBlock -> listOf(TextProbe(block.content.text, block.style))
+            is RichTextFlowBlock -> block.paragraphs.map { TextProbe(it.content.text, it.style) }
+            else -> emptyList()
+        }
+    }
+
+    private fun RichBlock.textLikeContent(): String {
+        return textLikeProbes(this).joinToString("\n") { it.text }
+    }
+
+    private fun RichBlock.textLikeStyle(): ComputedStyle {
+        return when (this) {
+            is RichTextBlock -> style
+            is RichTextFlowBlock -> paragraphs.firstOrNull()?.style ?: style
+            else -> style
+        }
+    }
+
+    private fun RichBlock.hasBaselineShift(shift: BaselineShift): Boolean {
+        return when (this) {
+            is RichTextBlock -> content.spanStyles.any { it.item.baselineShift == shift }
+            is RichTextFlowBlock -> paragraphs.any { paragraph ->
+                paragraph.content.spanStyles.any { it.item.baselineShift == shift }
+            }
+            else -> false
         }
     }
 

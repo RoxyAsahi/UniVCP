@@ -263,8 +263,13 @@ The guard has two layers:
 
 - `RichTableBlockView` strips only `Scroll/Auto` overflow from the table's outer `StyledContainer`; `Hidden` is preserved, and the table's native horizontal scroll remains.
 - `SpannedDataTable` uses `BoxWithConstraints` and enables its internal `horizontalScroll` only when the incoming width is bounded. If a future parent accidentally measures it under infinity width, the table can still measure instead of crashing.
+- `StyledContainer` carries a rich-render-local horizontal-scroll ancestor flag. Once a CSS overflow wrapper has created a horizontal scroll container, descendant rich containers do not create another `horizontalScroll`.
+- `RichTableBlockView` treats the table as the owner of horizontal overflow for its cells. Table cells strip `Scroll/Auto`, and the table disables its own internal scroll if an outer rich overflow container already owns horizontal scrolling.
+- Code and math blocks also honor the same rich-render-local horizontal-scroll ancestor flag. They can use an existing rich scroll surface instead of creating a nested `horizontalScroll`.
 
 This is fidelity-preserving for chat cards: the cells, borders, caption, column widths, and table body stay native. The change removes a redundant scroll shell rather than flattening or snapshotting the table.
+
+Do not solve this by catching the `IllegalStateException` during measure. The invariant is structural: one native rich subtree may expose a horizontal scrolling surface, but nested descendants must render inside that surface with unbounded width awareness.
 
 ### Native Measure Exception Policy
 
@@ -339,4 +344,5 @@ Select-String -Path build\rich-render-smoke\logcat-apr-native.txt -Pattern "FATA
 - Do not catch a child Compose measure exception and keep placing the parent in the same pass. Log the original throwable and fix the specific renderer branch instead.
 - Do not assume tables always have headers. AI-generated HTML commonly emits body-only `table > tr > td` structures.
 - Do not nest `horizontalScroll` for native tables. CSS `overflow:auto/scroll` on a table must not wrap `SpannedDataTable` in another horizontal scroll.
+- Do not add a second descendant `horizontalScroll` under an existing rich CSS overflow scroll container. Use the rich-render-local ancestor guard or an equivalent bounded-width check.
 - Prefer adding telemetry snapshots outside the scroll hot path over logging every measure.

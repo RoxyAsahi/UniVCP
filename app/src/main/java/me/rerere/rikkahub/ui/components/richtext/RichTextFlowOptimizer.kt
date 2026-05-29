@@ -211,7 +211,7 @@ internal object RichTextFlowOptimizer {
     }
 
     private fun String.isTextFlowContainerTag(): Boolean {
-        return this in setOf("div", "p", "span", "section", "article", "main", "ul", "ol", "li")
+        return this in setOf("div", "p", "span", "section", "article", "main")
     }
 
     private fun ComputedStyle.isTextFlowContainerSafe(): Boolean {

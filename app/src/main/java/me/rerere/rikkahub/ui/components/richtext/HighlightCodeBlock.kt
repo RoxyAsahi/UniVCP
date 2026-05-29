@@ -305,12 +305,14 @@ private fun CodeBlockDefault(
     showLineNumbers: Boolean,
     scrollState: ScrollState,
 ) {
+    val hasHorizontalScrollAncestor = LocalRichHorizontalScrollAncestor.current
+    val createsHorizontalScroll = !autoWrap && !hasHorizontalScrollAncestor
     Row(
         modifier = Modifier.then(
-            if (autoWrap) {
-                Modifier
-            } else {
+            if (createsHorizontalScroll) {
                 Modifier.horizontalScroll(scrollState)
+            } else {
+                Modifier
             }
         )
     ) {

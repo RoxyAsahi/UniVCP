@@ -50,8 +50,10 @@ internal object RichHtmlRootDetector {
                             )
                         }
                         cursor = startTagEnd + 1
-                    } else {
+                    } else if (isPlausibleTagStart(text, nextTag)) {
                         cursor = findTagEnd(text, nextTag)?.plus(1) ?: (nextTag + 1)
+                    } else {
+                        cursor = nextTag + 1
                     }
                 }
             }
@@ -124,11 +126,70 @@ internal object RichHtmlRootDetector {
                 }
 
                 else -> {
+                    if (!isPlausibleTagStart(text, nextTag)) {
+                        cursor = nextTag + 1
+                        continue
+                    }
                     cursor = findTagEnd(text, nextTag)?.plus(1) ?: (nextTag + 1)
                 }
             }
         }
         return null
+    }
+
+    fun canAutoCloseElementAtEof(text: String, startIndex: Int, tagName: String): Boolean {
+        var cursor = startIndex
+        var depth = 1
+        val openPrefix = "<$tagName"
+        val closePrefix = "</$tagName"
+
+        while (cursor < text.length) {
+            if (cursor - startIndex > MAX_SCAN_CHARS) return false
+            val nextTag = text.indexOf('<', cursor)
+            if (nextTag < 0) return depth > 0
+            if (nextTag - startIndex > MAX_SCAN_CHARS) return false
+
+            when {
+                text.startsWith("<!--", nextTag) -> {
+                    cursor = text.indexOf("-->", nextTag + 4).let { if (it >= 0) it + 3 else text.length }
+                }
+
+                text.regionMatches(nextTag, "<script", 0, "<script".length, ignoreCase = true) -> {
+                    cursor = skipElementContent(text, nextTag, "script")
+                }
+
+                text.regionMatches(nextTag, "<style", 0, "<style".length, ignoreCase = true) -> {
+                    cursor = skipElementContent(text, nextTag, "style")
+                }
+
+                text.regionMatches(nextTag, openPrefix, 0, openPrefix.length, ignoreCase = true) &&
+                    isTagBoundary(text.getOrNull(nextTag + openPrefix.length)) -> {
+                    val tagEnd = findTagEnd(text, nextTag) ?: return false
+                    if (!isSelfClosingTag(text, nextTag, tagEnd)) {
+                        depth += 1
+                        if (depth > MAX_MATCH_DEPTH) return false
+                    }
+                    cursor = tagEnd + 1
+                }
+
+                text.regionMatches(nextTag, closePrefix, 0, closePrefix.length, ignoreCase = true) &&
+                    isTagBoundary(text.getOrNull(nextTag + closePrefix.length)) -> {
+                    val closeEnd = findTagEnd(text, nextTag) ?: return false
+                    depth -= 1
+                    cursor = closeEnd + 1
+                    if (depth == 0) return false
+                }
+
+                else -> {
+                    if (!isPlausibleTagStart(text, nextTag)) {
+                        cursor = nextTag + 1
+                        continue
+                    }
+                    cursor = findTagEnd(text, nextTag)?.plus(1) ?: return false
+                }
+            }
+        }
+        return depth > 0
     }
 
     fun findTagEnd(text: String, tagStart: Int): Int? {
@@ -225,6 +286,13 @@ internal object RichHtmlRootDetector {
 
     private fun isTagBoundary(char: Char?): Boolean {
         return char == null || char.isWhitespace() || char == '>' || char == '/'
+    }
+
+    private fun isPlausibleTagStart(text: String, index: Int): Boolean {
+        if (text.getOrNull(index) != '<') return false
+        val next = text.getOrNull(index + 1) ?: return false
+        if (next.isLetter() || next == '!' || next == '?') return true
+        return next == '/' && text.getOrNull(index + 2)?.isLetter() == true
     }
 
     private val ROOT_TAG_OPEN = Regex("""<\s*(div|section|article|main|aside|header|footer|details)\b""", RegexOption.IGNORE_CASE)

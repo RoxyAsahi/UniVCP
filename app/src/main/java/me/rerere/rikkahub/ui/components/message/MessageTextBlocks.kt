@@ -238,10 +238,11 @@ private fun findRichRootBlock(text: String, startIndex: Int, streaming: Boolean)
 
         val end = RichHtmlRootDetector.findMatchingElementEnd(text, startTagEnd + 1, root.tagName)
         if (end != null) {
-            val html = text.substring(start, end)
+            val blockEnd = findAdjacentTrailingStyleEnd(text, end)
+            val html = text.substring(start, blockEnd)
             return SpecialBlock(
                 start = start,
-                end = end,
+                end = blockEnd,
                 block = MessageTextBlock.VcpHtml(
                     html = html,
                     partial = false,
@@ -260,6 +261,19 @@ private fun findRichRootBlock(text: String, startIndex: Int, streaming: Boolean)
                     partial = true,
                     executable = hasExecutableHtml(html),
                     previewHtml = buildStreamingRichHtmlPreview(html),
+                )
+            )
+        }
+
+        if (RichHtmlRootDetector.canAutoCloseElementAtEof(text, startTagEnd + 1, root.tagName)) {
+            val html = text.substring(start)
+            return SpecialBlock(
+                start = start,
+                end = text.length,
+                block = MessageTextBlock.VcpHtml(
+                    html = html,
+                    partial = false,
+                    executable = hasExecutableHtml(html),
                 )
             )
         }
@@ -302,12 +316,42 @@ private fun findAdjacentLeadingStyleStart(text: String, rootStart: Int, lowerBou
     }
 }
 
+private fun findAdjacentTrailingStyleEnd(text: String, rootEnd: Int): Int {
+    var blockEnd = rootEnd
+    while (true) {
+        val styleStart = skipWhitespaceForward(text, blockEnd)
+        if (!text.regionMatches(styleStart, "<style", 0, "<style".length, ignoreCase = true) ||
+            !isTagBoundary(text.getOrNull(styleStart + "<style".length))
+        ) {
+            return blockEnd
+        }
+
+        val openEnd = RichHtmlRootDetector.findTagEnd(text, styleStart) ?: return blockEnd
+        val closeStart = text.indexOf("</style", openEnd + 1, ignoreCase = true)
+        if (closeStart < 0) return blockEnd
+        val closeEnd = RichHtmlRootDetector.findTagEnd(text, closeStart) ?: return blockEnd
+        blockEnd = closeEnd + 1
+    }
+}
+
 private fun skipWhitespaceBackward(text: String, fromExclusive: Int, lowerBound: Int): Int {
     var cursor = fromExclusive
     while (cursor > lowerBound && text[cursor - 1].isWhitespace()) {
         cursor -= 1
     }
     return cursor
+}
+
+private fun skipWhitespaceForward(text: String, fromInclusive: Int): Int {
+    var cursor = fromInclusive
+    while (cursor < text.length && text[cursor].isWhitespace()) {
+        cursor += 1
+    }
+    return cursor
+}
+
+private fun isTagBoundary(char: Char?): Boolean {
+    return char == null || char.isWhitespace() || char == '>' || char == '/'
 }
 
 private fun hasExecutableHtml(html: String): Boolean {

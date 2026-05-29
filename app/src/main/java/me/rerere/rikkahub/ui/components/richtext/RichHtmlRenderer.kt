@@ -772,30 +772,36 @@ private fun RichTableBlockView(block: RichTableBlock, modifier: Modifier) {
                 row.map { cell -> @Composable { TableCellContent(cell) } }
             }
             if (headers.isNotEmpty() || rows.isNotEmpty()) {
+                val hasHorizontalScrollAncestor = LocalRichHorizontalScrollAncestor.current
                 val columnCount = max(
                     headerCells.sumOf { it.colspan.coerceIn(1, 12) },
                     tableRows.maxOfOrNull { row -> row.sumOf { it.colspan.coerceIn(1, 12) } } ?: 0,
                 )
-                SpannedDataTable(
-                    headers = headers,
-                    rows = rows,
-                    modifier = Modifier.padding(vertical = 6.dp),
-                    cellBorder = if (block.style.borderCollapse == RichBorderCollapse.Collapse) {
-                        BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant)
-                    } else {
-                        BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f))
-                    },
-                    headerBackground = block.style.backgroundColor ?: defaults.tableHeaderBackground,
-                    columnMinWidths = List(columnCount) { 80.dp },
-                    columnMaxWidths = List(columnCount) { 260.dp },
-                    headerColSpans = headerCells.map { it.colspan },
-                    rowColSpans = tableRows.map { row -> row.map { it.colspan } },
-                    rowSpans = tableRows.map { row -> row.map { it.rowspan } },
-                    headerCellStyles = headerCells.map { it.toDataTableCellStyle() },
-                    rowCellStyles = tableRows.map { row -> row.map { it.toDataTableCellStyle() } },
-                    rowSectionTypes = tableRowSectionTypes.map { it.toDataTableSectionType() },
-                    collapseBorders = block.style.borderCollapse == RichBorderCollapse.Collapse,
-                )
+                CompositionLocalProvider(
+                    LocalRichHorizontalScrollAncestor provides true,
+                ) {
+                    SpannedDataTable(
+                        headers = headers,
+                        rows = rows,
+                        modifier = Modifier.padding(vertical = 6.dp),
+                        cellBorder = if (block.style.borderCollapse == RichBorderCollapse.Collapse) {
+                            BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant)
+                        } else {
+                            BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f))
+                        },
+                        headerBackground = block.style.backgroundColor ?: defaults.tableHeaderBackground,
+                        columnMinWidths = List(columnCount) { 80.dp },
+                        columnMaxWidths = List(columnCount) { 260.dp },
+                        headerColSpans = headerCells.map { it.colspan },
+                        rowColSpans = tableRows.map { row -> row.map { it.colspan } },
+                        rowSpans = tableRows.map { row -> row.map { it.rowspan } },
+                        headerCellStyles = headerCells.map { it.toDataTableCellStyle() },
+                        rowCellStyles = tableRows.map { row -> row.map { it.toDataTableCellStyle() } },
+                        rowSectionTypes = tableRowSectionTypes.map { it.toDataTableSectionType() },
+                        collapseBorders = block.style.borderCollapse == RichBorderCollapse.Collapse,
+                        horizontalScrollEnabled = !hasHorizontalScrollAncestor,
+                    )
+                }
             }
             if (block.style.captionSide == RichCaptionSide.Bottom) caption()
         }
@@ -813,7 +819,7 @@ private fun ComputedStyle.withoutNestedTableScrollOverflow(): ComputedStyle {
 
 @Composable
 private fun TableCellContent(cell: RichTableCell) {
-    StyledContainer(cell.style, root = false, animationKey = null) {
+    StyledContainer(cell.style.withoutNestedTableScrollOverflow(), root = false, animationKey = null) {
         Text(
             text = cell.content,
             style = cell.style.toTextStyle(LocalContentColor.current),
@@ -1447,7 +1453,10 @@ private fun StyledContainer(
     outer = outer.then(style.nativeAnimationModifier(animationKey))
     if (style.overflow == RichOverflow.Hidden) outer = outer.clip(shape)
     if (onClick != null) outer = outer.clickable(onClick = onClick)
-    if (style.overflow == RichOverflow.Scroll || style.overflow == RichOverflow.Auto) {
+    val hasHorizontalScrollAncestor = LocalRichHorizontalScrollAncestor.current
+    val createsHorizontalScroll = (style.overflow == RichOverflow.Scroll || style.overflow == RichOverflow.Auto) &&
+        !hasHorizontalScrollAncestor
+    if (createsHorizontalScroll) {
         outer = outer.horizontalScroll(rememberScrollState())
     }
 
@@ -1462,6 +1471,7 @@ private fun StyledContainer(
             CompositionLocalProvider(
                 LocalRichEffectiveBackground provides effectiveBackground,
                 LocalContentColor provides contentColor,
+                LocalRichHorizontalScrollAncestor provides (hasHorizontalScrollAncestor || createsHorizontalScroll),
             ) {
                 Box(
                     Modifier
@@ -1498,6 +1508,7 @@ private fun StyledContainer(
         CompositionLocalProvider(
             LocalRichEffectiveBackground provides effectiveBackground,
             LocalContentColor provides contentColor,
+            LocalRichHorizontalScrollAncestor provides (hasHorizontalScrollAncestor || createsHorizontalScroll),
         ) {
             Box(
                 outer

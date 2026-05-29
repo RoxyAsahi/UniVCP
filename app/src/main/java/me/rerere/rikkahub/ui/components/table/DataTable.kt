@@ -82,6 +82,7 @@ internal fun SpannedDataTable(
     rowCellStyles: List<List<DataTableCellStyle>> = emptyList(),
     rowSectionTypes: List<DataTableSectionType> = emptyList(),
     collapseBorders: Boolean = false,
+    horizontalScrollEnabled: Boolean = true,
 ) {
     val hScroll = rememberScrollState()
     val surfaceContainer = MaterialTheme.colorScheme.surfaceContainer
@@ -98,7 +99,7 @@ internal fun SpannedDataTable(
                 }
             ),
     ) {
-        val boundedWidth = maxWidth != Dp.Infinity
+        val boundedWidth = horizontalScrollEnabled && maxWidth != Dp.Infinity
         Box(
             modifier = if (boundedWidth) {
                 Modifier.horizontalScroll(hScroll)

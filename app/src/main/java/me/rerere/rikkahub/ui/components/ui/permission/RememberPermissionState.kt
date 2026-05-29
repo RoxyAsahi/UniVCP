@@ -1,5 +1,7 @@
 package me.rerere.rikkahub.ui.components.ui.permission
 
+import android.content.Context
+import android.content.ContextWrapper
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -51,12 +53,12 @@ fun rememberPermissionState(
     permissions: Set<PermissionInfo>
 ): PermissionState {
     val context = LocalContext.current
-    val activity = context as? ComponentActivity
-        ?: throw IllegalStateException("rememberPermissionState 必须在 ComponentActivity 中使用")
+    val activity = context.findComponentActivity()
+        ?: throw IllegalStateException("rememberPermissionState 必须在 ComponentActivity 中使用: ${context::class.java.name}")
 
     // 创建权限状态对象
-    val permissionState = remember(permissions) {
-        PermissionState(permissions, context, activity)
+    val permissionState = remember(permissions, activity) {
+        PermissionState(permissions, activity, activity)
     }
 
     // 多个权限请求启动器
@@ -118,6 +120,14 @@ fun rememberPermissionState(
     }
 
     return permissionState
+}
+
+private tailrec fun Context.findComponentActivity(): ComponentActivity? {
+    return when (this) {
+        is ComponentActivity -> this
+        is ContextWrapper -> baseContext.findComponentActivity()
+        else -> null
+    }
 }
 
 /**
