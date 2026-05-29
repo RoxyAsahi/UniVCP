@@ -134,6 +134,13 @@ fun SettingAboutPage() {
                         modifier = Modifier.padding(horizontal = 8.dp),
                     ) {
                         item(
+                            leadingContent = { Icon(HugeIcons.Code, null) },
+                            supportingContent = {
+                                Text(stringResource(R.string.about_page_based_on_desc))
+                            },
+                            headlineContent = { Text(stringResource(R.string.about_page_based_on)) },
+                        )
+                        item(
                             modifier = Modifier.combinedClickable(
                                 onClick = {},
                                 onLongClick = { navController.navigate(Screen.Debug) },
@@ -177,6 +184,18 @@ fun SettingAboutPage() {
                             leadingContent = { Icon(HugeIcons.File02, null) },
                             supportingContent = { Text("https://github.com/RoxyAsahi/UniVCP/blob/main/LICENSE") },
                             headlineContent = { Text(stringResource(R.string.about_page_license)) },
+                        )
+                        item(
+                            onClick = { context.openUrl("https://github.com/rikkahub/rikkahub") },
+                            leadingContent = { Icon(HugeIcons.Github, null) },
+                            supportingContent = { Text("https://github.com/rikkahub/rikkahub") },
+                            headlineContent = { Text(stringResource(R.string.about_page_upstream)) },
+                        )
+                        item(
+                            onClick = { context.openUrl("https://github.com/rikkahub/rikkahub/blob/main/LICENSE") },
+                            leadingContent = { Icon(HugeIcons.File02, null) },
+                            supportingContent = { Text("https://github.com/rikkahub/rikkahub/blob/main/LICENSE") },
+                            headlineContent = { Text(stringResource(R.string.about_page_upstream_license)) },
                         )
                     }
                 }

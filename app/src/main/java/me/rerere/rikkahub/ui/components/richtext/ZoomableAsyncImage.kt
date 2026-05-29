@@ -19,6 +19,7 @@ import coil3.request.placeholder
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.ui.components.ui.ImagePreviewDialog
 import me.rerere.rikkahub.ui.components.ui.LocalExportContext
+import me.rerere.rikkahub.ui.context.LocalSettings
 import me.rerere.rikkahub.ui.modifier.shimmer
 import me.rerere.rikkahub.ui.theme.LocalDarkMode
 
@@ -36,10 +37,14 @@ fun ZoomableAsyncImage(
 ) {
     var showImageViewer by remember { mutableStateOf(false) }
     val context = LocalContext.current
+    val settings = LocalSettings.current
+    val resolvedModel = remember(model, settings) {
+        RichVcpMediaResolver.resolve(model, settings)
+    }
     val placeholder = if(LocalDarkMode.current) R.drawable.placeholder_dark else R.drawable.placeholder
     val export = LocalExportContext.current
-    val richMediaRequest = remember(model, richMediaKind) {
-        RichMediaRequest.fromSource(model, kind = richMediaKind)
+    val richMediaRequest = remember(resolvedModel, richMediaKind) {
+        RichMediaRequest.fromSource(resolvedModel, kind = richMediaKind)
     }
     val coilModel = if (enforceRichMediaSafety) {
         RichMediaLoader.imageRequest(
@@ -50,13 +55,13 @@ fun ZoomableAsyncImage(
         )
     } else {
         ImageRequest.Builder(context)
-            .data(model)
+            .data(resolvedModel)
             .placeholder(placeholder)
             .crossfade(false)
             .allowHardware(!export)
             .build()
     }
-    val canOpenPreview = zoomEnabled && model != null && (!enforceRichMediaSafety || coilModel != null)
+    val canOpenPreview = zoomEnabled && resolvedModel != null && (!enforceRichMediaSafety || coilModel != null)
     var loading by remember { mutableStateOf(false) }
     AsyncImage(
         model = coilModel,
@@ -83,8 +88,8 @@ fun ZoomableAsyncImage(
             loading = false
         },
     )
-    if (showImageViewer && model != null) {
-        ImagePreviewDialog(images = listOf(model)) {
+    if (showImageViewer && resolvedModel != null) {
+        ImagePreviewDialog(images = listOf(resolvedModel)) {
             showImageViewer = false
         }
     }

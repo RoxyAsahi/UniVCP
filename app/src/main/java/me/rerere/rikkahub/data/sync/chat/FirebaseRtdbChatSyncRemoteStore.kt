@@ -27,6 +27,7 @@ data class FirebaseRtdbChatSyncConfig(
     val deviceId: String,
     val authToken: String? = null,
     val pathPrefix: String = "chatSync",
+    val incrementalPull: Boolean = false,
 )
 
 class FirebaseRtdbChatSyncRemoteStore(
@@ -36,7 +37,7 @@ class FirebaseRtdbChatSyncRemoteStore(
 ) : ChatSyncRemoteStore {
     override suspend fun pullChanges(since: ChatSyncCursor?): ChatSyncPullResult {
         val request = Request.Builder()
-            .url(collectionUrl())
+            .url(collectionUrl(since))
             .get()
             .build()
 
@@ -51,7 +52,7 @@ class FirebaseRtdbChatSyncRemoteStore(
             val remoteEnvelopes = envelopes.filterRemote(since)
 
             return ChatSyncPullResult(
-                conversations = remoteEnvelopes.map { it.conversation },
+                conversations = remoteEnvelopes.map { it.conversation.withEnvelopeUpdatedAt(it.updatedAt) },
                 nextCursor = envelopes.nextCursor(since),
             )
         }
@@ -92,9 +93,34 @@ class FirebaseRtdbChatSyncRemoteStore(
         )
     }
 
+    override suspend fun getPresence(): List<ChatSyncPeerPresence> {
+        val request = Request.Builder()
+            .url(presenceUrl())
+            .get()
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            val body = response.body.string()
+            if (!response.isSuccessful) {
+                error("Firebase chat sync presence failed: ${response.code} $body")
+            }
+            if (body.isBlank() || body == "null") return emptyList()
+            val element = json.parseToJsonElement(body)
+            if (element == JsonNull) return emptyList()
+            return (element as? JsonObject)
+                ?.values
+                ?.mapNotNull { value ->
+                    runCatching {
+                        json.decodeFromJsonElement<ChatSyncPeerPresence>(value)
+                    }.getOrNull()
+                }
+                .orEmpty()
+        }
+    }
+
     override fun observeChanges(since: ChatSyncCursor?): Flow<ChatSyncRemoteEvent> {
         val request = Request.Builder()
-            .url(collectionUrl())
+            .url(collectionUrl(since))
             .header("Accept", "text/event-stream")
             .build()
 
@@ -106,7 +132,7 @@ class FirebaseRtdbChatSyncRemoteStore(
                     .forEach { envelope ->
                         emit(
                             ChatSyncRemoteEvent(
-                                conversation = envelope.conversation,
+                                conversation = envelope.conversation.withEnvelopeUpdatedAt(envelope.updatedAt),
                                 cursor = ChatSyncCursor(updatedAfter = envelope.updatedAt),
                                 sourceDeviceId = envelope.sourceDeviceId,
                             )
@@ -124,6 +150,10 @@ class FirebaseRtdbChatSyncRemoteStore(
             sourceDeviceId = config.deviceId,
             conversation = this,
         )
+    }
+
+    private fun SyncConversation.withEnvelopeUpdatedAt(envelopeUpdatedAt: Long): SyncConversation {
+        return copy(updatedAt = maxOf(updatedAt, envelopeUpdatedAt))
     }
 
     private fun List<ChatSyncRemoteEnvelope>.filterRemote(since: ChatSyncCursor?): List<ChatSyncRemoteEnvelope> {
@@ -173,8 +203,15 @@ class FirebaseRtdbChatSyncRemoteStore(
         return containsKey("conversation") && containsKey("updatedAt")
     }
 
-    private fun collectionUrl(): String {
-        return "${baseUrl()}/${config.pathPrefix}/${syncKey(config.roomId)}/conversations.json${queryString()}"
+    private fun collectionUrl(since: ChatSyncCursor? = null): String {
+        val params = queryParams {
+            val updatedAfter = since?.updatedAfter ?: 0L
+            if (config.incrementalPull && updatedAfter > 0L) {
+                add("orderBy" to "\"updatedAt\"")
+                add("startAt" to (updatedAfter + 1L).toString())
+            }
+        }
+        return "${baseUrl()}/${config.pathPrefix}/${syncKey(config.roomId)}/conversations.json${queryString(params)}"
     }
 
     private fun conversationUrl(conversationId: String): String {
@@ -182,13 +219,31 @@ class FirebaseRtdbChatSyncRemoteStore(
             queryString()
     }
 
+    private fun presenceUrl(): String {
+        return "${baseUrl()}/${config.pathPrefix}/${syncKey(config.roomId)}/presence.json${queryString()}"
+    }
+
     private fun baseUrl(): String {
         return config.databaseUrl.trimEnd('/')
     }
 
-    private fun queryString(): String {
-        val token = config.authToken?.takeIf { it.isNotBlank() } ?: return ""
-        return "?auth=${URLEncoder.encode(token, StandardCharsets.UTF_8.name())}"
+    private fun queryString(params: List<Pair<String, String>> = emptyList()): String {
+        val allParams = params.toMutableList()
+        config.authToken?.takeIf { it.isNotBlank() }?.let { token ->
+            allParams += "auth" to token
+        }
+        if (allParams.isEmpty()) return ""
+        return allParams.joinToString(prefix = "?", separator = "&") { (key, value) ->
+            "${urlEncode(key)}=${urlEncode(value)}"
+        }
+    }
+
+    private inline fun queryParams(block: MutableList<Pair<String, String>>.() -> Unit): List<Pair<String, String>> {
+        return buildList(block)
+    }
+
+    private fun urlEncode(value: String): String {
+        return URLEncoder.encode(value, StandardCharsets.UTF_8.name())
     }
 
     private fun syncKey(value: String): String {

@@ -227,7 +227,7 @@ assistant text
 - 定位：`relative/absolute/fixed/sticky` 编译进 model；renderer 将 absolute/fixed/sticky 子节点叠到同一容器 overlay 层，按 left/top/right/bottom + transform 做安全静态近似。
 - 变换：`translate`、`scale`、`rotate`、`skew` 编译进 model；renderer 对 translate/scale/rotate 做静态近似。
 - Overflow：`hidden` 裁切，`scroll/auto` 降级为滚动容器。
-- 阴影：多层 `box-shadow` 编译进 model；renderer 按 offset、blur、spread、color 绘制非 inset 静态近似。
+- 阴影：多层 `box-shadow` 编译进 model；renderer 按 offset、blur、spread、color 绘制非 inset 静态近似。聊天列表的最外层 rich root 不绘制外扩阴影，避免气泡边界外出现大面积晕染；内部子卡片/按钮阴影仍保留。
 - 透明度：`opacity`。
 - CSS filter：`filter/backdrop-filter` 支持解析 `blur()/brightness()/opacity()/grayscale()` 到内部 model；renderer 当前将 `filter: opacity(...)` 合并到现有 alpha，并用低成本颜色矩阵近似渲染 `brightness()/grayscale()`；`blur()` 和 backdrop blur 继续作为结构化静态缺口由 visual hint 统计。
 - CSS animation/transition：`animation`、`animation-*`、`transition`、`transition-*` 和 `@keyframes` 会进入内部动画摘要；有限、非 infinite、只操作 `opacity` 与 `transform: translate/scale/rotate` 的入场动画会用 Compose 原生动画播放一次并停在确定静态态；支持多 keyframe stops、reverse、fill-mode、有限 iteration 和常见 easing。transition 状态机、hover/focus 动画、布局属性动画、filter/color 动画和无限动画不播放，只静态化并记录复杂度 hint；复杂动画会进入 snapshot candidate。

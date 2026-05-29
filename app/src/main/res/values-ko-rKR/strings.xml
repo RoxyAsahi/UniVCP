@@ -1,9 +1,13 @@
 <?xml version='1.0' encoding='UTF-8'?>
 <resources>
   <string name="about_page_github">Github</string>
+  <string name="about_page_based_on">RikkaHub 기반</string>
+  <string name="about_page_based_on_desc">UniVCP는 RikkaHub를 기반으로 개발되었습니다. 이 빌드는 실험 용도로만 제공됩니다. 주요 변경 사항은 UniVCP에 맞게 렌더링 시스템 일부를 다시 작성한 것입니다.</string>
   <string name="about_page_license">라이선스</string>
   <string name="about_page_system">시스템</string>
   <string name="about_page_title">정보</string>
+  <string name="about_page_upstream">RikkaHub 소스</string>
+  <string name="about_page_upstream_license">RikkaHub 라이선스</string>
   <string name="about_page_version">버전</string>
   <string name="about_page_website">웹사이트</string>
   <string name="add">추가</string>

@@ -709,7 +709,29 @@ private class CompilerRun(
     private fun compileImage(element: Element, style: ComputedStyle, blockId: String): RichBlock? {
         val src = element.attr("src")
         val safeSrc = safeRichMediaSource(src, RichMediaKind.Image) ?: return null
-        return RichImageBlock(blockId, style, safeSrc, element.attr("alt").takeIf { it.isNotBlank() })
+        val imageStyle = style.withImagePresentationAttributes(element)
+        return RichImageBlock(blockId, imageStyle, safeSrc, element.attr("alt").takeIf { it.isNotBlank() })
+    }
+
+    private fun ComputedStyle.withImagePresentationAttributes(element: Element): ComputedStyle {
+        val attrWidth = element.attr("width").parseHtmlImageDimension()
+        val attrHeight = element.attr("height").parseHtmlImageDimension()
+        if (attrWidth == null && attrHeight == null) return this
+
+        return copy(
+            width = if (width == RichSize.Auto && attrWidth != null) attrWidth else width,
+            height = if (height == RichSize.Auto && attrHeight != null) attrHeight else height,
+        )
+    }
+
+    private fun String.parseHtmlImageDimension(): RichSize? {
+        val value = trim().takeIf { it.isNotBlank() } ?: return null
+        if (value.endsWith("%")) {
+            val percent = value.dropLast(1).trim().toFloatOrNull() ?: return null
+            return RichSize.Fraction((percent / 100f).coerceIn(0f, 1f))
+        }
+        val px = value.removeSuffix("px").trim().toFloatOrNull() ?: return null
+        return px.takeIf { it > 0f }?.dp?.let(RichSize::DpSize)
     }
 
     private fun compileButton(

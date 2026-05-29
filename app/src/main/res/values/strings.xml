@@ -1,9 +1,13 @@
 <?xml version='1.0' encoding='UTF-8'?>
 <resources>
   <string name="about_page_github">Github</string>
+  <string name="about_page_based_on">Based on RikkaHub</string>
+  <string name="about_page_based_on_desc">UniVCP is developed based on RikkaHub. This build is for experimental use only. The main change is a rewritten rendering system adapted for UniVCP.</string>
   <string name="about_page_license">License</string>
   <string name="about_page_system">System</string>
   <string name="about_page_title">About</string>
+  <string name="about_page_upstream">RikkaHub Source</string>
+  <string name="about_page_upstream_license">RikkaHub License</string>
   <string name="about_page_version">Version</string>
   <string name="about_page_website">Website</string>
   <string name="add">Add</string>

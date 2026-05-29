@@ -13,9 +13,11 @@ data class ChatSyncConfig(
     val roomId: String = "default",
     val deviceId: String = "",
     val targetAssistantId: Uuid? = null,
+    val mode: ChatSyncMode = ChatSyncMode.PULL_ONLY,
     val pushOnStart: Boolean = false,
     val importRemoteOnStart: Boolean = true,
     val currentPathOnly: Boolean = true,
+    val incrementalPull: Boolean = false,
     val debounceMs: Long = 800L,
 )
 
@@ -25,6 +27,21 @@ enum class ChatSyncProvider {
     FIREBASE_RTDB,
 }
 
+@Serializable
+enum class ChatSyncMode {
+    BOTH,
+    PUSH_ONLY,
+    PULL_ONLY,
+}
+
 fun ChatSyncConfig.isFirebaseConfigured(): Boolean {
     return enabled && provider == ChatSyncProvider.FIREBASE_RTDB && firebaseDatabaseUrl.isNotBlank()
+}
+
+fun ChatSyncMode.allowsPush(): Boolean {
+    return this == ChatSyncMode.BOTH || this == ChatSyncMode.PUSH_ONLY
+}
+
+fun ChatSyncMode.allowsPull(): Boolean {
+    return this == ChatSyncMode.BOTH || this == ChatSyncMode.PULL_ONLY
 }

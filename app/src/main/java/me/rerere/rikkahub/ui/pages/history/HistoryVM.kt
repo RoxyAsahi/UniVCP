@@ -14,6 +14,7 @@ import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.getCurrentAssistant
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.repository.ConversationRepository
+import me.rerere.rikkahub.data.sync.chat.ChatSyncMode
 import kotlin.uuid.Uuid
 
 private const val TAG = "HistoryVM"
@@ -31,6 +32,9 @@ class HistoryVM(
     }.catch {
         Log.e(TAG, "Error: ${it.message}")
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    val chatSyncMode: ChatSyncMode
+        get() = settingsStore.settingsFlow.value.chatSyncConfig.mode
 
     fun deleteConversation(conversation: Conversation) {
         viewModelScope.launch {

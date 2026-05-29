@@ -69,6 +69,7 @@ import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.ui.components.ai.AssistantPicker
 import me.rerere.rikkahub.ui.components.ui.BackupReminderCard
 import me.rerere.rikkahub.ui.components.ui.Greeting
+import me.rerere.rikkahub.ui.components.ui.SyncDeleteConfirmDialog
 import me.rerere.rikkahub.ui.components.ui.Tooltip
 import me.rerere.rikkahub.ui.components.ui.UIAvatar
 import me.rerere.rikkahub.ui.components.ui.UpdateCard
@@ -100,10 +101,17 @@ fun ChatDrawerContent(
     val drawerVm: ChatDrawerVM = koinViewModel(viewModelStoreOwner = activity)
 
     val conversations = drawerVm.conversations.collectAsLazyPagingItems()
+    val conversationCount by drawerVm.conversationCount.collectAsStateWithLifecycle(initialValue = 0)
     val conversationListState = rememberLazyListState(
         initialFirstVisibleItemIndex = drawerVm.scrollIndex,
         initialFirstVisibleItemScrollOffset = drawerVm.scrollOffset,
     )
+
+    LaunchedEffect(settings.assistantId, conversationCount) {
+        if (conversationCount > 0 && conversations.itemCount == 0) {
+            conversations.refresh()
+        }
+    }
 
     LaunchedEffect(conversationListState) {
         snapshotFlow {
@@ -134,6 +142,7 @@ fun ChatDrawerContent(
     // 移动对话状态
     var showMoveToAssistantSheet by remember { mutableStateOf(false) }
     var conversationToMove by remember { mutableStateOf<Conversation?>(null) }
+    var conversationToDelete by remember { mutableStateOf<Conversation?>(null) }
     val bottomSheetState = rememberModalBottomSheetState()
 
     // Menu popup 状态
@@ -217,6 +226,7 @@ fun ChatDrawerContent(
             ConversationList(
                 current = current,
                 conversations = conversations,
+                conversationCount = conversationCount,
                 conversationJobs = conversationJobs.keys,
                 listState = conversationListState,
                 modifier = Modifier
@@ -229,14 +239,7 @@ fun ChatDrawerContent(
                     vm.generateTitle(it, true)
                 },
                 onDelete = {
-                    vm.deleteConversation(it)
-                    // Refresh the conversation list to immediately remove the deleted item
-                    // This fixes the issue where deleted conversations sometimes remain visible
-                    // until manually clicked (issue #747)
-                    conversations.refresh()
-                    if (it.id == current.id) {
-                        navigateToChatPage(navController)
-                    }
+                    conversationToDelete = it
                 },
                 onPin = {
                     vm.updatePinnedStatus(it)
@@ -403,6 +406,30 @@ fun ChatDrawerContent(
                     Text(stringResource(R.string.chat_page_cancel))
                 }
             }
+        )
+    }
+
+    conversationToDelete?.let { target ->
+        SyncDeleteConfirmDialog(
+            show = true,
+            title = "删除这段对话？",
+            targetName = target.title.ifBlank { stringResource(R.string.chat_page_new_message) },
+            body = "确认后会删除手机本机中的这段对话和消息记录。这个操作无法在本机直接撤销。",
+            syncMode = settings.chatSyncConfig.mode,
+            onConfirm = {
+                vm.deleteConversation(target)
+                conversationToDelete = null
+                // Refresh the conversation list to immediately remove the deleted item
+                // This fixes the issue where deleted conversations sometimes remain visible
+                // until manually clicked (issue #747)
+                conversations.refresh()
+                if (target.id == current.id) {
+                    navigateToChatPage(navController)
+                }
+            },
+            onDismiss = {
+                conversationToDelete = null
+            },
         )
     }
 

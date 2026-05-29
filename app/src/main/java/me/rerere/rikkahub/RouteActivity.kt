@@ -115,6 +115,7 @@ import me.rerere.rikkahub.ui.pages.setting.SettingProviderPage
 import me.rerere.rikkahub.ui.pages.setting.SettingSearchPage
 import me.rerere.rikkahub.ui.pages.setting.SettingSpeechPage
 import me.rerere.rikkahub.ui.pages.setting.SettingThemePage
+import me.rerere.rikkahub.ui.pages.setting.SettingVcpPage
 import me.rerere.rikkahub.ui.pages.setting.SettingWebPage
 import me.rerere.rikkahub.ui.pages.share.handler.ShareHandlerPage
 import me.rerere.rikkahub.ui.pages.stats.StatsPage
@@ -379,6 +380,10 @@ class RouteActivity : ComponentActivity() {
                                 BackupPage()
                             }
 
+                            entry<Screen.VcpDataSync> {
+                                BackupPage(startPage = 3)
+                            }
+
                             entry<Screen.ImageGen> {
                                 ImageGenPage()
                             }
@@ -442,6 +447,10 @@ class RouteActivity : ComponentActivity() {
 
                             entry<Screen.SettingMcp> {
                                 SettingMcpPage()
+                            }
+
+                            entry<Screen.SettingVcp> {
+                                SettingVcpPage()
                             }
 
                             entry<Screen.SettingDonate> {
@@ -600,6 +609,9 @@ sealed interface Screen : NavKey {
     data object Backup : Screen
 
     @Serializable
+    data object VcpDataSync : Screen
+
+    @Serializable
     data object ImageGen : Screen
 
     @Serializable
@@ -643,6 +655,9 @@ sealed interface Screen : NavKey {
 
     @Serializable
     data object SettingSpeech : Screen
+
+    @Serializable
+    data object SettingVcp : Screen
 
     @Serializable
     data object SettingMcp : Screen

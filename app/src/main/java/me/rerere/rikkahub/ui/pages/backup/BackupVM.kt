@@ -24,6 +24,7 @@ import me.rerere.rikkahub.data.sync.S3BackupItem
 import me.rerere.rikkahub.data.sync.S3Sync
 import me.rerere.rikkahub.data.sync.chat.ChatSyncDirection
 import me.rerere.rikkahub.data.sync.chat.ChatSyncManager
+import me.rerere.rikkahub.data.sync.chat.ChatSyncRepairResult
 import me.rerere.rikkahub.data.sync.chat.ChatSyncRunResult
 import me.rerere.rikkahub.utils.JsonInstant
 import me.rerere.rikkahub.utils.UiState
@@ -229,6 +230,10 @@ class BackupVM(
 
     suspend fun syncChatNow(direction: ChatSyncDirection): ChatSyncRunResult {
         return chatSyncManager.syncNow(direction)
+    }
+
+    suspend fun repairChatSync(): ChatSyncRepairResult {
+        return chatSyncManager.repairNow()
     }
 
     suspend fun restoreFromS3(item: S3BackupItem) {

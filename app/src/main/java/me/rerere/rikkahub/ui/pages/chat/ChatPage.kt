@@ -54,6 +54,7 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.map
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.provider.Model
+import me.rerere.ai.ui.UIMessage
 import me.rerere.ai.ui.UIMessagePart
 import me.rerere.hugeicons.HugeIcons
 import me.rerere.hugeicons.stroke.Cancel01
@@ -76,6 +77,7 @@ import me.rerere.rikkahub.ui.components.message.StreamRenderFrame
 import me.rerere.rikkahub.ui.components.message.buildChatRenderCells
 import me.rerere.rikkahub.ui.components.message.firstCellIndexForMessageIndex
 import me.rerere.rikkahub.ui.components.message.firstCellIndexForNodeId
+import me.rerere.rikkahub.ui.components.ui.SyncDeleteConfirmDialog
 import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.ui.context.LocalToaster
 import me.rerere.rikkahub.ui.context.Navigator
@@ -295,6 +297,7 @@ private fun ChatPageContent(
     val scope = rememberCoroutineScope()
     val toaster = LocalToaster.current
     var previewMode by rememberSaveable { mutableStateOf(false) }
+    var messageToDelete by remember { mutableStateOf<UIMessage?>(null) }
     val hazeState = rememberHazeState()
 
     TTSAutoPlay(vm = vm, setting = setting, conversation = conversation)
@@ -433,7 +436,7 @@ private fun ChatPageContent(
                     if (loadingJob != null) {
                         vm.showDeleteBlockedWhileGeneratingError()
                     } else {
-                        vm.deleteMessage(it)
+                        messageToDelete = it
                     }
                 },
                 onUpdateMessage = { newNode ->
@@ -482,6 +485,22 @@ private fun ChatPageContent(
                 onBubbleInput = { text ->
                     inputState.editingMessage = null
                     inputState.setMessageText(text)
+                },
+            )
+        }
+
+        messageToDelete?.let { message ->
+            SyncDeleteConfirmDialog(
+                show = true,
+                title = "删除这条消息？",
+                body = "确认后会从手机本机的当前对话中删除这条消息；如果它是某个分支里的唯一消息，该节点也会被移除。",
+                syncMode = setting.chatSyncConfig.mode,
+                onConfirm = {
+                    vm.deleteMessage(message)
+                    messageToDelete = null
+                },
+                onDismiss = {
+                    messageToDelete = null
                 },
             )
         }

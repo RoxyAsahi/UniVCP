@@ -246,6 +246,12 @@ fun SettingPage(vm: SettingVM = koinViewModel()) {
                         headlineContent = { Text(stringResource(R.string.setting_page_mcp)) },
                     )
                     item(
+                        onClick = { navController.navigate(Screen.SettingVcp) },
+                        leadingContent = { Icon(HugeIcons.Package, null) },
+                        supportingContent = { Text("配置 VCP WebSocket、图床密码与日志鉴权") },
+                        headlineContent = { Text("VCP 服务") },
+                    )
+                    item(
                         onClick = { navController.navigate(Screen.SettingWeb) },
                         leadingContent = { Icon(HugeIcons.ServerStack01, null) },
                         supportingContent = { Text(stringResource(R.string.setting_page_web_server_desc)) },
@@ -285,6 +291,12 @@ fun SettingPage(vm: SettingVM = koinViewModel()) {
                             }
                         },
                         headlineContent = { Text(stringResource(R.string.setting_page_chat_storage)) },
+                    )
+                    item(
+                        onClick = { navController.navigate(Screen.VcpDataSync) },
+                        leadingContent = { Icon(HugeIcons.Database02, null) },
+                        supportingContent = { Text("配置 Firebase、VCPChat 专用同步模式与在线状态") },
+                        headlineContent = { Text("VCP 数据同步") },
                     )
                 }
             }

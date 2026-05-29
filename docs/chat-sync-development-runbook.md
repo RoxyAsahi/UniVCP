@@ -76,6 +76,279 @@ config.env.example
 7. 补 mapper 单元测试，覆盖 UniVCP/VCPChat 格式转换、Firebase envelope 解码、非 UUID ID 的稳定映射、Assistant 元数据。
 8. 用 Firebase RTDB、VCPChat 真实历史、Android 真机无线调试做端到端验证。
 
+## 2026-05-30 稳定性与易用性改进
+
+本轮目标是先降低同步链路在真实使用中的重复写入、半写入和“用户不知道哪里坏了”的概率。
+
+改动范围：
+
+- VCPChat `ChatSyncBridgeService.js`
+  - 启动顺序改为：启动本地 watcher，先执行一次 `pullOnce()`，再打开 Firebase stream。
+  - 增加 `appliedRemoteConversations` 内存表，按 conversation id 记录最近应用的远端 `updatedAt` 和内容签名。
+  - 相同或更旧的 envelope 不再重复写入 history，并在状态统计中计入 `remoteSkippedUnchanged` 或 `remoteSkippedStale`。
+  - 增加 `Diagnostics` 命令和 `GET /chat-sync/diagnostics`，检查服务启用、provider、room/device、AppData/UserData、默认导入目标和最近错误。
+- VCPChat `ChatSyncBridge.js`
+  - `history.json` 和 Agent/Group `config.json` 写入改为临时文件后移动到目标路径。
+  - 远端内容与本地 merge 结果一致时跳过写入，并在导入结果中返回 `changed`、`historyChanged`、`topicChanged`。
+- VCPChat `plugin-manifest.json` / `README.md`
+  - 记录新增诊断命令、诊断 HTTP 端点和稳定性保护策略。
+- UniVCP `ChatSyncTab.kt`
+  - 手动拉取、推送、立即同步都增加 `runCatching`。
+  - `ChatSyncRunResult.skippedReason` 不再显示成“成功 0 条”，而是提示“同步跳过：原因”。
+
+## 2026-05-30 单向同步与 AI 回复漏同步修复
+
+本轮继续围绕“电脑端作为主库，移动端只接收”的使用方式做保护。
+
+问题背景：
+
+- 实测中，电脑端发送用户消息后移动端能看到用户消息，但 AI 回复完成后移动端可能看不到回复。
+- 用户希望支持单向模式，例如只允许 VCPChat/电脑端同步到 Firebase，再由 UniVCP/手机端拉取；手机端删除或修改不应反向影响电脑端。
+
+改动范围：
+
+- VCPChat `ChatSyncBridgeService.js`
+  - 新增 `CHAT_SYNC_DIRECTION=both|push|pull`，兼容 `push-only`、`pull-only` 等别名。
+  - `push` 模式只启动本地 `history.json` watcher 和推送逻辑，不执行 initial pull，不打开 Firebase stream，不启动 pull interval，手动 pull 也返回 skipped。
+  - `pull` 模式只执行远端导入，不启动本地 watcher，不推送本机历史。
+  - `Status` / `Diagnostics` 返回 `direction`、`allowPush`、`allowPull`，方便确认当前保护状态。
+- VCPChat `config.env`
+  - 当前开发机配置已加 `CHAT_SYNC_DIRECTION=push`，用于保护电脑端主库。
+- UniVCP `ChatSyncConfig.kt` / `ChatSyncManager.kt` / `ChatSyncTab.kt`
+  - 新增 `ChatSyncMode.BOTH/PUSH_ONLY/PULL_ONLY`。
+  - 运行时按照模式决定是否启动本地推送监听、远端监听、启动导入、启动推送。
+  - 手动“拉取/推送/立即同步”也受模式限制，并显示跳过原因。
+  - 设置页新增“同步方向”分段选择；手机只接收电脑数据时选“仅拉取”。
+- UniVCP `FirebaseRtdbChatSyncRemoteStore.kt`
+  - 拉取和 SSE 接收到的会话会用 Firebase envelope 的 `updatedAt` 推进 `SyncConversation.updatedAt`。
+  - 这解决了 VCPChat 追加 AI 回复但会话内部时间戳没有明显变大时，Android 端误判“本地已是最新”而跳过导入的问题。
+- VCPChat `plugin-manifest.json` / `README.md` / `config.env.example`
+  - 记录方向配置、命令行为和推荐单向配置。
+
+推荐单向配置：
+
+```text
+VCPChat 桌面端: CHAT_SYNC_DIRECTION=push
+UniVCP 手机端: 设置页 -> 备份 -> 聊天同步 -> 同步方向 -> 仅拉取
+```
+
+这种配置下，手机端不会把删除、修改或手动推送写回 Firebase；桌面端也不会从 Firebase 导入远端内容。
+
+## 2026-05-30 手机端新手引导与拉取鲁棒性
+
+本轮继续提升移动端配置易用性，并针对时间戳不可靠做防护。
+
+改动范围：
+
+- UniVCP `ChatSyncTab.kt`
+  - 新增“新手指南”区块。
+  - 提供“电脑端到手机端”的推荐配置说明：电脑端 `CHAT_SYNC_DIRECTION=push`，手机端“仅拉取”。
+  - 增加“一键安全模式”，会把手机端设置为 `PULL_ONLY`、开启启动时导入、关闭启动时推送。
+  - 增加“当前保护状态”，明确提示手机端是否会反向影响电脑端。
+  - 在“仅拉取”模式下禁用手动“推送”按钮；在“仅推送”模式下禁用手动“拉取”按钮。
+  - “立即同步”若部分方向被模式跳过，但另一方向实际成功，会显示成功数量和跳过原因，不再让用户误以为整次同步都没做。
+- UniVCP `ChatSyncManager.kt`
+  - 在 `PULL_ONLY` 模式下，远端内容作为权威源。
+  - 如果本地会话时间戳看起来更新，但远端内容与本地不同，仍会导入远端内容。
+  - 这个兜底用于处理设备时钟漂移、VCPChat 消息时间戳未推进、或 Firebase envelope 与 conversation 内部时间不一致导致的漏同步。
+
+## 2026-05-30 Agent 隔离与修复模式
+
+本轮重点是保证不同 VCPChat Agent 的会话不会串到一起，并提供手机端数据库修复入口。
+
+关键原则：
+
+- VCPChat 来源的会话身份以 `source.agentId + source.topicId` 为准，而不是盲信远端 `conversation.id`。
+- VCPChat 来源的 Assistant 身份以 `source.agentId` 为准，而不是盲信远端 `assistant.id` 或助手名称。
+- 同名 Topic 在不同 Agent 下必须导入为不同 UniVCP 会话。
+- 同名 Assistant 或损坏的 assistant metadata 不能让 A Agent 的聊天记录挂到 B Agent 下。
+
+改动范围：
+
+- UniVCP `ChatSyncManager.kt`
+  - 导入 VCPChat 会话前会重建作用域身份：`vcpchat:{agentId}:{topicId}`。
+  - 如果远端 `conversation.id` 与 `source.agentId/topicId` 不一致，会记录日志并使用修复后的 ID。
+  - 如果 conversation source 与 message source 出现多个 Agent/Topic 混杂，会拒绝导入并记录错误，避免串库。
+  - VCPChat Assistant 导入时使用 `source.agentId` 作为稳定身份，确保不同 Agent 创建不同 Assistant。
+  - 新增 `repairNow()`，从 Firebase 全量扫描当前 room，并按 Agent/Topic 归属重新导入需要修复的会话。
+- UniVCP `ChatSyncTab.kt` / `BackupVM.kt`
+  - 新手指南中新增“修复模式”入口。
+  - 点击“开始修复”会全量拉取远端，自动修复手机端会话归属和漏同步内容；修复只追加缺失内容，不删除或截短本机记录。
+- UniVCP `ChatSyncMapperTest.kt`
+  - 增加回归测试：不同 Agent 使用相同 topic id 时，导入后的会话 ID 和 Assistant ID 必须不同。
+
+## 2026-05-30 同步页操作逻辑简化
+
+本轮把手机端聊天同步页从“底层策略配置”整理成“使用方式优先”的操作逻辑。
+
+新的主流程：
+
+1. 选择使用方式：`手机只接收`、`双向`、`本机上传`。
+2. 填 Firebase 连接信息。
+3. 点底部 `立即同步`。
+
+界面调整：
+
+- 原来的 `同步方向` 改成更口语化的 `同步模式`。
+- `手机只接收` 会自动设置：`PULL_ONLY`、启动时自动拉取、禁止启动时推送、只导出当前分支。
+- `双向` 会自动设置：`BOTH`、启动时自动拉取、禁止启动时推送、只导出当前分支。
+- `本机上传` 会自动设置：`PUSH_ONLY`、关闭启动时自动拉取、禁止启动时推送、只导出当前分支。
+- 底部操作简化为：`测试连接`、`修复`、`立即同步`。
+- `立即同步` 会根据使用方式自动选择拉取、推送或双向，不再要求用户理解底层 direction。
+- 原来的 `启动时推送本地记录` 从主界面移除，避免误开危险项。
+- 原来的 `只同步当前分支` 改名为 `导出范围`，放到高级选项，并只在当前模式允许推送时可操作。
+
+## 2026-05-30 删除保护与防截断策略
+
+本轮把删除操作改成显式二次确认，并把同步后果写进确认弹窗，避免用户误以为手机端删除会安全地同步到所有端，或误删本机唯一副本。
+
+改动范围：
+
+- UniVCP `SyncDeleteConfirmDialog.kt`
+  - 新增统一删除确认弹窗。
+  - 弹窗会根据当前同步模式提示后果：
+    - `手机只接收`：删除只影响手机本地副本；远端仍存在时，下次同步或修复可能恢复。
+    - `本机上传`：删除不会向 Firebase 发送删除指令，也不会删除电脑端记录。
+    - `双向`：当前版本仍不传播删除，但会立即移除本机内容，删除前应确认电脑端或备份里有需要保留的记录。
+- UniVCP `ChatDrawer.kt`
+  - 侧边栏长按菜单删除对话前必须确认。
+- UniVCP `HistoryPage.kt`
+  - 历史页滑动删除不再立即删除，而是弹出确认。
+  - “删除全部历史”复用同步删除确认，并强化批量删除后果说明。
+- UniVCP `ChatPage.kt`
+  - 单条消息删除前必须确认。
+- UniVCP `ChatSyncManager.kt`
+  - Android 端本地删除仍然是 local-only：不会写 tombstone，不会向 Firebase 或电脑端传播删除。
+  - 远端导入采用只新增策略：已有本地会话以本机内容为底，只追加远端缺失消息、补空标题、修正 Assistant 归属，不删除、不截短、不用更短远端覆盖本地。
+  - 修复模式也遵守只新增策略：用于修复 Agent/Topic 归属和漏同步内容，不再按远端重建本地记录。
+
+## 2026-05-30 VCPChat 在线状态
+
+本轮增加 VCPChat 在线状态展示，避免用户误以为“VCPChat 离线时手机完全不能拉取”。
+
+关键行为：
+
+- VCPChat 在线时，插件定时写入 Firebase：
+
+```text
+chatSync/{base64url(roomId)}/presence/{base64url(deviceId)}
+```
+
+- UniVCP 每 15 秒读取一次 presence，取最新的 VCPChat 设备心跳。
+- 90 秒内有在线心跳则显示“在线”；超过 90 秒或 VCPChat 显式写入 `offline` 则显示“离线”；没有任何 heartbeat 时显示“未知”。
+- VCPChat 离线时，手机端仍能从 Firebase 拉取已经存在的聊天记录；只是电脑端新消息不会继续推送到 Firebase，因此手机看不到最新回复。
+
+改动范围：
+
+- VCPChat `ChatSyncRemoteProvider.js`
+  - Firebase provider 新增 `updatePresence()`，写入 `app=vcpchat`、`deviceId`、`status`、`updatedAt`、`direction`。
+- VCPChat `ChatSyncBridgeService.js`
+  - 服务启动后按 `CHAT_SYNC_PRESENCE_INTERVAL_MS` 定时写在线心跳。
+  - 服务停止时尽量写入离线状态。
+- UniVCP `FirebaseRtdbChatSyncRemoteStore.kt`
+  - 新增 `getPresence()` 读取 Firebase presence。
+- UniVCP `ChatSyncManager.kt`
+  - 新增 VCPChat presence 轮询和 `ChatSyncPeerStatus` 状态。
+- UniVCP `ChatSyncTab.kt`
+  - 在“使用方式”区域新增 `VCPChat 状态`，显示在线、离线或未知，并说明离线时仍可拉取 Firebase 已有记录。
+
+## 2026-05-30 Firebase 新手填写指南
+
+本轮在 UniVCP 聊天同步页新增 `Firebase 填写指南`，把最容易卡住的配置点直接写进 App：
+
+- 新手从 Firebase Console 创建项目，Google Analytics 可以先不启用。
+- 在 Firebase 控制台创建 Realtime Database，测试阶段可以先用测试模式确认链路。
+- `Realtime Database URL` 填控制台 Realtime Database 页面顶部的网址，常见形态：
+
+```text
+https://xxx-default-rtdb.firebaseio.com
+https://xxx-default-rtdb.asia-southeast1.firebasedatabase.app
+```
+
+- `Auth Token` 默认可以留空：只要 Firebase rules 允许当前 room 读写，UniVCP 和 VCPChat 的 REST 请求不需要额外 token。
+- 只有用户把 rules 改成需要认证或服务端 token 时，才需要填写 Auth Token。
+- `Room ID` 是同步房间名，UniVCP 和 VCPChat 必须一致；建议使用不容易猜到的英文名。
+
+## 2026-05-30 同步默认值与入口调整
+
+本轮把聊天同步的默认值和入口改成更适合新用户的安全路径。
+
+默认配置：
+
+- `enabled=false`：默认不自动开启实时同步，必须用户主动打开。
+- `mode=PULL_ONLY`：新用户默认是“接收”，即手机只从 Firebase 拉取，不向远端推送本地变更。
+- `importRemoteOnStart=true`：用户开启同步后，启动时会自动拉取远端新记录。
+- `pushOnStart=false`：默认不开启启动时推送，避免第一次配置时把手机端本地数据误推到远端。
+- `currentPathOnly=true`：允许推送时默认只导出当前分支，减少分支记录在另一端展开造成的理解成本。
+- `firebaseAuthToken=""`：默认留空。只有 Firebase rules 要求认证或 token 时才填写。
+
+界面调整：
+
+- 设置页 `数据设置` 下新增 `VCP 数据同步` 入口，直接打开备份页中的 VCP 数据同步标签。
+- 备份页原 `聊天同步` 标签改名为 `VCP 数据同步`，强调这是 VCP/VCPChat 专用功能。
+- VCP 数据同步页顺序调整为：
+  1. 状态开关与同步统计。
+  2. Firebase URL / Auth Token / Room ID / Device ID。
+  3. 使用方式、VCPChat 在线状态、保护状态、另一端设置。
+  4. Firebase 填写指南。
+  5. 高级选项。
+- 选择 `双向` 时显示双向警告，提示手机和电脑都会参与写入。
+
+行为说明：
+
+- 同步开启时切换 `接收`、`双向`、`上传` 不会直接删除或改写已有记录；它会重启同步运行时，并让后续拉取/推送按新模式执行。
+- 真正需要提示的风险是 `双向`：该模式允许手机端变更写回远端，因此只建议在两端都可信、且用户明确需要双向时开启。
+
+## 2026-05-30 Firebase 增量拉取高级选项
+
+本轮把 Firebase RTDB 的增量拉取改为高级选项。默认仍使用全量拉取，避免新用户因为 Firebase rules 没有 `.indexOn` 而连接失败。
+
+拉取规则：
+
+- 默认模式：请求整个 `conversations` 节点，再在本机按只新增策略合并；不需要 Firebase 索引。
+- 增量模式：开启 UniVCP 高级选项“增量拉取”或 VCPChat `CHAT_SYNC_INCREMENTAL_PULL=true` 后启用。
+- 增量模式下，首次同步、修复模式或游标为 0 时仍会全量扫描当前 room。
+- 每个 Firebase envelope 顶层都有 `updatedAt`。
+- 客户端记录已经处理过的最大 `updatedAt`，下一次请求只查：
+
+```text
+conversations.json?orderBy="updatedAt"&startAt=lastUpdatedAt+1
+```
+
+- 增量模式下 UniVCP 和 VCPChat 都会在处理完成后推进游标；重启后会从持久化游标继续增量拉取。
+- UniVCP 游标保存在 DataStore 的独立键中，不会触发同步配置重启。
+- VCPChat 插件游标保存在 `AppData/ChatSyncBridge/remote-cursors.json`。
+- 只有增量模式需要给 Firebase rules 的 `conversations` 加 `.indexOn: ["updatedAt"]`。
+
+当前仍然遵守只新增策略：增量拉取只减少“读哪些远端 envelope”，不会引入远端删除传播，也不会用更短的远端记录截断手机本地记录。
+
+验证命令：
+
+```powershell
+cd C:\VCP\VCPChat
+node --check VCPDistributedServer\Plugin\ChatSyncBridge\ChatSyncBridgeService.js
+node --check VCPDistributedServer\Plugin\ChatSyncBridge\ChatSyncBridge.js
+node --check VCPDistributedServer\Plugin\ChatSyncBridge\ChatSyncRemoteProvider.js
+node --check VCPDistributedServer\Plugin\ChatSyncBridge\chatSyncMapper.js
+
+cd C:\VCP\Eric\UniVCP
+.\gradlew.bat :app:compileDebugKotlin --console=plain
+.\gradlew.bat :app:testDebugUnitTest --tests "me.rerere.rikkahub.data.sync.chat.ChatSyncMapperTest" --console=plain
+```
+
+运行时诊断：
+
+```powershell
+Invoke-RestMethod -Uri http://127.0.0.1:5974/chat-sync/diagnostics |
+  ConvertTo-Json -Depth 10
+```
+
+期望结果：
+
+- `ok` 为 `true`。
+- `checks` 中 `service_enabled`、`service_started`、`provider_enabled`、`app_data_dir`、`user_data_dir` 通过。
+- `last_error` 为 `none`。
+
 ## UniVCP 配置
 
 Debug 开发时，UniVCP 从仓库根目录的 `local.properties` 读取聊天同步配置，并写入 DataStore。示例：
@@ -113,11 +386,13 @@ me.rerere.rikkahub.RouteActivity
 ```env
 CHAT_SYNC_ENABLED=true
 CHAT_SYNC_PROVIDER=firebase-rtdb
+CHAT_SYNC_DIRECTION=push
 CHAT_SYNC_FIREBASE_DATABASE_URL=https://your-project-default-rtdb.region.firebasedatabase.app
 CHAT_SYNC_FIREBASE_AUTH_TOKEN=
 CHAT_SYNC_ROOM_ID=univcp-main
 CHAT_SYNC_DEVICE_ID=vcpchat-desktop-dev
 CHAT_SYNC_DEBOUNCE_MS=800
+CHAT_SYNC_PRESENCE_INTERVAL_MS=15000
 CHAT_SYNC_DEFAULT_AGENT_ID=_Agent_xxx
 CHAT_SYNC_DEFAULT_ITEM_TYPE=agent
 ```
@@ -128,6 +403,17 @@ CHAT_SYNC_DEFAULT_ITEM_TYPE=agent
 - VCPChat -> UniVCP 时，每条会话会携带对应 Agent 的 `name` 和 `systemPrompt`。
 - UniVCP -> VCPChat 时，如果同步包带有 `assistant`，VCPChat 会用它更新 Agent 的 `name/systemPrompt`。
 
+## VCPChat 插件化现状
+
+`C:\VCP\VCPChat\VCPDistributedServer\Plugin\ChatSyncBridge` 当前已经按 VCPChat 分布式服务器插件形态组织：
+
+- `plugin-manifest.json` 声明 `pluginType=hybridservice`，入口为 `ChatSyncBridgeService.js`。
+- VCPDistributedServer 启动时会扫描 `VCPDistributedServer/Plugin/*/plugin-manifest.json`，自动读取插件目录的 `config.env`，并直接加载 `hybridservice` 服务模块。
+- 插件提供 `Status`、`Diagnostics`、`SyncOnce`、`Start`、`Stop`、`ListTargets`、`ExportTopic`、`ExportAll`、`ImportTopic`、`ImportBundle` 等命令。
+- 插件目录包含 `config.env.example`、`README.md` 和 `package.json`。当前 VCPChat 主项目已有运行依赖；单独分发给旧版本时，可在插件目录执行 `npm install --omit=dev` 安装 `axios`、`chokidar`、`fs-extra`。
+
+给普通用户的安装路径是复制整个 `ChatSyncBridge` 文件夹到 VCPChat 的 `VCPDistributedServer/Plugin/` 下，然后把 `config.env.example` 复制为 `config.env` 并填写 Firebase URL、Room ID。推荐桌面端默认使用 `CHAT_SYNC_DIRECTION=push`，手机端 UniVCP 使用“手机只接收”，这样手机删除或修改不会反向影响电脑端。
+
 ## Firebase RTDB
 
 数据路径：
@@ -136,7 +422,7 @@ CHAT_SYNC_DEFAULT_ITEM_TYPE=agent
 chatSync/{base64url(roomId)}/conversations/{base64url(conversationId)}
 ```
 
-开发时可临时使用按房间开放的规则：
+开发时可临时使用按房间开放的规则。默认全量拉取不需要索引：
 
 ```json
 {
@@ -152,6 +438,15 @@ chatSync/{base64url(roomId)}/conversations/{base64url(conversationId)}
 ```
 
 正式使用时应改为 Firebase Authentication 或 token 规则，不要公开真实聊天数据。
+如果开启高级选项“增量拉取”，再给 `conversations` 增加索引：
+
+```json
+"conversations": {
+  ".indexOn": ["updatedAt"]
+}
+```
+
+`.indexOn` 用于支持 `orderBy="updatedAt"&startAt=...` 增量拉取，避免每次同步都下载整个房间。
 
 检查房间数据：
 

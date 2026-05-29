@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
@@ -29,13 +28,11 @@ import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SwipeToDismissBox
 import androidx.compose.material3.SwipeToDismissBoxDefaults
-import androidx.compose.material3.SwipeToDismissBoxState
 import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -52,6 +49,7 @@ import me.rerere.rikkahub.R
 import me.rerere.rikkahub.Screen
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.ui.components.nav.BackButton
+import me.rerere.rikkahub.ui.components.ui.SyncDeleteConfirmDialog
 import me.rerere.rikkahub.ui.context.LocalNavController
 import me.rerere.rikkahub.utils.navigateToChatPage
 import me.rerere.rikkahub.utils.plus
@@ -64,8 +62,12 @@ fun HistoryPage(vm: HistoryVM = koinViewModel()) {
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     var showDeleteAllDialog by remember { mutableStateOf(false) }
+    var conversationToDelete by remember { mutableStateOf<Conversation?>(null) }
 
     val conversations by vm.conversations.collectAsStateWithLifecycle()
+    val assistant by vm.assistant.collectAsStateWithLifecycle()
+    val snackMessageDeleted = stringResource(R.string.history_page_conversation_deleted)
+    val snackMessageUndo = stringResource(R.string.history_page_undo)
 
     Scaffold(
         topBar = {
@@ -101,8 +103,6 @@ fun HistoryPage(vm: HistoryVM = koinViewModel()) {
             SnackbarHost(hostState = snackbarHostState)
         }
     ) { contentPadding ->
-        val snackMessageDeleted = stringResource(R.string.history_page_conversation_deleted)
-        val snackMessageUndo = stringResource(R.string.history_page_undo)
         LazyColumn(
             contentPadding = contentPadding + PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -114,19 +114,7 @@ fun HistoryPage(vm: HistoryVM = koinViewModel()) {
                         navigateToChatPage(navController, conversation.id)
                     },
                     onDelete = {
-                        scope.launch {
-                            // 先获取完整的对话数据（包含 messageNodes），用于撤销恢复
-                            val fullConversation = vm.getFullConversation(conversation.id) ?: conversation
-                            vm.deleteConversation(conversation)
-                            val result = snackbarHostState.showSnackbar(
-                                message = snackMessageDeleted,
-                                actionLabel = snackMessageUndo,
-                                withDismissAction = true,
-                            )
-                            if (result == SnackbarResult.ActionPerformed) {
-                                vm.restoreConversation(fullConversation)
-                            }
-                        }
+                        conversationToDelete = conversation
                     },
                     onTogglePin = { vm.togglePinStatus(conversation.id) },
                     modifier = Modifier
@@ -137,28 +125,49 @@ fun HistoryPage(vm: HistoryVM = koinViewModel()) {
         }
     }
 
-    if (showDeleteAllDialog) {
-        AlertDialog(
-            onDismissRequest = { showDeleteAllDialog = false },
-            title = { Text(stringResource(R.string.history_page_delete_all_conversations)) },
-            text = { Text(stringResource(R.string.history_page_delete_all_confirmation)) },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        vm.deleteAllConversations()
-                        showDeleteAllDialog = false
+    conversationToDelete?.let { target ->
+        SyncDeleteConfirmDialog(
+            show = true,
+            title = "删除这段历史？",
+            targetName = target.title.ifBlank { stringResource(R.string.history_page_new_conversation) },
+            body = "确认后会删除手机本机中的这段对话。删除后可通过底部提示短暂撤销。",
+            syncMode = vm.chatSyncMode,
+            onConfirm = {
+                conversationToDelete = null
+                scope.launch {
+                    // 先获取完整的对话数据（包含 messageNodes），用于撤销恢复
+                    val fullConversation = vm.getFullConversation(target.id) ?: target
+                    vm.deleteConversation(target)
+                    val result = snackbarHostState.showSnackbar(
+                        message = snackMessageDeleted,
+                        actionLabel = snackMessageUndo,
+                        withDismissAction = true,
+                    )
+                    if (result == SnackbarResult.ActionPerformed) {
+                        vm.restoreConversation(fullConversation)
                     }
-                ) {
-                    Text(stringResource(R.string.history_page_delete))
                 }
             },
-            dismissButton = {
-                TextButton(
-                    onClick = { showDeleteAllDialog = false }
-                ) {
-                    Text(stringResource(R.string.history_page_cancel))
-                }
-            }
+            onDismiss = {
+                conversationToDelete = null
+            },
+        )
+    }
+
+    if (showDeleteAllDialog) {
+        SyncDeleteConfirmDialog(
+            show = true,
+            title = stringResource(R.string.history_page_delete_all_conversations),
+            targetName = assistant?.name?.takeIf { it.isNotBlank() },
+            body = "确认后会删除当前助手下手机本机保存的全部历史对话。这个操作范围很大，请先确认电脑端或备份里仍有需要保留的记录。",
+            syncMode = vm.chatSyncMode,
+            confirmText = stringResource(R.string.history_page_delete),
+            dismissText = stringResource(R.string.history_page_cancel),
+            onConfirm = {
+                vm.deleteAllConversations()
+                showDeleteAllDialog = false
+            },
+            onDismiss = { showDeleteAllDialog = false },
         )
     }
 }
@@ -172,22 +181,18 @@ private fun SwipeableConversationItem(
     onClick: () -> Unit = {},
 ) {
     val positionThreshold = SwipeToDismissBoxDefaults.positionalThreshold
-    val dismissState = remember {
-        SwipeToDismissBoxState(
-            initialValue = SwipeToDismissBoxValue.Settled,
-            positionalThreshold = positionThreshold,
-        )
-    }
-
-    LaunchedEffect(dismissState.currentValue) {
-        when (dismissState.currentValue) {
-            SwipeToDismissBoxValue.EndToStart -> {
+    val dismissState = rememberSwipeToDismissBoxState(
+        initialValue = SwipeToDismissBoxValue.Settled,
+        positionalThreshold = positionThreshold,
+        confirmValueChange = { value ->
+            if (value == SwipeToDismissBoxValue.EndToStart) {
                 onDelete()
+                false
+            } else {
+                true
             }
-
-            else -> {}
         }
-    }
+    )
 
     SwipeToDismissBox(
         state = dismissState,

@@ -13,6 +13,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import io.pebbletemplates.pebble.PebbleEngine
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.serialization.SerialName
@@ -115,6 +116,11 @@ class SettingsStore(
         // MCP
         val MCP_SERVERS = stringPreferencesKey("mcp_servers")
 
+        // VCP
+        val VCP_LOG_URL = stringPreferencesKey("vcp_log_url")
+        val VCP_FILE_KEY = stringPreferencesKey("vcp_file_key")
+        val VCP_LOG_KEY = stringPreferencesKey("vcp_log_key")
+
         // WebDAV
         val WEBDAV_CONFIG = stringPreferencesKey("webdav_config")
 
@@ -123,6 +129,7 @@ class SettingsStore(
 
         // Chat Sync
         val CHAT_SYNC_CONFIG = stringPreferencesKey("chat_sync_config")
+        val CHAT_SYNC_REMOTE_CURSORS = stringPreferencesKey("chat_sync_remote_cursors")
 
         // TTS
         val TTS_PROVIDERS = stringPreferencesKey("tts_providers")
@@ -210,6 +217,9 @@ class SettingsStore(
                 mcpServers = preferences[MCP_SERVERS]?.let {
                     JsonInstant.decodeFromString(it)
                 } ?: emptyList(),
+                vcpLogUrl = preferences[VCP_LOG_URL] ?: "",
+                vcpFileKey = preferences[VCP_FILE_KEY] ?: "",
+                vcpLogKey = preferences[VCP_LOG_KEY] ?: "",
                 webDavConfig = preferences[WEBDAV_CONFIG]?.let {
                     JsonInstant.decodeFromString(it)
                 } ?: WebDavConfig(),
@@ -395,6 +405,9 @@ class SettingsStore(
             preferences[SEARCH_SELECTED] = settings.searchServiceSelected.coerceIn(0, settings.searchServices.size - 1)
 
             preferences[MCP_SERVERS] = JsonInstant.encodeToString(settings.mcpServers)
+            preferences[VCP_LOG_URL] = settings.vcpLogUrl
+            preferences[VCP_FILE_KEY] = settings.vcpFileKey
+            preferences[VCP_LOG_KEY] = settings.vcpLogKey
             preferences[WEBDAV_CONFIG] = JsonInstant.encodeToString(settings.webDavConfig)
             preferences[S3_CONFIG] = JsonInstant.encodeToString(settings.s3Config)
             preferences[CHAT_SYNC_CONFIG] = JsonInstant.encodeToString(settings.chatSyncConfig)
@@ -422,6 +435,23 @@ class SettingsStore(
 
     suspend fun update(fn: (Settings) -> Settings) {
         update(fn(settingsFlow.value))
+    }
+
+    suspend fun getChatSyncRemoteCursor(cursorKey: String): Long {
+        val preferences = dataStore.data.first()
+        return decodeChatSyncRemoteCursors(preferences[CHAT_SYNC_REMOTE_CURSORS])[cursorKey] ?: 0L
+    }
+
+    suspend fun updateChatSyncRemoteCursor(cursorKey: String, updatedAt: Long) {
+        if (cursorKey.isBlank() || updatedAt <= 0L) return
+        dataStore.edit { preferences ->
+            val cursors = decodeChatSyncRemoteCursors(preferences[CHAT_SYNC_REMOTE_CURSORS]).toMutableMap()
+            val current = cursors[cursorKey] ?: 0L
+            if (updatedAt > current) {
+                cursors[cursorKey] = updatedAt
+                preferences[CHAT_SYNC_REMOTE_CURSORS] = JsonInstant.encodeToString(cursors)
+            }
+        }
     }
 
     suspend fun updateAssistant(assistantId: Uuid) {
@@ -496,6 +526,13 @@ class SettingsStore(
     }
 }
 
+private fun decodeChatSyncRemoteCursors(raw: String?): Map<String, Long> {
+    if (raw.isNullOrBlank()) return emptyMap()
+    return runCatching {
+        JsonInstant.decodeFromString<Map<String, Long>>(raw)
+    }.getOrDefault(emptyMap())
+}
+
 @Serializable
 data class Settings(
     @Transient
@@ -528,6 +565,9 @@ data class Settings(
     val searchCommonOptions: SearchCommonOptions = SearchCommonOptions(),
     val searchServiceSelected: Int = 0,
     val mcpServers: List<McpServerConfig> = emptyList(),
+    val vcpLogUrl: String = "",
+    val vcpFileKey: String = "",
+    val vcpLogKey: String = "",
     val webDavConfig: WebDavConfig = WebDavConfig(),
     val s3Config: S3Config = S3Config(),
     val chatSyncConfig: ChatSyncConfig = ChatSyncConfig(),

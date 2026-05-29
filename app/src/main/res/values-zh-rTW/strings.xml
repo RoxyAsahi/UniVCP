@@ -1,9 +1,13 @@
 <?xml version='1.0' encoding='UTF-8'?>
 <resources>
   <string name="about_page_github">Github</string>
+  <string name="about_page_based_on">基於 RikkaHub 開發</string>
+  <string name="about_page_based_on_desc">UniVCP 基於 RikkaHub 開發，內容僅供實驗用途。主要修改為重寫整個渲染系統的一部分，以適配 UniVCP。</string>
   <string name="about_page_license">授權條款</string>
   <string name="about_page_system">系統</string>
   <string name="about_page_title">關於</string>
+  <string name="about_page_upstream">RikkaHub 原始碼</string>
+  <string name="about_page_upstream_license">RikkaHub 授權條款</string>
   <string name="about_page_version">版本</string>
   <string name="about_page_website">官網</string>
   <string name="add">添加</string>

@@ -1,9 +1,13 @@
 <?xml version='1.0' encoding='UTF-8'?>
 <resources>
   <string name="about_page_github">GitHub</string>
+  <string name="about_page_based_on">На основе RikkaHub</string>
+  <string name="about_page_based_on_desc">UniVCP разработан на основе RikkaHub. Эта сборка предназначена только для экспериментального использования. Основное изменение — переписанная часть системы рендеринга, адаптированная для UniVCP.</string>
   <string name="about_page_license">Лицензия</string>
   <string name="about_page_system">Система</string>
   <string name="about_page_title">О приложении</string>
+  <string name="about_page_upstream">Исходный код RikkaHub</string>
+  <string name="about_page_upstream_license">Лицензия RikkaHub</string>
   <string name="about_page_version">Версия</string>
   <string name="about_page_website">Веб-сайт</string>
   <string name="add">Добавить</string>

@@ -9,6 +9,8 @@ interface ChatSyncRemoteStore {
 
     suspend fun pushChanges(conversations: List<SyncConversation>): ChatSyncPushResult
 
+    suspend fun getPresence(): List<ChatSyncPeerPresence> = emptyList()
+
     fun observeChanges(since: ChatSyncCursor? = null): Flow<ChatSyncRemoteEvent> = emptyFlow()
 }
 
@@ -36,6 +38,15 @@ data class ChatSyncRemoteEvent(
     val conversation: SyncConversation,
     val cursor: ChatSyncCursor,
     val sourceDeviceId: String? = null,
+)
+
+@Serializable
+data class ChatSyncPeerPresence(
+    val deviceId: String,
+    val app: String = "",
+    val status: String = "online",
+    val updatedAt: Long = 0L,
+    val direction: String? = null,
 )
 
 @Serializable

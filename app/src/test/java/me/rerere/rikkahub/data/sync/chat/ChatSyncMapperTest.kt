@@ -11,6 +11,7 @@ import me.rerere.ai.ui.UIMessagePart
 import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.model.MessageNode
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.Instant
@@ -177,6 +178,53 @@ class ChatSyncMapperTest {
 
         assertEquals(first.id, second.id)
         assertEquals(first.currentMessages.single().id, second.currentMessages.single().id)
+    }
+
+    @Test
+    fun `vcpchat same topic id stays isolated by agent`() {
+        val history = Json.parseToJsonElement(
+            """
+            [
+              {
+                "role": "user",
+                "content": "same topic",
+                "timestamp": 1774957438466,
+                "id": "msg_same_topic"
+              }
+            ]
+            """.trimIndent()
+        ).jsonArray
+        val first = VcpChatSyncMapper.historyToSyncConversation(
+            agentId = "_Agent_A",
+            topicId = "topic_shared",
+            topicName = "shared",
+            history = history,
+            assistant = SyncAssistant(
+                id = "_Agent_A",
+                name = "Agent A",
+                source = SyncSource(app = CHAT_SYNC_APP_VCPCHAT, agentId = "_Agent_A"),
+            ),
+        )
+        val second = VcpChatSyncMapper.historyToSyncConversation(
+            agentId = "_Agent_B",
+            topicId = "topic_shared",
+            topicName = "shared",
+            history = history,
+            assistant = SyncAssistant(
+                id = "_Agent_B",
+                name = "Agent B",
+                source = SyncSource(app = CHAT_SYNC_APP_VCPCHAT, agentId = "_Agent_B"),
+            ),
+        )
+
+        val firstAssistantId = UniVcpChatSyncMapper.stableAssistantId(first.assistant!!)
+        val secondAssistantId = UniVcpChatSyncMapper.stableAssistantId(second.assistant!!)
+        val importedFirst = UniVcpChatSyncMapper.importConversation(first, firstAssistantId)
+        val importedSecond = UniVcpChatSyncMapper.importConversation(second, secondAssistantId)
+
+        assertNotEquals(first.id, second.id)
+        assertNotEquals(importedFirst.id, importedSecond.id)
+        assertNotEquals(importedFirst.assistantId, importedSecond.assistantId)
     }
 
     @Test

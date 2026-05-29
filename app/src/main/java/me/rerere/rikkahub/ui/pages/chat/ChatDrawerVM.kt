@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.repository.ConversationRepository
@@ -87,6 +88,17 @@ class ChatDrawerVM(
                     }
             }
             .cachedIn(viewModelScope)
+
+    val conversationCount: Flow<Int> =
+        settingsStore.settingsFlow
+            .map { it.assistantId }
+            .distinctUntilChanged()
+            .flatMapLatest { assistantId ->
+                conversationRepo.getConversationsOfAssistant(assistantId)
+                    .map { it.size }
+                    .onStart { emit(0) }
+            }
+            .distinctUntilChanged()
 
     val scrollIndex: Int get() = savedStateHandle["scrollIndex"] ?: 0
     val scrollOffset: Int get() = savedStateHandle["scrollOffset"] ?: 0

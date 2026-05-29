@@ -279,7 +279,14 @@ private fun RichContainerFlowChildren(
                 verticalArrangement = Arrangement.spacedBy(parentStyle.rowGap),
             ) {
                 children.forEach { child ->
-                    RichBlockView(child, onSendInput, blockFlowModifier(child.style))
+                    val childModifier = blockFlowModifier(child.style).then(
+                        if (child.honorsParentTextAlignAsInlineReplaced()) {
+                            textAlignChildModifier(parentStyle.textAlign)
+                        } else {
+                            Modifier
+                        },
+                    )
+                    RichBlockView(child, onSendInput, childModifier)
                 }
             }
         }
@@ -732,9 +739,7 @@ private fun RichImageBlockView(block: RichImageBlock, modifier: Modifier) {
         ZoomableAsyncImage(
             model = block.src,
             contentDescription = block.alt,
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(max = block.style.maxHeight ?: block.style.height.dpOrNull() ?: 420.dp),
+            modifier = Modifier.richImageContentSize(block.style),
             contentScale = block.style.objectFit.toContentScale(),
             enforceRichMediaSafety = true,
             richMediaKind = RichMediaKind.Image,
@@ -1449,7 +1454,7 @@ private fun StyledContainer(
         .then(style.baseModifier(root))
     if (inlineBox) {
         outer = outer.clipToBounds()
-    } else {
+    } else if (!root) {
         outer = outer.then(style.richShadowModifier(shape))
     }
     outer = outer.then(style.cssClipPathModifier())
@@ -2066,7 +2071,20 @@ private fun ComputedStyle.baseModifier(root: Boolean): Modifier {
 }
 
 private fun ComputedStyle.marginModifier(): Modifier {
-    return if (margin == RichSpacing.Zero) Modifier else Modifier.padding(margin.toPaddingValues(root = false))
+    if (margin == RichSpacing.Zero) return Modifier
+
+    var modifier: Modifier = Modifier
+    val visualOffsetX = margin.left.negativeOrZero() - margin.right.negativeOrZero()
+    val visualOffsetY = margin.top.negativeOrZero()
+    if (visualOffsetX != 0.dp || visualOffsetY != 0.dp) {
+        modifier = modifier.offset(x = visualOffsetX, y = visualOffsetY)
+    }
+
+    val layoutMargin = margin.coerceNonNegative()
+    if (layoutMargin != RichSpacing.Zero) {
+        modifier = modifier.padding(layoutMargin.toPaddingValues(root = false))
+    }
+    return modifier
 }
 
 private fun ComputedStyle.isPositionedOverlay(): Boolean {
@@ -2102,6 +2120,41 @@ private fun blockFlowModifier(style: ComputedStyle): Modifier {
     style.minWidth?.let {
         modifier = modifier.widthIn(min = it)
     }
+    return modifier
+}
+
+private fun RichBlock.honorsParentTextAlignAsInlineReplaced(): Boolean {
+    return this is RichImageBlock &&
+        (style.width != RichSize.Auto || style.height != RichSize.Auto || style.maxWidth != null || style.maxHeight != null)
+}
+
+private fun ColumnScope.textAlignChildModifier(textAlign: TextAlign): Modifier = when (textAlign) {
+    TextAlign.Center -> Modifier.align(Alignment.CenterHorizontally)
+    TextAlign.End,
+    TextAlign.Right -> Modifier.align(Alignment.End)
+    else -> Modifier
+}
+
+private fun Modifier.richImageContentSize(style: ComputedStyle): Modifier {
+    var modifier = this
+    val width = style.width.dpOrNull()
+    val height = style.height.dpOrNull()
+    when {
+        width != null && height != null -> modifier = modifier.size(width, height)
+        width != null -> modifier = modifier
+            .width(width)
+            .heightIn(max = style.maxHeight ?: 420.dp)
+        height != null -> modifier = modifier
+            .height(height)
+            .widthIn(max = style.maxWidth ?: Dp.Infinity)
+        else -> modifier = modifier
+            .fillMaxWidth()
+            .heightIn(max = style.maxHeight ?: 420.dp)
+    }
+    style.minWidth?.let { modifier = modifier.widthIn(min = it) }
+    style.maxWidth?.takeIf { width == null }?.let { modifier = modifier.widthIn(max = it) }
+    style.minHeight?.let { modifier = modifier.heightIn(min = it) }
+    style.maxHeight?.takeIf { height == null }?.let { modifier = modifier.heightIn(max = it) }
     return modifier
 }
 
@@ -3102,13 +3155,23 @@ private fun List<RichColorStop>.colorStopPairs(): Array<Pair<Float, Color>>? {
 }
 
 private fun RichSpacing.toPaddingValues(root: Boolean): androidx.compose.foundation.layout.PaddingValues {
+    val safe = coerceNonNegative()
     return androidx.compose.foundation.layout.PaddingValues(
-        start = left,
-        top = top,
-        end = right,
-        bottom = bottom,
+        start = safe.left,
+        top = safe.top,
+        end = safe.right,
+        bottom = safe.bottom,
     )
 }
+
+private fun RichSpacing.coerceNonNegative(): RichSpacing = RichSpacing(
+    top = top.coerceAtLeast(0.dp),
+    right = right.coerceAtLeast(0.dp),
+    bottom = bottom.coerceAtLeast(0.dp),
+    left = left.coerceAtLeast(0.dp),
+)
+
+private fun Dp.negativeOrZero(): Dp = coerceAtMost(0.dp)
 
 private fun RichSize.dpOrNull(): Dp? = (this as? RichSize.DpSize)?.value
 

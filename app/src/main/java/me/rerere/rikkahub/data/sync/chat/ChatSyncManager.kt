@@ -26,12 +26,15 @@ import me.rerere.rikkahub.data.datastore.SettingsStore
 import me.rerere.rikkahub.data.datastore.getAssistantById
 import me.rerere.rikkahub.data.datastore.getCurrentAssistant
 import me.rerere.rikkahub.data.db.dao.ConversationDAO
+import me.rerere.rikkahub.data.model.Conversation
 import me.rerere.rikkahub.data.repository.ConversationRepository
 import me.rerere.rikkahub.service.ChatService
 import okhttp3.OkHttpClient
 import kotlin.uuid.Uuid
 
 private const val TAG = "ChatSyncManager"
+private const val VCPCHAT_PRESENCE_STALE_MS = 90_000L
+private const val VCPCHAT_PRESENCE_POLL_MS = 15_000L
 
 class ChatSyncManager(
     private val appScope: AppScope,
@@ -104,25 +107,72 @@ class ChatSyncManager(
     suspend fun syncNow(direction: ChatSyncDirection = ChatSyncDirection.BOTH): ChatSyncRunResult {
         val config = settingsStore.settingsFlow.value.chatSyncConfig
         val store = createStoreOrNull(config) ?: return ChatSyncRunResult(skippedReason = "Firebase is not configured")
+        val mode = config.mode
+        val allowsPush = mode.allowsPush()
+        val allowsPull = mode.allowsPull()
 
         return withContext(Dispatchers.IO) {
             when (direction) {
                 ChatSyncDirection.PUSH -> {
+                    if (!allowsPush) {
+                        return@withContext ChatSyncRunResult(skippedReason = "当前模式仅允许拉取")
+                    }
                     val pushed = pushAllLocal(store, config)
                     ChatSyncRunResult(pushed = pushed)
                 }
 
                 ChatSyncDirection.PULL -> {
+                    if (!allowsPull) {
+                        return@withContext ChatSyncRunResult(skippedReason = "当前模式仅允许推送")
+                    }
                     val imported = pullRemoteOnce(store, config)
                     ChatSyncRunResult(imported = imported)
                 }
 
                 ChatSyncDirection.BOTH -> {
-                    val imported = pullRemoteOnce(store, config)
-                    val pushed = pushAllLocal(store, config)
-                    ChatSyncRunResult(pushed = pushed, imported = imported)
+                    val skipped = mutableListOf<String>()
+                    val imported = if (allowsPull) {
+                        pullRemoteOnce(store, config)
+                    } else {
+                        skipped += "拉取已由当前模式关闭"
+                        0
+                    }
+                    val pushed = if (allowsPush) {
+                        pushAllLocal(store, config)
+                    } else {
+                        skipped += "推送已由当前模式关闭"
+                        0
+                    }
+                    ChatSyncRunResult(
+                        pushed = pushed,
+                        imported = imported,
+                        skippedReason = skipped.takeIf { it.isNotEmpty() }?.joinToString("；"),
+                    )
                 }
             }
+        }
+    }
+
+    suspend fun repairNow(): ChatSyncRepairResult {
+        val config = settingsStore.settingsFlow.value.chatSyncConfig
+        if (!config.mode.allowsPull()) {
+            return ChatSyncRepairResult(skippedReason = "当前模式不允许拉取，无法修复")
+        }
+        val store = createStoreOrNull(config)
+            ?: return ChatSyncRepairResult(skippedReason = "Firebase is not configured")
+
+        return withContext(Dispatchers.IO) {
+            val result = store.pullChanges(ChatSyncCursor(updatedAfter = 0L))
+            var repaired = 0
+            result.conversations.forEach { conversation ->
+                if (applyRemoteConversation(conversation, config, forceRepair = true)) {
+                    repaired += 1
+                }
+            }
+            if (config.incrementalPull) {
+                result.nextCursor?.let { advanceRemoteCursor(config, it) }
+            }
+            ChatSyncRepairResult(checked = result.conversations.size, repaired = repaired)
         }
     }
 
@@ -175,7 +225,7 @@ class ChatSyncManager(
             return
         }
 
-        remoteCursor = null
+        remoteCursor = if (config.incrementalPull) loadRemoteCursor(config) else null
         val runtimeSupervisor = SupervisorJob()
         runtimeJob = appScope.launch(Dispatchers.IO + runtimeSupervisor) {
             setState {
@@ -189,7 +239,7 @@ class ChatSyncManager(
                 )
             }
 
-            if (config.importRemoteOnStart) {
+            if (config.importRemoteOnStart && config.mode.allowsPull()) {
                 runCatching {
                     pullRemoteOnce(store, config)
                 }.onFailure { error ->
@@ -198,7 +248,7 @@ class ChatSyncManager(
             }
 
             coroutineScope {
-                if (config.pushOnStart) {
+                if (config.pushOnStart && config.mode.allowsPush()) {
                     launch {
                         runCatching {
                             pushAllLocal(store, config)
@@ -208,11 +258,18 @@ class ChatSyncManager(
                     }
                 }
 
-                launch {
-                    observeRemoteLoop(store, config)
+                if (config.mode.allowsPull()) {
+                    launch {
+                        observeRemoteLoop(store, config)
+                    }
+                }
+                if (config.mode.allowsPush()) {
+                    launch {
+                        observeLocalChanges(store, config)
+                    }
                 }
                 launch {
-                    observeLocalChanges(store, config)
+                    observeVcpChatPresenceLoop(store)
                 }
             }
         }
@@ -229,9 +286,11 @@ class ChatSyncManager(
     private suspend fun observeRemoteLoop(store: ChatSyncRemoteStore, config: ChatSyncConfig) {
         while (currentCoroutineContext().isActive) {
             runCatching {
-                store.observeChanges(remoteCursor).collect { event ->
-                    remoteCursor = event.cursor
+                store.observeChanges(ensureRemoteCursor(config)).collect { event ->
                     applyRemoteConversation(event.conversation, config)
+                    if (config.incrementalPull) {
+                        advanceRemoteCursor(config, event.cursor)
+                    }
                 }
             }.onFailure { error ->
                 if (currentCoroutineContext().isActive) {
@@ -248,6 +307,7 @@ class ChatSyncManager(
 
         conversationDAO.getAll().collect { conversations ->
             val currentIds = conversations.map { it.id }.toSet()
+            // Deletions are intentionally local-only: never emit tombstones or remote delete writes from Android.
             knownUpdateTimes.keys.removeAll { it !in currentIds }
 
             if (!initialized) {
@@ -264,6 +324,35 @@ class ChatSyncManager(
                 schedulePush(store, config, entity.id)
             }
         }
+    }
+
+    private suspend fun observeVcpChatPresenceLoop(store: ChatSyncRemoteStore) {
+        while (currentCoroutineContext().isActive) {
+            runCatching {
+                refreshVcpChatPresence(store)
+            }.onFailure { error ->
+                Log.w(TAG, "presence check failed: ${error.message}")
+                setState { it.copy(vcpChatPresence = ChatSyncPeerStatus.Unknown) }
+            }
+            delay(VCPCHAT_PRESENCE_POLL_MS)
+        }
+    }
+
+    private suspend fun refreshVcpChatPresence(store: ChatSyncRemoteStore) {
+        val peers = store.getPresence()
+        val latestVcpChat = peers
+            .filter { peer -> peer.app == CHAT_SYNC_APP_VCPCHAT || peer.deviceId.startsWith("vcpchat") }
+            .maxByOrNull { it.updatedAt }
+
+        val status = when {
+            latestVcpChat == null -> ChatSyncPeerStatus.Unknown
+            latestVcpChat.status == "offline" -> ChatSyncPeerStatus.Offline(latestVcpChat.deviceId, latestVcpChat.updatedAt)
+            System.currentTimeMillis() - latestVcpChat.updatedAt <= VCPCHAT_PRESENCE_STALE_MS ->
+                ChatSyncPeerStatus.Online(latestVcpChat.deviceId, latestVcpChat.updatedAt, latestVcpChat.direction)
+
+            else -> ChatSyncPeerStatus.Offline(latestVcpChat.deviceId, latestVcpChat.updatedAt)
+        }
+        setState { it.copy(vcpChatPresence = status) }
     }
 
     private fun schedulePush(store: ChatSyncRemoteStore, config: ChatSyncConfig, conversationId: String) {
@@ -290,7 +379,11 @@ class ChatSyncManager(
         return pushed
     }
 
-    private suspend fun pushConversation(store: ChatSyncRemoteStore, config: ChatSyncConfig, conversationId: String): Boolean {
+    private suspend fun pushConversation(
+        store: ChatSyncRemoteStore,
+        config: ChatSyncConfig,
+        conversationId: String,
+    ): Boolean {
         val id = runCatching { Uuid.parse(conversationId) }.getOrNull() ?: return false
         val conversation = conversationRepository.getConversationById(id) ?: return false
         val settings = settingsStore.settingsFlow.value
@@ -318,42 +411,90 @@ class ChatSyncManager(
     }
 
     private suspend fun pullRemoteOnce(store: ChatSyncRemoteStore, config: ChatSyncConfig): Int {
-        val result = store.pullChanges(remoteCursor)
-        remoteCursor = result.nextCursor ?: remoteCursor
+        val result = store.pullChanges(ensureRemoteCursor(config))
         var imported = 0
         result.conversations.forEach { conversation ->
             if (applyRemoteConversation(conversation, config)) {
                 imported += 1
             }
         }
+        if (config.incrementalPull) {
+            result.nextCursor?.let { advanceRemoteCursor(config, it) }
+        }
         Log.i(TAG, "Pulled ${result.conversations.size} remote conversations, imported=$imported")
         return imported
     }
 
-    private suspend fun applyRemoteConversation(syncConversation: SyncConversation, config: ChatSyncConfig): Boolean {
-        val localId = syncConversation.id.toLocalConversationId()
-        val targetAssistantId = resolveImportAssistantId(syncConversation, config)
-        val existing = conversationRepository.getConversationById(localId)
-        if (existing != null && existing.updateAt.toEpochMilli() >= syncConversation.updatedAt) {
-            if (existing.assistantId != targetAssistantId) {
-                suppressLocalWrite(existing.id.toString())
-                chatService.saveConversation(existing.id, existing.copy(assistantId = targetAssistantId))
-                Log.i(TAG, "Moved remote conversation title=${syncConversation.title} to imported assistant")
-                return true
-            }
-            Log.i(TAG, "Skipped remote conversation title=${syncConversation.title}, local is up-to-date")
+    private suspend fun ensureRemoteCursor(config: ChatSyncConfig): ChatSyncCursor? {
+        if (!config.incrementalPull) return null
+        return remoteCursor ?: loadRemoteCursor(config).also { remoteCursor = it }
+    }
+
+    private suspend fun loadRemoteCursor(config: ChatSyncConfig): ChatSyncCursor? {
+        val updatedAfter = settingsStore.getChatSyncRemoteCursor(config.remoteCursorKey())
+        return ChatSyncCursor(updatedAfter = updatedAfter).takeIf { updatedAfter > 0L }
+    }
+
+    private suspend fun advanceRemoteCursor(config: ChatSyncConfig, cursor: ChatSyncCursor) {
+        val updatedAfter = cursor.updatedAfter ?: return
+        val current = remoteCursor?.updatedAfter ?: 0L
+        if (updatedAfter <= current) return
+        remoteCursor = cursor
+        settingsStore.updateChatSyncRemoteCursor(config.remoteCursorKey(), updatedAfter)
+    }
+
+    private suspend fun applyRemoteConversation(
+        syncConversation: SyncConversation,
+        config: ChatSyncConfig,
+        forceRepair: Boolean = false,
+    ): Boolean {
+        if (!syncConversation.hasConsistentVcpScope()) {
+            recordError(
+                "applyRemoteConversation",
+                IllegalStateException(
+                    "Remote VCPChat conversation has mixed Agent/Topic sources: ${syncConversation.id}"
+                )
+            )
             return false
         }
-
+        val scopedConversation = syncConversation.withScopedIdentity()
+        val localId = scopedConversation.id.toLocalConversationId()
+        val targetAssistantId = resolveImportAssistantId(scopedConversation, config)
+        val existing = conversationRepository.getConversationById(localId)
         val imported = UniVcpChatSyncMapper.importConversation(
-            syncConversation = syncConversation,
+            syncConversation = scopedConversation,
             assistantId = targetAssistantId,
         )
 
+        if (existing != null) {
+            val merged = existing.mergeAdditiveRemote(imported, targetAssistantId)
+            if (merged == existing) {
+                Log.i(TAG, "Skipped remote conversation title=${scopedConversation.title}, no additive changes")
+                return false
+            }
+
+            saveImportedConversation(merged)
+            Log.i(
+                TAG,
+                "Merged remote conversation title=${merged.title}, " +
+                    "localNodes=${existing.messageNodes.size}, mergedNodes=${merged.messageNodes.size}, " +
+                    "forceRepair=$forceRepair"
+            )
+            return true
+        }
+
+        if (imported.messageNodes.isEmpty()) {
+            Log.i(TAG, "Skipped empty remote conversation title=${imported.title}")
+            return false
+        }
+        saveImportedConversation(imported)
+        Log.i(TAG, "Imported remote conversation title=${imported.title}, messages=${imported.messageNodes.size}")
+        return true
+    }
+
+    private suspend fun saveImportedConversation(imported: Conversation) {
         suppressLocalWrite(imported.id.toString())
         chatService.saveConversation(imported.id, imported)
-        Log.i(TAG, "Imported remote conversation title=${imported.title}, messages=${imported.messageNodes.size}")
-
         setState {
             it.copy(
                 importedCount = it.importedCount + 1,
@@ -361,11 +502,50 @@ class ChatSyncManager(
                 lastError = null,
             )
         }
-        return true
+    }
+
+    private fun Conversation.mergeAdditiveRemote(
+        remote: Conversation,
+        targetAssistantId: Uuid,
+    ): Conversation {
+        val knownMessageIds = messageNodes
+            .flatMap { node -> node.messages.map { message -> message.id } }
+            .toMutableSet()
+        val missingRemoteNodes = remote.messageNodes.filter { node ->
+            node.messages.any { message -> knownMessageIds.add(message.id) }
+        }
+
+        return copy(
+            assistantId = targetAssistantId,
+            title = title.ifBlank { remote.title },
+            messageNodes = messageNodes + missingRemoteNodes,
+            chatSuggestions = (chatSuggestions + remote.chatSuggestions).distinct(),
+            isPinned = isPinned || remote.isPinned,
+            createAt = minOf(createAt, remote.createAt),
+            updateAt = maxOf(updateAt, remote.updateAt),
+        )
     }
 
     private suspend fun resolveImportAssistantId(syncConversation: SyncConversation, config: ChatSyncConfig): Uuid {
         config.targetAssistantId?.let { return it }
+        if (syncConversation.source.app == CHAT_SYNC_APP_VCPCHAT) {
+            syncConversation.source.agentId?.takeIf { it.isNotBlank() }?.let { agentId ->
+                val assistant = syncConversation.assistant
+                return upsertSyncedAssistant(
+                    SyncAssistant(
+                        id = agentId,
+                        name = assistant?.name.orEmpty().ifBlank { agentId },
+                        systemPrompt = assistant?.systemPrompt.orEmpty(),
+                        source = (assistant?.source ?: syncConversation.source).copy(
+                            app = CHAT_SYNC_APP_VCPCHAT,
+                            agentId = agentId,
+                            itemType = syncConversation.source.itemType,
+                        ),
+                        metadata = assistant?.metadata ?: emptyJsonObject(),
+                    )
+                )
+            }
+        }
         syncConversation.assistant?.let { return upsertSyncedAssistant(it) }
         syncConversation.source.assistantId?.toUuidOrNull()?.let { return it }
         return settingsStore.settingsFlow.value.getCurrentAssistant().id
@@ -422,6 +602,7 @@ class ChatSyncManager(
                 roomId = config.roomId.ifBlank { "default" },
                 deviceId = config.resolvedDeviceId(),
                 authToken = config.firebaseAuthToken.takeIf { it.isNotBlank() },
+                incrementalPull = config.incrementalPull,
             ),
             json = json,
         )
@@ -453,6 +634,62 @@ class ChatSyncManager(
         return deviceId.ifBlank { "univcp-android" }
     }
 
+    private fun SyncConversation.withScopedIdentity(): SyncConversation {
+        if (source.app != CHAT_SYNC_APP_VCPCHAT) return this
+
+        val agentId = source.agentId?.takeIf { it.isNotBlank() }
+            ?: messages.mapNotNull { it.source?.agentId?.takeIf(String::isNotBlank) }.singleDistinctOrNull()
+            ?: return this
+        val topicId = source.topicId?.takeIf { it.isNotBlank() }
+            ?: messages.mapNotNull { it.source?.topicId?.takeIf(String::isNotBlank) }.singleDistinctOrNull()
+            ?: return this
+        val scopedId = "vcpchat:$agentId:$topicId"
+        val scopedSource = source.copy(
+            app = CHAT_SYNC_APP_VCPCHAT,
+            agentId = agentId,
+            topicId = topicId,
+        )
+        val scopedMessages = messages.map { message ->
+            val messageSource = message.source
+            if (messageSource?.app == CHAT_SYNC_APP_VCPCHAT) {
+                message.copy(
+                    source = messageSource.copy(
+                        app = CHAT_SYNC_APP_VCPCHAT,
+                        agentId = agentId,
+                        topicId = topicId,
+                        itemType = messageSource.itemType ?: scopedSource.itemType,
+                    )
+                )
+            } else {
+                message
+            }
+        }
+
+        if (id != scopedId) {
+            Log.w(TAG, "Repaired VCPChat conversation id from $id to $scopedId")
+        }
+        return copy(id = scopedId, source = scopedSource, messages = scopedMessages)
+    }
+
+    private fun SyncConversation.hasConsistentVcpScope(): Boolean {
+        if (source.app != CHAT_SYNC_APP_VCPCHAT) return true
+
+        val sourceAgentId = source.agentId?.takeIf(String::isNotBlank)
+        val sourceTopicId = source.topicId?.takeIf(String::isNotBlank)
+        val messageAgentIds = messages.mapNotNull { it.source?.agentId?.takeIf(String::isNotBlank) }.distinct()
+        val messageTopicIds = messages.mapNotNull { it.source?.topicId?.takeIf(String::isNotBlank) }.distinct()
+
+        val agentMatches = sourceAgentId?.let { agentId ->
+            messageAgentIds.isEmpty() || messageAgentIds.all { it == agentId }
+        } ?: (messageAgentIds.size <= 1)
+
+        val topicMatches = sourceTopicId?.let { topicId ->
+            messageTopicIds.isEmpty() || messageTopicIds.all { it == topicId }
+        } ?: (messageTopicIds.size <= 1)
+
+        return agentMatches && topicMatches
+    }
+
     private fun String.toLocalConversationId(): Uuid {
         return runCatching {
             Uuid.parse(this)
@@ -464,6 +701,19 @@ class ChatSyncManager(
     private fun String.toUuidOrNull(): Uuid? {
         return runCatching { Uuid.parse(this) }.getOrNull()
     }
+
+    private fun List<String>.singleDistinctOrNull(): String? {
+        val distinct = distinct()
+        return distinct.singleOrNull()
+    }
+}
+
+private fun ChatSyncConfig.remoteCursorKey(): String {
+    return listOf(
+        provider.name,
+        firebaseDatabaseUrl.trim().trimEnd('/'),
+        roomId.ifBlank { "default" },
+    ).joinToString("|")
 }
 
 data class ChatSyncState(
@@ -477,7 +727,23 @@ data class ChatSyncState(
     val lastPushAt: Long? = null,
     val lastImportAt: Long? = null,
     val lastError: String? = null,
+    val vcpChatPresence: ChatSyncPeerStatus = ChatSyncPeerStatus.Unknown,
 )
+
+sealed interface ChatSyncPeerStatus {
+    data object Unknown : ChatSyncPeerStatus
+
+    data class Online(
+        val deviceId: String,
+        val updatedAt: Long,
+        val direction: String?,
+    ) : ChatSyncPeerStatus
+
+    data class Offline(
+        val deviceId: String,
+        val updatedAt: Long,
+    ) : ChatSyncPeerStatus
+}
 
 enum class ChatSyncDirection {
     PUSH,
@@ -488,5 +754,11 @@ enum class ChatSyncDirection {
 data class ChatSyncRunResult(
     val pushed: Int = 0,
     val imported: Int = 0,
+    val skippedReason: String? = null,
+)
+
+data class ChatSyncRepairResult(
+    val checked: Int = 0,
+    val repaired: Int = 0,
     val skippedReason: String? = null,
 )
