@@ -44,13 +44,15 @@
       android:name=".ui.activity.SafeModeActivity"
       android:exported="false"
       android:label="@string/title_activity_safe_mode"
-      android:theme="@style/Theme.Rikkahub" />
+      android:theme="@style/Theme.Rikkahub"
+      tools:ignore="Instantiatable" />
     <activity
       android:name=".RouteActivity"
       android:configChanges="keyboardHidden|orientation|screenSize"
       android:exported="true"
       android:importantForAutofill="noExcludeDescendants"
       android:theme="@style/Theme.Rikkahub"
+      tools:ignore="Instantiatable"
       android:windowSoftInputMode="adjustResize">
       <intent-filter>
         <action android:name="android.intent.action.MAIN" />
@@ -79,7 +81,8 @@
     <activity
       android:name=".ui.activity.ShortcutHandlerActivity"
       android:exported="true"
-      android:theme="@android:style/Theme.Translucent.NoTitleBar">
+      android:theme="@android:style/Theme.Translucent.NoTitleBar"
+      tools:ignore="Instantiatable">
       <intent-filter>
         <action android:name="android.intent.action.VIEW" />
 
@@ -92,7 +95,8 @@
     </activity>
     <activity
       android:name="com.yalantis.ucrop.UCropActivity"
-      android:theme="@style/Theme.AppCompat.Light.NoActionBar" />
+      android:theme="@style/Theme.AppCompat.Light.NoActionBar"
+      tools:ignore="Instantiatable" />
 
     <service
       android:name=".service.WebServerService"
