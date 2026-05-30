@@ -1,0 +1,5 @@
+/build
+/release
+google-services.json
+!src/debug/google-services.json
+app.key
