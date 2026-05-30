@@ -4,6 +4,7 @@ import me.rerere.ai.provider.ProviderSetting
 import me.rerere.rikkahub.data.datastore.Settings
 import me.rerere.rikkahub.data.datastore.findProvider
 import me.rerere.rikkahub.data.datastore.getCurrentChatModel
+import me.rerere.rikkahub.data.sync.chat.VcpChatEmoticonLibraryRegistry
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
@@ -13,9 +14,10 @@ private const val VCP_PASSWORD_SEGMENT_PREFIX = "pw="
 internal object RichVcpMediaResolver {
     fun resolve(source: String?, settings: Settings): String? {
         val original = source?.trim() ?: return source
-        val url = original.toHttpUrlOrNull() ?: return source
-        if (!url.isVcpLocalEmoticonUrl()) return source
-        val baseUrl = settings.vcpMediaBaseUrl() ?: return source
+        val fixed = VcpChatEmoticonLibraryRegistry.fixUrl(original)?.trim().orEmpty()
+        val url = fixed.toHttpUrlOrNull() ?: return fixed.ifBlank { source }
+        if (!url.isVcpLocalEmoticonUrl()) return fixed
+        val baseUrl = settings.vcpMediaBaseUrl() ?: return fixed
         val fileKey = settings.vcpFileKey.trim()
 
         return url.newBuilder()
@@ -29,6 +31,12 @@ internal object RichVcpMediaResolver {
             }
             .build()
             .toString()
+    }
+
+    fun isVcpMediaUrl(source: String?): Boolean {
+        val url = source?.trim()?.toHttpUrlOrNull() ?: return false
+        return url.pathSegments.any { it == "images" } &&
+            url.pathSegments.any { it.startsWith(VCP_PASSWORD_SEGMENT_PREFIX) }
     }
 
     private fun HttpUrl.isVcpLocalEmoticonUrl(): Boolean {

@@ -22,7 +22,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -35,6 +38,7 @@ import me.rerere.rikkahub.data.sync.chat.ChatSyncConfig
 import me.rerere.rikkahub.data.sync.chat.ChatSyncDirection
 import me.rerere.rikkahub.data.sync.chat.ChatSyncMode
 import me.rerere.rikkahub.data.sync.chat.ChatSyncPeerStatus
+import me.rerere.rikkahub.data.sync.chat.ChatSyncProvider
 import me.rerere.rikkahub.data.sync.chat.ChatSyncRunResult
 import me.rerere.rikkahub.data.sync.chat.allowsPull
 import me.rerere.rikkahub.data.sync.chat.allowsPush
@@ -50,6 +54,7 @@ fun ChatSyncTab(vm: BackupVM) {
     val config = settings.chatSyncConfig
     val scope = rememberCoroutineScope()
     val toaster = LocalToaster.current
+    var emoticonsSyncing by remember { mutableStateOf(false) }
 
     fun updateConfig(newConfig: ChatSyncConfig) {
         vm.updateSettings(settings.copy(chatSyncConfig = newConfig))
@@ -80,7 +85,7 @@ fun ChatSyncTab(vm: BackupVM) {
         ) {
             CardGroup {
                 item(
-                    headlineContent = { Text("Firebase 实时聊天同步") },
+                    headlineContent = { Text("VCP 聊天同步") },
                     supportingContent = {
                         val status = when {
                             syncState.lastError != null -> "异常：${syncState.lastError}"
@@ -88,13 +93,34 @@ fun ChatSyncTab(vm: BackupVM) {
                             config.enabled -> "已启用，等待配置生效"
                             else -> "未启用"
                         }
-                        Text("VCP / VCPChat 专用配置 · $status · ${config.usageMode().label}")
+                        Text("${config.provider.label()} · $status · ${config.usageMode().label}")
                     },
                     trailingContent = {
                         Switch(
                             checked = config.enabled,
                             onCheckedChange = { updateConfig(config.copy(enabled = it)) }
                         )
+                    }
+                )
+                item(
+                    headlineContent = { Text("同步方式") },
+                    supportingContent = {
+                        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                            val providers = listOf(ChatSyncProvider.VCPCHAT_LAN, ChatSyncProvider.FIREBASE_RTDB)
+                            providers.forEachIndexed { index, provider ->
+                                SegmentedButton(
+                                    selected = config.provider == provider,
+                                    onClick = { updateConfig(config.copy(provider = provider)) },
+                                    shape = SegmentedButtonDefaults.itemShape(
+                                        index = index,
+                                        count = providers.size,
+                                    ),
+                                    modifier = Modifier.height(44.dp),
+                                ) {
+                                    Text(provider.shortLabel())
+                                }
+                            }
+                        }
                     }
                 )
                 item(
@@ -124,55 +150,154 @@ fun ChatSyncTab(vm: BackupVM) {
                 }
             }
 
-            CardGroup(title = { Text("Firebase") }) {
-                item(
-                    headlineContent = { Text("Realtime Database URL") },
-                    supportingContent = {
-                        OutlinedTextField(
-                            modifier = Modifier.fillMaxWidth(),
-                            value = config.firebaseDatabaseUrl,
-                            onValueChange = { updateConfig(config.copy(firebaseDatabaseUrl = it.trim())) },
-                            placeholder = { Text("https://your-project-default-rtdb.firebaseio.com") },
-                            singleLine = true,
-                        )
-                    }
-                )
-                item(
-                    headlineContent = { Text("Auth Token") },
-                    supportingContent = {
-                        OutlinedTextField(
-                            modifier = Modifier.fillMaxWidth(),
-                            value = config.firebaseAuthToken,
-                            onValueChange = { updateConfig(config.copy(firebaseAuthToken = it.trim())) },
-                            visualTransformation = PasswordVisualTransformation(),
-                            singleLine = true,
-                        )
-                    }
-                )
-                item(
-                    headlineContent = { Text("Room ID") },
-                    supportingContent = {
-                        OutlinedTextField(
-                            modifier = Modifier.fillMaxWidth(),
-                            value = config.roomId,
-                            onValueChange = { updateConfig(config.copy(roomId = it.trim().ifBlank { "default" })) },
-                            placeholder = { Text("default") },
-                            singleLine = true,
-                        )
-                    }
-                )
-                item(
-                    headlineContent = { Text("Device ID") },
-                    supportingContent = {
-                        OutlinedTextField(
-                            modifier = Modifier.fillMaxWidth(),
-                            value = config.deviceId,
-                            onValueChange = { updateConfig(config.copy(deviceId = it.trim())) },
-                            placeholder = { Text("留空会在启用时自动生成") },
-                            singleLine = true,
-                        )
-                    }
-                )
+            if (config.provider == ChatSyncProvider.FIREBASE_RTDB) {
+                CardGroup(title = { Text("Firebase") }) {
+                    item(
+                        headlineContent = { Text("Realtime Database URL") },
+                        supportingContent = {
+                            OutlinedTextField(
+                                modifier = Modifier.fillMaxWidth(),
+                                value = config.firebaseDatabaseUrl,
+                                onValueChange = { updateConfig(config.copy(firebaseDatabaseUrl = it.trim())) },
+                                placeholder = { Text("https://your-project-default-rtdb.firebaseio.com") },
+                                singleLine = true,
+                            )
+                        }
+                    )
+                    item(
+                        headlineContent = { Text("Auth Token") },
+                        supportingContent = {
+                            OutlinedTextField(
+                                modifier = Modifier.fillMaxWidth(),
+                                value = config.firebaseAuthToken,
+                                onValueChange = { updateConfig(config.copy(firebaseAuthToken = it.trim())) },
+                                visualTransformation = PasswordVisualTransformation(),
+                                singleLine = true,
+                            )
+                        }
+                    )
+                    item(
+                        headlineContent = { Text("Room ID") },
+                        supportingContent = {
+                            OutlinedTextField(
+                                modifier = Modifier.fillMaxWidth(),
+                                value = config.roomId,
+                                onValueChange = { updateConfig(config.copy(roomId = it.trim().ifBlank { "default" })) },
+                                placeholder = { Text("default") },
+                                singleLine = true,
+                            )
+                        }
+                    )
+                    item(
+                        headlineContent = { Text("Device ID") },
+                        supportingContent = {
+                            OutlinedTextField(
+                                modifier = Modifier.fillMaxWidth(),
+                                value = config.deviceId,
+                                onValueChange = { updateConfig(config.copy(deviceId = it.trim())) },
+                                placeholder = { Text("留空会在启用时自动生成") },
+                                singleLine = true,
+                            )
+                        }
+                    )
+                }
+            }
+
+            if (config.provider == ChatSyncProvider.VCPCHAT_LAN) {
+                CardGroup(title = { Text("VCPChat 局域网") }) {
+                    item(
+                        headlineContent = { Text("VCPChat 地址") },
+                        supportingContent = {
+                            OutlinedTextField(
+                                modifier = Modifier.fillMaxWidth(),
+                                value = config.vcpChatLanBaseUrl,
+                                onValueChange = { updateConfig(config.copy(vcpChatLanBaseUrl = it.trim())) },
+                                placeholder = { Text("http://192.168.1.23:5974") },
+                                singleLine = true,
+                            )
+                        }
+                    )
+                    item(
+                        headlineContent = { Text("HTTP Token") },
+                        supportingContent = {
+                            OutlinedTextField(
+                                modifier = Modifier.fillMaxWidth(),
+                                value = config.vcpChatLanToken,
+                                onValueChange = { updateConfig(config.copy(vcpChatLanToken = it.trim())) },
+                                visualTransformation = PasswordVisualTransformation(),
+                                singleLine = true,
+                            )
+                        }
+                    )
+                    item(
+                        headlineContent = { Text("Device ID") },
+                        supportingContent = {
+                            OutlinedTextField(
+                                modifier = Modifier.fillMaxWidth(),
+                                value = config.deviceId,
+                                onValueChange = { updateConfig(config.copy(deviceId = it.trim())) },
+                                placeholder = { Text("留空会在启用时自动生成") },
+                                singleLine = true,
+                            )
+                        }
+                    )
+                    item(
+                        headlineContent = { Text("轮询间隔 ms") },
+                        supportingContent = {
+                            OutlinedTextField(
+                                modifier = Modifier.fillMaxWidth(),
+                                value = config.vcpChatLanPollIntervalMs.toString(),
+                                onValueChange = { value ->
+                                    value.toLongOrNull()?.let {
+                                        updateConfig(config.copy(vcpChatLanPollIntervalMs = it.coerceAtLeast(1000L)))
+                                    }
+                                },
+                                placeholder = { Text("15000") },
+                                singleLine = true,
+                            )
+                        }
+                    )
+                    item(
+                        headlineContent = { Text("实时事件") },
+                        supportingContent = { Text("优先通过 /chat-sync/events 接收 VCPChat 话题变化；连接不可用时回退到轮询。") },
+                        trailingContent = {
+                            Switch(
+                                checked = config.vcpChatLanRealtimeEvents,
+                                onCheckedChange = { updateConfig(config.copy(vcpChatLanRealtimeEvents = it)) }
+                            )
+                        }
+                    )
+                    item(
+                        headlineContent = { Text("表情包修复库") },
+                        supportingContent = {
+                            Text("从 VCPChat 读取表情包索引，用于修复 AI 输出里包名、文件名或访问地址不准确的表情包图片。")
+                        },
+                        trailingContent = {
+                            OutlinedButton(
+                                enabled = !emoticonsSyncing,
+                                onClick = {
+                                    scope.launch {
+                                        emoticonsSyncing = true
+                                        runCatching {
+                                            vm.syncVcpChatEmoticons(regenerate = true)
+                                        }.onSuccess { snapshot ->
+                                            val suffix = snapshot.degradedReason?.let { "；${it}" }.orEmpty()
+                                            toaster.show(
+                                                "已同步 ${snapshot.items.size} 个表情包$suffix",
+                                                type = if (snapshot.degradedReason == null) ToastType.Success else ToastType.Info,
+                                            )
+                                        }.onFailure { error ->
+                                            toaster.show("表情包同步失败：${error.message.orEmpty()}", type = ToastType.Error)
+                                        }
+                                        emoticonsSyncing = false
+                                    }
+                                }
+                            ) {
+                                Text(if (emoticonsSyncing) "同步中" else "同步")
+                            }
+                        }
+                    )
+                }
             }
 
             CardGroup(title = { Text("使用方式") }) {
@@ -217,7 +342,7 @@ fun ChatSyncTab(vm: BackupVM) {
                 item(
                     headlineContent = { Text("VCPChat 状态") },
                     supportingContent = {
-                        Text(vcpChatPresenceText(syncState.vcpChatPresence))
+                        Text(vcpChatPresenceText(syncState.vcpChatPresence, config.provider))
                     }
                 )
                 item(
@@ -229,42 +354,61 @@ fun ChatSyncTab(vm: BackupVM) {
                 item(
                     headlineContent = { Text("修复模式") },
                     supportingContent = {
-                        Text("重新扫描 Firebase，并按 Agent 与 Topic 归属修复手机端会话。同步只新增缺失内容，不会删除或截短本机记录。")
+                        Text(repairModeText(config.provider))
                     }
                 )
             }
 
-            CardGroup(title = { Text("Firebase 填写指南") }) {
-                item(
-                    headlineContent = { Text("1. 创建 Firebase 项目") },
-                    supportingContent = {
-                        Text("打开 console.firebase.google.com，新建项目；Google Analytics 可以先不启用。")
-                    }
-                )
-                item(
-                    headlineContent = { Text("2. 创建 Realtime Database") },
-                    supportingContent = {
-                        Text("在 Firebase 控制台进入 Realtime Database，点击创建数据库。地区选离你常用网络近的即可；新手测试可先用测试模式。默认全量拉取不需要索引；只有在高级选项开启“增量拉取”时，才需要在 rules 中给 conversations 加 .indexOn: [\"updatedAt\"]。")
-                    }
-                )
-                item(
-                    headlineContent = { Text("3. 填 Database URL") },
-                    supportingContent = {
-                        Text("创建后复制 Realtime Database 页面顶部的网址，形如 https://xxx-default-rtdb.firebaseio.com 或 https://xxx-default-rtdb.asia-southeast1.firebasedatabase.app。")
-                    }
-                )
-                item(
-                    headlineContent = { Text("4. Auth Token 可以先留空") },
-                    supportingContent = {
-                        Text("如果你的 Firebase 规则允许当前 room 读写，Auth Token 留空就能用。只有你配置了需要登录或服务端 token 的规则时，才需要填写 token。")
-                    }
-                )
-                item(
-                    headlineContent = { Text("5. Room ID 两端必须一致") },
-                    supportingContent = {
-                        Text("Room ID 是同步房间名，手机端和 VCPChat 端要填同一个值。建议用不容易猜到的英文名，例如 univcp-main-你的昵称。")
-                    }
-                )
+            if (config.provider == ChatSyncProvider.FIREBASE_RTDB) {
+                CardGroup(title = { Text("Firebase 填写指南") }) {
+                    item(
+                        headlineContent = { Text("1. 创建 Firebase 项目") },
+                        supportingContent = {
+                            Text("打开 console.firebase.google.com，新建项目；Google Analytics 可以先不启用。")
+                        }
+                    )
+                    item(
+                        headlineContent = { Text("2. 创建 Realtime Database") },
+                        supportingContent = {
+                            Text("在 Firebase 控制台进入 Realtime Database，点击创建数据库。地区选离你常用网络近的即可；新手测试可先用测试模式。默认全量拉取不需要索引；只有在高级选项开启“增量拉取”时，才需要在 rules 中给 conversations 加 .indexOn: [\"updatedAt\"]。")
+                        }
+                    )
+                    item(
+                        headlineContent = { Text("3. 填 Database URL") },
+                        supportingContent = {
+                            Text("创建后复制 Realtime Database 页面顶部的网址，形如 https://xxx-default-rtdb.firebaseio.com 或 https://xxx-default-rtdb.asia-southeast1.firebasedatabase.app。")
+                        }
+                    )
+                    item(
+                        headlineContent = { Text("4. Auth Token 可以先留空") },
+                        supportingContent = {
+                            Text("如果你的 Firebase 规则允许当前 room 读写，Auth Token 留空就能用。只有你配置了需要登录或服务端 token 的规则时，才需要填写 token。")
+                        }
+                    )
+                    item(
+                        headlineContent = { Text("5. Room ID 两端必须一致") },
+                        supportingContent = {
+                            Text("Room ID 是同步房间名，手机端和 VCPChat 端要填同一个值。建议用不容易猜到的英文名，例如 univcp-main-你的昵称。")
+                        }
+                    )
+                }
+            }
+
+            if (config.provider == ChatSyncProvider.VCPCHAT_LAN) {
+                CardGroup(title = { Text("局域网填写指南") }) {
+                    item(
+                        headlineContent = { Text("1. 启动 VCPChat") },
+                        supportingContent = { Text("电脑端需要启动 VCPChat，并加载 UniVCPChatSyncBridge 插件。") }
+                    )
+                    item(
+                        headlineContent = { Text("2. 填电脑地址") },
+                        supportingContent = { Text("手机和电脑在同一局域网时，填电脑 IP 与端口，例如 http://192.168.1.23:5974。") }
+                    )
+                    item(
+                        headlineContent = { Text("3. Token 与插件一致") },
+                        supportingContent = { Text("如果插件配置了 CHAT_SYNC_HTTP_TOKEN，这里填同一个 token；没有配置时可留空。") }
+                    )
+                }
             }
 
             CardGroup(title = { Text("高级选项") }) {
@@ -283,11 +427,7 @@ fun ChatSyncTab(vm: BackupVM) {
                     headlineContent = { Text("增量拉取") },
                     supportingContent = {
                         Text(
-                            if (config.incrementalPull) {
-                                "只拉取上次同步后更新的记录。需要 Firebase rules 给 conversations 配置 .indexOn: [\"updatedAt\"]。"
-                            } else {
-                                "默认全量读取远端记录，再在本机只新增合并；不需要 Firebase 索引配置。"
-                            }
+                            incrementalPullHelp(config)
                         )
                     },
                     trailingContent = {
@@ -327,9 +467,9 @@ fun ChatSyncTab(vm: BackupVM) {
                         runCatching {
                             vm.testChatSync()
                         }.onSuccess {
-                            toaster.show("Firebase 连接成功", type = ToastType.Success)
+                            toaster.show("${config.provider.shortLabel()} 连接成功", type = ToastType.Success)
                         }.onFailure { error ->
-                            toaster.show("Firebase 连接失败：${error.message.orEmpty()}", type = ToastType.Error)
+                            toaster.show("${config.provider.shortLabel()} 连接失败：${error.message.orEmpty()}", type = ToastType.Error)
                         }
                     }
                 }
@@ -478,18 +618,57 @@ private fun peerRequirement(config: ChatSyncConfig): String {
     }
 }
 
-private fun vcpChatPresenceText(status: ChatSyncPeerStatus): String {
+private fun vcpChatPresenceText(status: ChatSyncPeerStatus, provider: ChatSyncProvider): String {
     return when (status) {
         ChatSyncPeerStatus.Unknown ->
-            "未知：还没有收到 VCPChat 在线心跳。可以拉取 Firebase 已有记录，但无法确认电脑端是否正在推送新消息。"
+            if (provider == ChatSyncProvider.FIREBASE_RTDB) {
+                "未知：还没有收到 VCPChat 在线心跳。可以拉取 Firebase 已有记录，但无法确认电脑端是否正在推送新消息。"
+            } else {
+                "未知：还没有确认 VCPChat 局域网服务在线。可以先点测试连接检查地址和 token。"
+            }
 
         is ChatSyncPeerStatus.Online -> {
             val direction = status.direction?.let { "，方向 $it" }.orEmpty()
-            "在线：${status.deviceId}$direction，最近心跳 ${Instant.ofEpochMilli(status.updatedAt).toLocalDateTime()}。"
+            val version = status.version?.let { "，版本 $it" }.orEmpty()
+            "在线：${status.deviceId}$version$direction，最近心跳 ${Instant.ofEpochMilli(status.updatedAt).toLocalDateTime()}。"
         }
 
         is ChatSyncPeerStatus.Offline ->
-            "离线：${status.deviceId} 最近心跳 ${Instant.ofEpochMilli(status.updatedAt).toLocalDateTime()}。仍可拉取 Firebase 已有记录，但电脑端新回复不会继续同步到手机。"
+            if (provider == ChatSyncProvider.FIREBASE_RTDB) {
+                "离线：${status.deviceId} 最近心跳 ${Instant.ofEpochMilli(status.updatedAt).toLocalDateTime()}。仍可拉取 Firebase 已有记录，但电脑端新回复不会继续同步到手机。"
+            } else {
+                "离线：${status.deviceId} 最近检查 ${Instant.ofEpochMilli(status.updatedAt).toLocalDateTime()}。请确认电脑端 VCPChat 和同步插件仍在运行。"
+            }
+    }
+}
+
+private fun repairModeText(provider: ChatSyncProvider): String {
+    return when (provider) {
+        ChatSyncProvider.FIREBASE_RTDB ->
+            "重新扫描 Firebase，并按 Agent 与 Topic 归属修复手机端会话。同步只新增缺失内容，不会删除或截短本机记录。"
+
+        ChatSyncProvider.VCPCHAT_LAN ->
+            "重新扫描 VCPChat 局域网导出的会话，并按 Agent 与 Topic 归属修复手机端会话。同步只新增缺失内容，不会删除或截短本机记录。"
+    }
+}
+
+private fun incrementalPullHelp(config: ChatSyncConfig): String {
+    return when (config.provider) {
+        ChatSyncProvider.FIREBASE_RTDB -> {
+            if (config.incrementalPull) {
+                "只拉取上次同步后更新的记录。需要 Firebase rules 给 conversations 配置 .indexOn: [\"updatedAt\"]。"
+            } else {
+                "默认全量读取远端记录，再在本机只新增合并；不需要 Firebase 索引配置。"
+            }
+        }
+
+        ChatSyncProvider.VCPCHAT_LAN -> {
+            if (config.incrementalPull) {
+                "只请求 VCPChat 在上次同步后更新的话题；插件会按 updatedAfter 过滤导出结果。"
+            } else {
+                "默认读取 VCPChat 可导出的记录，再在本机只新增合并；不需要云端索引。"
+            }
+        }
     }
 }
 
@@ -498,5 +677,19 @@ private fun syncResultText(config: ChatSyncConfig, pushed: Int, imported: Int): 
         ChatSyncMode.PULL_ONLY -> "同步完成：导入 $imported"
         ChatSyncMode.PUSH_ONLY -> "同步完成：推送 $pushed"
         ChatSyncMode.BOTH -> "同步完成：推送 $pushed，导入 $imported"
+    }
+}
+
+private fun ChatSyncProvider.label(): String {
+    return when (this) {
+        ChatSyncProvider.FIREBASE_RTDB -> "Firebase 实时同步"
+        ChatSyncProvider.VCPCHAT_LAN -> "VCPChat 局域网直连"
+    }
+}
+
+private fun ChatSyncProvider.shortLabel(): String {
+    return when (this) {
+        ChatSyncProvider.FIREBASE_RTDB -> "Firebase"
+        ChatSyncProvider.VCPCHAT_LAN -> "局域网"
     }
 }

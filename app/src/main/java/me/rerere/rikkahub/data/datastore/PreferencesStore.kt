@@ -43,6 +43,7 @@ import me.rerere.rikkahub.data.model.PromptInjection
 import me.rerere.rikkahub.data.model.QuickMessage
 import me.rerere.rikkahub.data.model.Tag
 import me.rerere.rikkahub.data.sync.chat.ChatSyncConfig
+import me.rerere.rikkahub.data.sync.chat.VcpChatEmoticonLibrarySnapshot
 import me.rerere.rikkahub.data.sync.s3.S3Config
 import me.rerere.rikkahub.ui.theme.CustomTheme
 import me.rerere.rikkahub.ui.theme.PresetThemes
@@ -130,6 +131,7 @@ class SettingsStore(
         // Chat Sync
         val CHAT_SYNC_CONFIG = stringPreferencesKey("chat_sync_config")
         val CHAT_SYNC_REMOTE_CURSORS = stringPreferencesKey("chat_sync_remote_cursors")
+        val VCPCHAT_EMOTICON_LIBRARY = stringPreferencesKey("vcpchat_emoticon_library")
 
         // TTS
         val TTS_PROVIDERS = stringPreferencesKey("tts_providers")
@@ -451,6 +453,21 @@ class SettingsStore(
                 cursors[cursorKey] = updatedAt
                 preferences[CHAT_SYNC_REMOTE_CURSORS] = JsonInstant.encodeToString(cursors)
             }
+        }
+    }
+
+    suspend fun getVcpChatEmoticonLibrary(): VcpChatEmoticonLibrarySnapshot {
+        val preferences = dataStore.data.first()
+        return preferences[VCPCHAT_EMOTICON_LIBRARY]?.let {
+            runCatching {
+                JsonInstant.decodeFromString<VcpChatEmoticonLibrarySnapshot>(it)
+            }.getOrNull()
+        } ?: VcpChatEmoticonLibrarySnapshot()
+    }
+
+    suspend fun updateVcpChatEmoticonLibrary(snapshot: VcpChatEmoticonLibrarySnapshot) {
+        dataStore.edit { preferences ->
+            preferences[VCPCHAT_EMOTICON_LIBRARY] = JsonInstant.encodeToString(snapshot.copy(count = snapshot.items.size))
         }
     }
 
@@ -785,6 +802,7 @@ internal val DEFAULT_ASSISTANTS_IDS = DEFAULT_ASSISTANTS.map { it.id }
 val DEFAULT_MODE_INJECTIONS = listOf(
     PromptInjection.ModeInjection(
         id = UNIVCP_RENDERING_MODE_INJECTION_ID,
+        enabled = true,
         content = UNIVCP_RENDERING_PROMPT,
         position = InjectionPosition.AFTER_SYSTEM_PROMPT,
         priority = 100,

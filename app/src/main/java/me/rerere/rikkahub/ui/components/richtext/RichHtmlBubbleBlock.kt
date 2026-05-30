@@ -162,12 +162,16 @@ internal fun RichHtmlBubbleBlock(
         val compileOptions = remember(viewportWidthDp) {
             RichHtmlCompileOptions(viewportWidthDp = viewportWidthDp)
         }
-        val cachedModelAvailable = !transientCache &&
-            RichHtmlCompiler.getCached(
-                html = html,
-                options = compileOptions,
-                cacheMode = RichHtmlCompileCacheMode.Persistent,
-            ) != null
+        var cachedModelAvailable by remember(renderId, compileOptions, transientCache) {
+            mutableStateOf(
+                !transientCache &&
+                    RichHtmlCompiler.getCachedById(
+                        id = renderId,
+                        options = compileOptions,
+                        cacheMode = RichHtmlCompileCacheMode.Persistent,
+                    ) != null
+            )
+        }
         val beforeCompileDecision = remember(analysis) {
             RichHtmlSnapshotPolicy.beforeCompile(analysis)
         }
@@ -210,6 +214,18 @@ internal fun RichHtmlBubbleBlock(
         LaunchedEffect(renderId, nativeAdmission?.reason, nativeAdmission?.nativeAllowed) {
             if (nativeAdmission?.nativeAllowed == true && nativeAdmission.reason == "already-rendered") {
                 alreadyRendered = true
+            }
+        }
+        LaunchedEffect(renderId, compileOptions, transientCache, alreadyRendered) {
+            cachedModelAvailable = when {
+                transientCache -> false
+                alreadyRendered -> true
+                cachedModelAvailable -> true
+                else -> RichHtmlCompiler.getCachedById(
+                    id = renderId,
+                    options = compileOptions,
+                    cacheMode = RichHtmlCompileCacheMode.Persistent,
+                ) != null
             }
         }
         val orchestratorDecision = remember(
@@ -466,6 +482,9 @@ internal fun RichHtmlBubbleBlock(
             }
 
                     else -> {
+                        LaunchedEffect(model.id) {
+                            cachedModelAvailable = true
+                        }
                         val compiledPlan = remember(html, analysis, effectiveRisk, model, heightCacheState) {
                             buildRichRenderPlan(
                                 html = html,

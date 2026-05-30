@@ -84,6 +84,12 @@ internal object RichHtmlCompiler {
         cacheMode: RichHtmlCompileCacheMode = RichHtmlCompileCacheMode.Persistent,
     ): RichHtmlRenderModel? = cacheFor(cacheMode).get(cacheKey(html, options))
 
+    fun getCachedById(
+        id: String,
+        options: RichHtmlCompileOptions = RichHtmlCompileOptions(),
+        cacheMode: RichHtmlCompileCacheMode = RichHtmlCompileCacheMode.Persistent,
+    ): RichHtmlRenderModel? = cacheFor(cacheMode).get(cacheKeyFromId(id, options))
+
     fun compile(
         html: String,
         options: RichHtmlCompileOptions = RichHtmlCompileOptions(),
@@ -366,6 +372,11 @@ internal object RichHtmlCompiler {
         html: String,
         options: RichHtmlCompileOptions,
     ): String = "${renderTextCacheKey(html)}:$options"
+
+    private fun cacheKeyFromId(
+        id: String,
+        options: RichHtmlCompileOptions,
+    ): String = "$id:$options"
 
     private fun cacheFor(mode: RichHtmlCompileCacheMode): RenderLruCache<String, RichHtmlRenderModel> {
         return when (mode) {

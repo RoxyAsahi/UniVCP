@@ -61,4 +61,19 @@ class RichVcpMediaResolverTest {
 
         assertEquals(source, RichVcpMediaResolver.resolve(source, settings))
     }
+
+    @Test
+    fun `detects resolved vcp media urls`() {
+        assertTrue(
+            RichVcpMediaResolver.isVcpMediaUrl(
+                "http://vcp.example.test/pw=real-key/images/Nova表情包/启动.png"
+            )
+        )
+        assertTrue(
+            RichVcpMediaResolver.isVcpMediaUrl(
+                "http://192.168.6.162:6005/pw=real-key/images/Hornet表情包/傲娇嘀咕.png"
+            )
+        )
+    }
+
 }

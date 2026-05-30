@@ -46,28 +46,32 @@ fun ZoomableAsyncImage(
     val richMediaRequest = remember(resolvedModel, richMediaKind) {
         RichMediaRequest.fromSource(resolvedModel, kind = richMediaKind)
     }
-    val coilModel = if (enforceRichMediaSafety) {
-        RichMediaLoader.imageRequest(
-            context = context,
-            request = richMediaRequest,
-            placeholder = placeholder,
-            allowHardware = !export,
-        )
-    } else {
-        ImageRequest.Builder(context)
-            .data(resolvedModel)
-            .placeholder(placeholder)
-            .crossfade(false)
-            .allowHardware(!export)
-            .build()
+    val coilModel = remember(context, enforceRichMediaSafety, richMediaRequest, placeholder, export, resolvedModel) {
+        if (enforceRichMediaSafety) {
+            RichMediaLoader.imageRequest(
+                context = context,
+                request = richMediaRequest,
+                placeholder = placeholder,
+                allowHardware = !export,
+            )
+        } else {
+            ImageRequest.Builder(context)
+                .data(resolvedModel)
+                .placeholder(placeholder)
+                .crossfade(false)
+                .allowHardware(!export)
+                .build()
+        }
     }
     val canOpenPreview = zoomEnabled && resolvedModel != null && (!enforceRichMediaSafety || coilModel != null)
     var loading by remember { mutableStateOf(false) }
+    val vcpMedia = remember(resolvedModel) { RichVcpMediaResolver.isVcpMediaUrl(resolvedModel) }
+    val showLoadingEffect = loading && !vcpMedia
     AsyncImage(
         model = coilModel,
         contentDescription = contentDescription,
         modifier = modifier
-            .shimmer(isLoading = loading)
+            .shimmer(isLoading = showLoadingEffect)
             .then(
                 if (canOpenPreview) {
                     Modifier.clickable { showImageViewer = true }
@@ -79,13 +83,19 @@ fun ZoomableAsyncImage(
         alpha = alpha,
         alignment = alignment,
         onLoading = {
-            loading = true
+            if (!vcpMedia) {
+                loading = true
+            }
         },
         onSuccess = {
-            loading = false
+            if (!vcpMedia) {
+                loading = false
+            }
         },
         onError = {
-            loading = false
+            if (!vcpMedia) {
+                loading = false
+            }
         },
     )
     if (showImageViewer && resolvedModel != null) {

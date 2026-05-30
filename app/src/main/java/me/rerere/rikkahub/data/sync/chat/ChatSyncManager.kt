@@ -4,6 +4,7 @@ import android.util.Log
 import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -57,6 +58,7 @@ class ChatSyncManager(
     fun start() {
         if (settingsJob != null) return
         settingsJob = appScope.launch(Dispatchers.IO) {
+            loadCachedEmoticonLibrary()
             seedDebugConfigIfNeeded()
             settingsStore.settingsFlow
                 .map { it.chatSyncConfig }
@@ -83,6 +85,7 @@ class ChatSyncManager(
             currentSettings.copy(
                 chatSyncConfig = current.copy(
                     enabled = true,
+                    provider = ChatSyncProvider.FIREBASE_RTDB,
                     firebaseDatabaseUrl = databaseUrl,
                     firebaseAuthToken = BuildConfig.UNIVCP_CHAT_SYNC_FIREBASE_AUTH_TOKEN.trim(),
                     roomId = roomId,
@@ -106,7 +109,7 @@ class ChatSyncManager(
 
     suspend fun syncNow(direction: ChatSyncDirection = ChatSyncDirection.BOTH): ChatSyncRunResult {
         val config = settingsStore.settingsFlow.value.chatSyncConfig
-        val store = createStoreOrNull(config) ?: return ChatSyncRunResult(skippedReason = "Firebase is not configured")
+        val store = createStoreOrNull(config) ?: return ChatSyncRunResult(skippedReason = "${config.provider.displayName()} is not configured")
         val mode = config.mode
         val allowsPush = mode.allowsPush()
         val allowsPull = mode.allowsPull()
@@ -159,7 +162,7 @@ class ChatSyncManager(
             return ChatSyncRepairResult(skippedReason = "当前模式不允许拉取，无法修复")
         }
         val store = createStoreOrNull(config)
-            ?: return ChatSyncRepairResult(skippedReason = "Firebase is not configured")
+            ?: return ChatSyncRepairResult(skippedReason = "${config.provider.displayName()} is not configured")
 
         return withContext(Dispatchers.IO) {
             val result = store.pullChanges(ChatSyncCursor(updatedAfter = 0L))
@@ -178,9 +181,40 @@ class ChatSyncManager(
 
     suspend fun testConnection() {
         val config = settingsStore.settingsFlow.value.chatSyncConfig
-        val store = createStoreOrNull(config) ?: error("Firebase is not configured")
+        val store = createStoreOrNull(config) ?: error("${config.provider.displayName()} is not configured")
         withContext(Dispatchers.IO) {
+            if (store is VcpChatLanSyncRemoteStore) {
+                store.getDiagnostics()
+            }
             store.pullChanges(ChatSyncCursor(updatedAfter = Long.MAX_VALUE))
+        }
+    }
+
+    suspend fun listVcpChatLanTargets(): VcpChatLanTargetsResult {
+        val config = settingsStore.settingsFlow.value.chatSyncConfig
+        val store = createStoreOrNull(config) as? VcpChatLanSyncRemoteStore
+            ?: error("VCPChat LAN is not configured")
+        return withContext(Dispatchers.IO) {
+            store.listTargets()
+        }
+    }
+
+    suspend fun syncVcpChatEmoticonLibrary(regenerate: Boolean = false): VcpChatEmoticonLibrarySnapshot {
+        val config = settingsStore.settingsFlow.value.chatSyncConfig
+        val store = createStoreOrNull(config) as? VcpChatLanSyncRemoteStore
+            ?: error("VCPChat LAN is not configured")
+        return withContext(Dispatchers.IO) {
+            val snapshot = store.fetchEmoticonLibrary(regenerate = regenerate)
+            settingsStore.updateVcpChatEmoticonLibrary(snapshot)
+            VcpChatEmoticonLibraryRegistry.update(snapshot)
+            snapshot
+        }
+    }
+
+    private suspend fun loadCachedEmoticonLibrary() {
+        val snapshot = settingsStore.getVcpChatEmoticonLibrary()
+        if (snapshot.items.isNotEmpty()) {
+            VcpChatEmoticonLibraryRegistry.update(snapshot)
         }
     }
 
@@ -219,7 +253,7 @@ class ChatSyncManager(
                     provider = config.provider.name,
                     roomId = config.roomId,
                     deviceId = config.resolvedDeviceId(),
-                    lastError = "Firebase Realtime Database URL is empty",
+                    lastError = "${config.provider.displayName()} is not configured",
                 )
             }
             return
@@ -348,7 +382,12 @@ class ChatSyncManager(
             latestVcpChat == null -> ChatSyncPeerStatus.Unknown
             latestVcpChat.status == "offline" -> ChatSyncPeerStatus.Offline(latestVcpChat.deviceId, latestVcpChat.updatedAt)
             System.currentTimeMillis() - latestVcpChat.updatedAt <= VCPCHAT_PRESENCE_STALE_MS ->
-                ChatSyncPeerStatus.Online(latestVcpChat.deviceId, latestVcpChat.updatedAt, latestVcpChat.direction)
+                ChatSyncPeerStatus.Online(
+                    deviceId = latestVcpChat.deviceId,
+                    updatedAt = latestVcpChat.updatedAt,
+                    direction = latestVcpChat.direction,
+                    version = latestVcpChat.version,
+                )
 
             else -> ChatSyncPeerStatus.Offline(latestVcpChat.deviceId, latestVcpChat.updatedAt)
         }
@@ -594,18 +633,40 @@ class ChatSyncManager(
     }
 
     private fun createStoreOrNull(config: ChatSyncConfig): ChatSyncRemoteStore? {
-        if (!config.isFirebaseConfigured()) return null
-        return FirebaseRtdbChatSyncRemoteStore(
-            client = httpClient,
-            config = FirebaseRtdbChatSyncConfig(
-                databaseUrl = config.firebaseDatabaseUrl,
-                roomId = config.roomId.ifBlank { "default" },
-                deviceId = config.resolvedDeviceId(),
-                authToken = config.firebaseAuthToken.takeIf { it.isNotBlank() },
-                incrementalPull = config.incrementalPull,
-            ),
-            json = json,
-        )
+        return when (config.provider) {
+            ChatSyncProvider.FIREBASE_RTDB -> {
+                if (!config.isFirebaseConfigured()) return null
+                FirebaseRtdbChatSyncRemoteStore(
+                    client = httpClient,
+                    config = FirebaseRtdbChatSyncConfig(
+                        databaseUrl = config.firebaseDatabaseUrl,
+                        roomId = config.roomId.ifBlank { "default" },
+                        deviceId = config.resolvedDeviceId(),
+                        authToken = config.firebaseAuthToken.takeIf { it.isNotBlank() },
+                        incrementalPull = config.incrementalPull,
+                    ),
+                    json = json,
+                )
+            }
+
+            ChatSyncProvider.VCPCHAT_LAN -> {
+                if (!config.isVcpChatLanConfigured()) return null
+                VcpChatLanSyncRemoteStore(
+                    client = httpClient,
+                    config = VcpChatLanSyncConfig(
+                        baseUrl = config.vcpChatLanBaseUrl,
+                        authToken = config.vcpChatLanToken.takeIf { it.isNotBlank() },
+                        deviceId = config.resolvedDeviceId(),
+                        pollIntervalMs = config.vcpChatLanPollIntervalMs,
+                        realtimeEvents = config.vcpChatLanRealtimeEvents,
+                        targetItemType = config.vcpChatLanTargetItemType.ifBlank { "agent" },
+                        targetItemId = config.vcpChatLanTargetItemId.takeIf { it.isNotBlank() },
+                        targetTopicId = config.vcpChatLanTargetTopicId.takeIf { it.isNotBlank() },
+                    ),
+                    json = json,
+                )
+            }
+        }
     }
 
     private fun suppressLocalWrite(conversationId: String) {
@@ -620,6 +681,7 @@ class ChatSyncManager(
     }
 
     private fun recordError(scope: String, error: Throwable) {
+        if (error is CancellationException) return
         Log.e(TAG, "$scope failed", error)
         setState {
             it.copy(lastError = "[$scope] ${error.message ?: error::class.simpleName.orEmpty()}")
@@ -709,11 +771,25 @@ class ChatSyncManager(
 }
 
 private fun ChatSyncConfig.remoteCursorKey(): String {
-    return listOf(
-        provider.name,
-        firebaseDatabaseUrl.trim().trimEnd('/'),
-        roomId.ifBlank { "default" },
-    ).joinToString("|")
+    return when (provider) {
+        ChatSyncProvider.FIREBASE_RTDB -> listOf(
+            provider.name,
+            firebaseDatabaseUrl.trim().trimEnd('/'),
+            roomId.ifBlank { "default" },
+        )
+
+        ChatSyncProvider.VCPCHAT_LAN -> listOf(
+            provider.name,
+            vcpChatLanBaseUrl.trim().trimEnd('/'),
+        )
+    }.joinToString("|")
+}
+
+private fun ChatSyncProvider.displayName(): String {
+    return when (this) {
+        ChatSyncProvider.FIREBASE_RTDB -> "Firebase Realtime Database"
+        ChatSyncProvider.VCPCHAT_LAN -> "VCPChat LAN"
+    }
 }
 
 data class ChatSyncState(
@@ -737,6 +813,7 @@ sealed interface ChatSyncPeerStatus {
         val deviceId: String,
         val updatedAt: Long,
         val direction: String?,
+        val version: String? = null,
     ) : ChatSyncPeerStatus
 
     data class Offline(

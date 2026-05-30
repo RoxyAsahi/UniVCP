@@ -26,6 +26,8 @@ import me.rerere.rikkahub.data.sync.chat.ChatSyncDirection
 import me.rerere.rikkahub.data.sync.chat.ChatSyncManager
 import me.rerere.rikkahub.data.sync.chat.ChatSyncRepairResult
 import me.rerere.rikkahub.data.sync.chat.ChatSyncRunResult
+import me.rerere.rikkahub.data.sync.chat.VcpChatEmoticonLibrarySnapshot
+import me.rerere.rikkahub.data.sync.chat.VcpChatLanTargetsResult
 import me.rerere.rikkahub.utils.JsonInstant
 import me.rerere.rikkahub.utils.UiState
 import java.io.File
@@ -234,6 +236,14 @@ class BackupVM(
 
     suspend fun repairChatSync(): ChatSyncRepairResult {
         return chatSyncManager.repairNow()
+    }
+
+    suspend fun listChatSyncTargets(): VcpChatLanTargetsResult {
+        return chatSyncManager.listVcpChatLanTargets()
+    }
+
+    suspend fun syncVcpChatEmoticons(regenerate: Boolean = true): VcpChatEmoticonLibrarySnapshot {
+        return chatSyncManager.syncVcpChatEmoticonLibrary(regenerate = regenerate)
     }
 
     suspend fun restoreFromS3(item: S3BackupItem) {

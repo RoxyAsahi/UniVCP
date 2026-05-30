@@ -1,9 +1,12 @@
 package me.rerere.rikkahub.ui.components.richtext
 
 import android.content.Context
+import coil3.request.CachePolicy
 import coil3.request.ImageRequest
 import coil3.request.allowHardware
 import coil3.request.crossfade
+import coil3.request.error
+import coil3.request.fallback
 import coil3.request.placeholder
 import me.rerere.rikkahub.R
 import me.rerere.rikkahub.ui.components.message.RichHtmlRenderTelemetry
@@ -92,11 +95,25 @@ internal object RichMediaLoader {
         allowHardware: Boolean,
     ): ImageRequest? {
         val data = safeData(request) ?: return null
+        val vcpCacheKey = request.vcpCacheKey()
         return ImageRequest.Builder(context)
             .data(data)
             .placeholder(placeholder)
+            .error(placeholder)
+            .fallback(placeholder)
             .crossfade(false)
             .allowHardware(allowHardware)
+            .memoryCachePolicy(CachePolicy.ENABLED)
+            .diskCachePolicy(CachePolicy.ENABLED)
+            .apply {
+                if (vcpCacheKey != null) {
+                    memoryCacheKey(vcpCacheKey)
+                    diskCacheKey(vcpCacheKey)
+                    listener(
+                        onSuccess = { _, _ -> RichVcpMediaRequestGate.markSuccess(request) },
+                    )
+                }
+            }
             .build()
     }
 

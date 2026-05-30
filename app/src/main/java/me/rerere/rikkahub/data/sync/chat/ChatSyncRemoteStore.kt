@@ -47,6 +47,7 @@ data class ChatSyncPeerPresence(
     val status: String = "online",
     val updatedAt: Long = 0L,
     val direction: String? = null,
+    val version: String? = null,
 )
 
 @Serializable

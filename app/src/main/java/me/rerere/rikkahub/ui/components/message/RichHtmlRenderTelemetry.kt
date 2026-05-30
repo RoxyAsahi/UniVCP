@@ -420,6 +420,8 @@ internal object RichHtmlRenderTelemetry {
         oversizedRejected: Boolean = false,
     ) {
         if (!BuildConfig.DEBUG) return
+        val signature = listOf(kind, safety, outcome, cacheState, oversizedRejected).hashCode()
+        if (!shouldRecordSignature("media-request", id, signature)) return
         safeLog {
             Log.d(
                 TAG,
@@ -728,6 +730,8 @@ internal object RichHtmlRenderTelemetry {
         fastScrolling: Boolean,
     ) {
         if (!BuildConfig.DEBUG) return
+        val signature = listOf(allowed, reason, cellIndex, riskScore).hashCode()
+        if (!shouldRecordSignature("native-admission", id, signature)) return
         safeLog {
             Log.d(
                 TAG,
