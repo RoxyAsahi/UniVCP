@@ -7,6 +7,16 @@ import org.junit.Test
 
 class DefaultSettingsTest {
     @Test
+    fun `built in rikka provider keeps original name`() {
+        val provider = DEFAULT_PROVIDERS.firstOrNull {
+            it.id.toString() == "a8d2d463-e8c0-41f2-b89e-f5eb8e716cce"
+        }
+
+        assertNotNull(provider)
+        assertEquals("Rikka", provider!!.name)
+    }
+
+    @Test
     fun `univcp visual bubble is enabled by default`() {
         val injection = DEFAULT_MODE_INJECTIONS.firstOrNull {
             it.id == UNIVCP_RENDERING_MODE_INJECTION_ID
