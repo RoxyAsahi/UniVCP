@@ -4,6 +4,7 @@ import me.rerere.rikkahub.ui.components.richtext.RichHtmlRenderModel
 import me.rerere.rikkahub.ui.components.richtext.RichHtmlCompiler
 import me.rerere.rikkahub.ui.components.richtext.RichUnsupportedReason
 import me.rerere.rikkahub.ui.components.richtext.RichVisualHint
+import me.rerere.rikkahub.ui.components.richtext.richInitialSnapshotDecision
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -141,6 +142,71 @@ class RichHtmlSnapshotPolicyTest {
         assertEquals(1, model.animationStats.snapshotCandidateCount)
         assertEquals(RichHtmlSnapshotRoute.Snapshot, decision.route)
         assertEquals("AnimationSnapshotCandidate", decision.reason)
+    }
+
+    @Test
+    fun `initial snapshot decision uses cached compiled animation policy`() {
+        val analysis = RichHtmlAnalysis(
+            kind = RichHtmlRenderKind.NativeStatic,
+            previewText = "nova",
+            nativeConfidence = NativeConfidence.Medium,
+        )
+        val model = RichHtmlCompiler.compile(
+            """
+                <div id="response-root">
+                  <style>
+                    @keyframes grow {
+                      from { width: 60px; }
+                      to { width: 120px; }
+                    }
+                  </style>
+                  <div style="width:60px;height:60px;border-radius:50%;animation:grow 2s infinite;">
+                    Nova
+                  </div>
+                </div>
+            """.trimIndent(),
+        )
+
+        assertEquals(RichHtmlSnapshotRoute.Native, RichHtmlSnapshotPolicy.beforeCompile(analysis).route)
+
+        val decision = richInitialSnapshotDecision(analysis, model)
+
+        assertEquals(1, model.animationStats.snapshotCandidateCount)
+        assertEquals(RichHtmlSnapshotRoute.Snapshot, decision.route)
+        assertEquals("AnimationSnapshotCandidate", decision.reason)
+    }
+
+    @Test
+    fun `decorative unsupported animations stay native after staticization`() {
+        val analysis = RichHtmlAnalysis(
+            kind = RichHtmlRenderKind.NativeStatic,
+            previewText = "pulse",
+            nativeConfidence = NativeConfidence.Medium,
+        )
+        val model = RichHtmlCompiler.compile(
+            """
+                <div id="response-root">
+                  <style>
+                    @keyframes pulse {
+                      0% { box-shadow: 0 0 5px rgba(0,242,255,0.5); }
+                      50% { box-shadow: 0 0 20px rgba(0,242,255,0.8); }
+                      100% { box-shadow: 0 0 5px rgba(0,242,255,0.5); }
+                    }
+                  </style>
+                  <div style="width:60px;height:60px;border-radius:50%;animation:pulse 2s infinite;">
+                    Nova
+                  </div>
+                </div>
+            """.trimIndent(),
+        )
+
+        val decision = RichHtmlSnapshotPolicy.afterCompile(analysis, model)
+
+        assertEquals(1, model.animationStats.snapshotCandidateCount)
+        assertEquals(1, model.animationStats.unsupportedPropertyCount)
+        assertEquals(0, model.animationStats.layoutAnimationCount)
+        assertEquals(0, model.animationStats.dependentVisibilityCount)
+        assertEquals(RichHtmlSnapshotRoute.Native, decision.route)
     }
 
     @Test

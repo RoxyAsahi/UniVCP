@@ -394,7 +394,6 @@ class GenerationHandler(
                     !vcpInterruptRequestId.isNullOrBlank()
                 ) {
                     add(CustomBody("requestId", JsonPrimitive(vcpInterruptRequestId)))
-                    add(CustomBody("messageId", JsonPrimitive(vcpInterruptRequestId)))
                 }
             }
         )

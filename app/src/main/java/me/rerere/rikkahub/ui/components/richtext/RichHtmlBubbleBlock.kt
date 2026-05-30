@@ -41,6 +41,7 @@ import me.rerere.rikkahub.ui.components.message.RichHtmlSanitizer
 import me.rerere.rikkahub.ui.components.message.RichRenderHeightCacheState
 import me.rerere.rikkahub.ui.components.message.RichRenderPlan
 import me.rerere.rikkahub.ui.components.message.RichRenderPlanRoute
+import me.rerere.rikkahub.ui.components.message.RichHtmlSnapshotDecision
 import me.rerere.rikkahub.ui.components.message.RichHtmlSnapshotPolicy
 import me.rerere.rikkahub.ui.components.message.RichHtmlSnapshotRoute
 import me.rerere.rikkahub.ui.components.message.RichHtmlSafetyReason
@@ -128,13 +129,46 @@ internal fun RichHtmlBubbleBlock(
                 else -> RichRenderHeightCacheState.Miss
             }
         }
-        val baseRenderPlan = remember(renderPlan, html, analysis, effectiveRisk, heightCacheState) {
-            (renderPlan ?: buildRichRenderPlan(
+        val compileOptions = remember(viewportWidthDp) {
+            RichHtmlCompileOptions(viewportWidthDp = viewportWidthDp)
+        }
+        val cachedCompiledModel = remember(renderId, compileOptions, transientCache) {
+            if (transientCache) {
+                null
+            } else {
+                RichHtmlCompiler.getCachedById(
+                    id = renderId,
+                    options = compileOptions,
+                    cacheMode = RichHtmlCompileCacheMode.Persistent,
+                )
+            }
+        }
+        val cachedInitialSnapshotDecision = remember(analysis, cachedCompiledModel) {
+            richInitialSnapshotDecision(analysis, cachedCompiledModel)
+        }
+        var initialSnapshotDecision by remember(renderId) {
+            mutableStateOf(cachedInitialSnapshotDecision)
+        }
+        LaunchedEffect(renderId, cachedInitialSnapshotDecision) {
+            initialSnapshotDecision = cachedInitialSnapshotDecision
+        }
+        val baseRenderPlan = remember(
+            renderPlan,
+            html,
+            analysis,
+            effectiveRisk,
+            cachedCompiledModel,
+            initialSnapshotDecision,
+            heightCacheState,
+        ) {
+            val plan = (renderPlan ?: buildRichRenderPlan(
                 html = html,
                 analysis = analysis,
                 risk = effectiveRisk,
+                model = cachedCompiledModel,
                 includeStructuralReport = false,
             )).copy(heightCache = heightCacheState)
+            plan.withInitialSnapshotDecision(initialSnapshotDecision)
         }
         LaunchedEffect(renderId, heightContentType, cachedHeightEntry) {
             RichHtmlRenderTelemetry.recordHeightCache(
@@ -159,21 +193,8 @@ internal fun RichHtmlBubbleBlock(
         }
         val scrollState = LocalRichRenderScrollState.current
         val mainHandler = remember { Handler(Looper.getMainLooper()) }
-        val compileOptions = remember(viewportWidthDp) {
-            RichHtmlCompileOptions(viewportWidthDp = viewportWidthDp)
-        }
         var cachedModelAvailable by remember(renderId, compileOptions, transientCache) {
-            mutableStateOf(
-                !transientCache &&
-                    RichHtmlCompiler.getCachedById(
-                        id = renderId,
-                        options = compileOptions,
-                        cacheMode = RichHtmlCompileCacheMode.Persistent,
-                    ) != null
-            )
-        }
-        val beforeCompileDecision = remember(analysis) {
-            RichHtmlSnapshotPolicy.beforeCompile(analysis)
+            mutableStateOf(cachedCompiledModel != null)
         }
         var alreadyRendered by remember(renderId) {
             mutableStateOf(RichHtmlRenderScheduler.hasRendered(renderId))
@@ -183,7 +204,7 @@ internal fun RichHtmlBubbleBlock(
             effectiveRisk.route != RichContentRoute.Snapshot &&
             effectiveRisk.route != RichContentRoute.DynamicPreview &&
             analysis.kind != RichHtmlRenderKind.ComplexDynamic &&
-            beforeCompileDecision.route == RichHtmlSnapshotRoute.Native
+            initialSnapshotDecision.route == RichHtmlSnapshotRoute.Native
         val nativeAdmission = remember(
             renderId,
             analysis,
@@ -482,8 +503,14 @@ internal fun RichHtmlBubbleBlock(
             }
 
                     else -> {
+                        val compiledInitialSnapshotDecision = remember(analysis, model) {
+                            richInitialSnapshotDecision(analysis, model)
+                        }
                         LaunchedEffect(model.id) {
                             cachedModelAvailable = true
+                            if (compiledInitialSnapshotDecision.route != RichHtmlSnapshotRoute.Native) {
+                                initialSnapshotDecision = compiledInitialSnapshotDecision
+                            }
                         }
                         val compiledPlan = remember(html, analysis, effectiveRisk, model, heightCacheState) {
                             buildRichRenderPlan(
@@ -1210,6 +1237,45 @@ private fun RichHtmlSafetyReason?.isDangerousForSnapshot(): Boolean {
         RichHtmlSafetyReason.UnsafeUrl,
         RichHtmlSafetyReason.ParseFailure,
     )
+}
+
+internal fun richInitialSnapshotDecision(
+    analysis: RichHtmlAnalysis,
+    cachedModel: RichHtmlRenderModel?,
+): RichHtmlSnapshotDecision {
+    return cachedModel?.let { RichHtmlSnapshotPolicy.afterCompile(analysis, it) }
+        ?: RichHtmlSnapshotPolicy.beforeCompile(analysis)
+}
+
+private fun RichRenderPlan.withInitialSnapshotDecision(
+    decision: RichHtmlSnapshotDecision,
+): RichRenderPlan = when (decision.route) {
+    RichHtmlSnapshotRoute.Native -> this
+    RichHtmlSnapshotRoute.Snapshot -> if (route == RichRenderPlanRoute.Snapshot) {
+        this
+    } else {
+        withRoute(
+            route = RichRenderPlanRoute.Snapshot,
+            reason = decision.reason.toInitialSnapshotReason(decision.route),
+        )
+    }
+
+    RichHtmlSnapshotRoute.DynamicPreview -> if (route == RichRenderPlanRoute.DynamicPreview) {
+        this
+    } else {
+        withRoute(
+            route = RichRenderPlanRoute.DynamicPreview,
+            reason = decision.reason.toInitialSnapshotReason(decision.route),
+        )
+    }
+}
+
+private fun String.toInitialSnapshotReason(route: RichHtmlSnapshotRoute): String {
+    return if (isBlank()) {
+        "AfterCompile:${route.name}"
+    } else {
+        "AfterCompile:$this"
+    }
 }
 
 private fun RichHtmlSnapshotRoute.toRichRenderPlanRoute(): RichRenderPlanRoute = when (this) {

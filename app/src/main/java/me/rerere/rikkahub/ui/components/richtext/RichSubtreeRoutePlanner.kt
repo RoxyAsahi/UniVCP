@@ -211,7 +211,7 @@ internal object RichSubtreeRoutePlanner {
 
     private fun shouldWholeSnapshot(model: RichHtmlRenderModel): Boolean {
         if (model.unsupported.isNotEmpty()) return true
-        if (model.animationStats.snapshotCandidateCount > 0) return true
+        if (model.animationStats.requiresWholeSnapshot()) return true
         return model.visualHints.any { it in wholeSnapshotHints }
     }
 
@@ -359,4 +359,10 @@ internal object RichSubtreeRoutePlanner {
         "Unsupported" -> RichSnapshotIslandRejectReason.SafetyRejected
         else -> RichSnapshotIslandRejectReason.ParentLayoutTooDependent
     }
+}
+
+private fun RichAnimationStats.requiresWholeSnapshot(): Boolean {
+    return layoutAnimationCount > 0 ||
+        dependentVisibilityCount > 0 ||
+        budgetExceededCount > 0
 }

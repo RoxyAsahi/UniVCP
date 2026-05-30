@@ -1,6 +1,7 @@
 package me.rerere.rikkahub.ui.components.message
 
 import me.rerere.rikkahub.ui.components.richtext.RichHtmlRenderModel
+import me.rerere.rikkahub.ui.components.richtext.RichAnimationStats
 import me.rerere.rikkahub.ui.components.richtext.RichUnsupportedReason
 import me.rerere.rikkahub.ui.components.richtext.RichVisualHint
 
@@ -67,7 +68,7 @@ internal object RichHtmlSnapshotPolicy {
             return RichHtmlSnapshotDecision(RichHtmlSnapshotRoute.Snapshot, "Unsupported:${it.name}")
         }
         if (analysis.kind == RichHtmlRenderKind.NativeStatic) {
-            if (model.animationStats.snapshotCandidateCount > 0) {
+            if (model.animationStats.requiresWholeSnapshot()) {
                 if (snapshotIslandsAvoidWholeSnapshot) {
                     return RichHtmlSnapshotDecision(RichHtmlSnapshotRoute.Native, "SnapshotIslandsAvoidedWholeSnapshot")
                 }
@@ -90,4 +91,10 @@ internal object RichHtmlSnapshotPolicy {
             RichHtmlSnapshotDecision(RichHtmlSnapshotRoute.Snapshot, "NativeFailure")
         }
     }
+}
+
+private fun RichAnimationStats.requiresWholeSnapshot(): Boolean {
+    return layoutAnimationCount > 0 ||
+        dependentVisibilityCount > 0 ||
+        budgetExceededCount > 0
 }

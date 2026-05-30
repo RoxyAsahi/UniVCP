@@ -14,38 +14,48 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.random.Random
 import kotlin.uuid.Uuid
 
 private const val TAG = "VcpInterruptManager"
+private const val VCP_MESSAGE_ID_SUFFIX_LENGTH = 7
+private const val VCP_MESSAGE_ID_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789"
 
 class VcpInterruptManager(
     private val client: OkHttpClient,
     private val json: Json,
 ) {
     private data class ActiveRequest(
-        val requestId: String,
+        val messageId: String,
         val provider: ProviderSetting.OpenAI,
     )
 
     private val activeRequests = ConcurrentHashMap<Uuid, ActiveRequest>()
 
-    fun newRequestId(): String = Uuid.random().toString()
+    fun newRequestId(): String {
+        val suffix = buildString {
+            repeat(VCP_MESSAGE_ID_SUFFIX_LENGTH) {
+                append(VCP_MESSAGE_ID_CHARS[Random.nextInt(VCP_MESSAGE_ID_CHARS.length)])
+            }
+        }
+        return "msg_${System.currentTimeMillis()}_assistant_$suffix"
+    }
 
     fun register(
         conversationId: Uuid,
-        requestId: String,
+        messageId: String,
         provider: ProviderSetting,
     ) {
         if (provider is ProviderSetting.OpenAI && provider.enableVcpInterrupt && !provider.useResponseApi) {
-            activeRequests[conversationId] = ActiveRequest(requestId, provider)
+            activeRequests[conversationId] = ActiveRequest(messageId, provider)
         } else {
             activeRequests.remove(conversationId)
         }
     }
 
-    fun unregister(conversationId: Uuid, requestId: String) {
+    fun unregister(conversationId: Uuid, messageId: String) {
         activeRequests.computeIfPresent(conversationId) { _, active ->
-            active.takeUnless { it.requestId == requestId }
+            active.takeUnless { it.messageId == messageId }
         }
     }
 
@@ -56,12 +66,7 @@ class VcpInterruptManager(
 
     private suspend fun sendInterrupt(active: ActiveRequest): Boolean = withContext(Dispatchers.IO) {
         val interruptUrl = buildInterruptUrl(active.provider) ?: return@withContext false
-        val body = json.encodeToString(
-            buildJsonObject {
-                put("messageId", active.requestId)
-                put("requestId", active.requestId)
-            }
-        )
+        val body = buildInterruptBody(active.messageId)
         val request = Request.Builder()
             .url(interruptUrl)
             .addHeader("Authorization", "Bearer ${active.provider.apiKey}")
@@ -82,6 +87,12 @@ class VcpInterruptManager(
             false
         }
     }
+
+    internal fun buildInterruptBody(messageId: String): String = json.encodeToString(
+        buildJsonObject {
+            put("requestId", messageId)
+        }
+    )
 
     internal fun buildInterruptUrl(provider: ProviderSetting.OpenAI): HttpUrl? {
         if (provider.useResponseApi) return null

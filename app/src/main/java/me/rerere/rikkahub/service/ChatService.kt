@@ -11,7 +11,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -481,7 +480,7 @@ class ChatService(
         val vcpInterruptRequestId = vcpInterruptManager.newRequestId()
         vcpInterruptManager.register(
             conversationId = conversationId,
-            requestId = vcpInterruptRequestId,
+            messageId = vcpInterruptRequestId,
             provider = provider,
         )
 
@@ -1293,15 +1292,17 @@ class ChatService(
     // 停止当前会话生成任务（不清理会话缓存）
     suspend fun stopGeneration(conversationId: Uuid) {
         val job = sessions[conversationId]?.getJob() ?: return
-        coroutineScope {
-            val interruptAttempt = async(start = CoroutineStart.UNDISPATCHED) {
-                withTimeoutOrNull(1_500L) {
-                    vcpInterruptManager.interrupt(conversationId)
-                }
+        val interrupted = withTimeoutOrNull(1_500L) {
+            vcpInterruptManager.interrupt(conversationId)
+        } == true
+        if (interrupted) {
+            withTimeoutOrNull(2_000L) {
+                job.join()
             }
+        }
+        if (job.isActive) {
             job.cancel()
             runCatching { job.join() }
-            interruptAttempt.await()
         }
 
         val currentConversation = getConversationFlow(conversationId).value
