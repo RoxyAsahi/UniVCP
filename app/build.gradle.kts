@@ -49,8 +49,8 @@ android {
         applicationId = "com.univcp.android"
         minSdk = 26
         targetSdk = 37
-        versionCode = 158
-        versionName = "2.2.2"
+        versionCode = 163
+        versionName = "2.2.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
