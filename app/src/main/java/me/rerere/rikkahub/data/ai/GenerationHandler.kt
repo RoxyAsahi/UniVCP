@@ -76,6 +76,7 @@ class GenerationHandler(
         tools: List<Tool> = emptyList(),
         maxSteps: Int = 256,
         processingStatus: MutableStateFlow<String?> = MutableStateFlow(null),
+        vcpInterruptRequestId: String? = null,
     ): Flow<GenerationChunk> = flow {
         val provider = model.findProvider(settings.providers) ?: error("Provider not found")
         val providerImpl = providerManager.getProviderByType(provider)
@@ -150,6 +151,7 @@ class GenerationHandler(
                     memories = memories ?: emptyList(),
                     stream = assistant.streamOutput,
                     processingStatus = processingStatus,
+                    vcpInterruptRequestId = vcpInterruptRequestId,
                 )
                 messages = messages.visualTransforms(
                     transformers = outputTransformers,
@@ -335,6 +337,7 @@ class GenerationHandler(
         memories: List<AssistantMemory>,
         stream: Boolean,
         processingStatus: MutableStateFlow<String?> = MutableStateFlow(null),
+        vcpInterruptRequestId: String? = null,
     ) {
         val internalMessages = buildList {
             val system = buildString {
@@ -385,6 +388,14 @@ class GenerationHandler(
             customBody = buildList {
                 addAll(assistant.customBodies)
                 addAll(model.customBodies)
+                if (provider is ProviderSetting.OpenAI &&
+                    provider.enableVcpInterrupt &&
+                    !provider.useResponseApi &&
+                    !vcpInterruptRequestId.isNullOrBlank()
+                ) {
+                    add(CustomBody("requestId", JsonPrimitive(vcpInterruptRequestId)))
+                    add(CustomBody("messageId", JsonPrimitive(vcpInterruptRequestId)))
+                }
             }
         )
         if (stream) {

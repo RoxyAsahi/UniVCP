@@ -11,6 +11,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -31,6 +32,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.jsonObject
 import me.rerere.ai.core.MessageRole
 import me.rerere.ai.core.ReasoningLevel
@@ -53,6 +55,7 @@ import me.rerere.rikkahub.R
 import me.rerere.rikkahub.RouteActivity
 import me.rerere.rikkahub.data.ai.GenerationChunk
 import me.rerere.rikkahub.data.ai.GenerationHandler
+import me.rerere.rikkahub.data.ai.VcpInterruptManager
 import me.rerere.rikkahub.data.ai.mcp.McpManager
 import me.rerere.rikkahub.data.ai.tools.LocalTools
 import me.rerere.rikkahub.data.ai.tools.createSearchTools
@@ -137,6 +140,7 @@ class ChatService(
     val mcpManager: McpManager,
     private val filesManager: FilesManager,
     private val skillManager: SkillManager,
+    private val vcpInterruptManager: VcpInterruptManager,
 ) {
     // 统一会话管理
     private val sessions = ConcurrentHashMap<Uuid, ConversationSession>()
@@ -473,6 +477,13 @@ class ChatService(
         val assistant = settings.getAssistantById(initialConversation.assistantId)
             ?: settings.getCurrentAssistant()
         val model = settings.findModelById(assistant.chatModelId ?: settings.chatModelId) ?: return
+        val provider = model.findProvider(settings.providers) ?: return
+        val vcpInterruptRequestId = vcpInterruptManager.newRequestId()
+        vcpInterruptManager.register(
+            conversationId = conversationId,
+            requestId = vcpInterruptRequestId,
+            provider = provider,
+        )
 
         val senderName = if (assistant.useAssistantAvatar) {
             assistant.name.ifEmpty { context.getString(R.string.assistant_page_default_assistant) }
@@ -524,6 +535,7 @@ class ChatService(
                     add(templateTransformer)
                 },
                 outputTransformers = outputTransformers,
+                vcpInterruptRequestId = vcpInterruptRequestId,
                 tools = buildList {
                     if (settings.enableWebSearch) {
                         addAll(createSearchTools(settings))
@@ -553,6 +565,8 @@ class ChatService(
                     }
                 },
             ).onCompletion {
+                vcpInterruptManager.unregister(conversationId, vcpInterruptRequestId)
+
                 // 取消 Live Update 通知
                 cancelLiveUpdateNotification(conversationId)
 
@@ -584,6 +598,13 @@ class ChatService(
                 }
             }
         }.onFailure {
+            vcpInterruptManager.unregister(conversationId, vcpInterruptRequestId)
+
+            if (it is CancellationException) {
+                Logging.log(TAG, "handleMessageComplete: generation cancelled")
+                return@onFailure
+            }
+
             // 取消 Live Update 通知
             cancelLiveUpdateNotification(conversationId)
 
@@ -1272,8 +1293,16 @@ class ChatService(
     // 停止当前会话生成任务（不清理会话缓存）
     suspend fun stopGeneration(conversationId: Uuid) {
         val job = sessions[conversationId]?.getJob() ?: return
-        job.cancel()
-        runCatching { job.join() }
+        coroutineScope {
+            val interruptAttempt = async(start = CoroutineStart.UNDISPATCHED) {
+                withTimeoutOrNull(1_500L) {
+                    vcpInterruptManager.interrupt(conversationId)
+                }
+            }
+            job.cancel()
+            runCatching { job.join() }
+            interruptAttempt.await()
+        }
 
         val currentConversation = getConversationFlow(conversationId).value
         val lastNode = currentConversation.messageNodes.lastOrNull() ?: return

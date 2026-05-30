@@ -320,7 +320,7 @@ private fun ColumnScope.ProviderConfigureOpenAI(
         Checkbox(
             checked = provider.useResponseApi,
             onCheckedChange = {
-                onEdit(provider.copy(useResponseApi = it))
+                onEdit(provider.copy(useResponseApi = it, enableVcpInterrupt = if (it) false else provider.enableVcpInterrupt))
 
                 if (it && provider.baseUrl.toHttpUrlOrNull()?.host != "api.openai.com") {
                     toaster.show(
@@ -329,6 +329,19 @@ private fun ColumnScope.ProviderConfigureOpenAI(
                     )
                 }
             }
+        )
+    }
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("VCP Interrupt (/v1/interrupt)", modifier = Modifier.weight(1f))
+        Checkbox(
+            checked = provider.enableVcpInterrupt && !provider.useResponseApi,
+            onCheckedChange = {
+                onEdit(provider.copy(enableVcpInterrupt = it, useResponseApi = if (it) false else provider.useResponseApi))
+            },
+            enabled = !provider.useResponseApi
         )
     }
 }

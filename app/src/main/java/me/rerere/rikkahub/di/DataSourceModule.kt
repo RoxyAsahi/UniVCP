@@ -18,6 +18,7 @@ import me.rerere.rikkahub.data.ai.AIRequestInterceptor
 import me.rerere.rikkahub.data.ai.RequestLoggingInterceptor
 import me.rerere.rikkahub.data.ai.transformers.AssistantTemplateLoader
 import me.rerere.rikkahub.data.ai.GenerationHandler
+import me.rerere.rikkahub.data.ai.VcpInterruptManager
 import me.rerere.rikkahub.data.ai.transformers.TemplateTransformer
 import me.rerere.rikkahub.data.api.RikkaHubAPI
 import me.rerere.rikkahub.data.api.SponsorAPI
@@ -203,6 +204,13 @@ val dataSourceModule = module {
                 level = HttpLoggingInterceptor.Level.HEADERS
             })
             .build().also { SearchService.init(it, get()) }
+    }
+
+    single {
+        VcpInterruptManager(
+            client = get(),
+            json = get(),
+        )
     }
 
     single {
